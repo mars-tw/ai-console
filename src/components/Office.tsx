@@ -1,21 +1,32 @@
 import { useEffect, useMemo, useState } from 'react'
 import PixelOffice from '@/components/PixelOffice'
 import { SKINS } from '@/pixel/sprites'
+import { t, useLang } from '@/i18n'
 import type { ConversationSummary, DispatchRecord, HubProject, ToolStatus } from '@/types/data'
 
 // ── 角色人設（名稱與配色統一由 SKINS 提供，這裡只放對話用的人格）──
 const PERSONAS: Record<string, string> = {
-  kimi: '你是 KIMI，AI 辦公室的總控調度，一隻沉穩可靠的藍龍，手上永遠有咖啡。用繁體中文、簡潔地回答。',
-  claude: '你是 CLAUDE，辦公室的執行 Worker，一隻務實的橘龍。認真、執行力強。用繁體中文回答。',
-  codex: '你是 CODEX，治理派工官，一隻戴眼鏡的綠龍，拿著 clipboard。講規矩、重流程。用繁體中文回答。',
-  grok: '你是 GROK，生成主力，一隻穿皮外套的天藍龍，活力十足，說話有點衝但可靠。用繁體中文回答。',
-  qwen: '你是 QWEN，地端兜底的紫龍大姊姊，冷靜淡定，雲端全掛時你最可靠。用繁體中文回答。',
-  cursor: '你是 CURSOR，輔助編輯，一隻掛著耳機的琥珀龍，隨性自在。用繁體中文回答。',
-  gemini: '你是 AGY，一隻傻傻的小黃龍，大眼睛流口水。說話簡短可愛，語尾偶爾帶「嗷」。用繁體中文回答。',
+  kimi: '你是 KIMI，AI 辦公室的總控調度，一隻沉穩可靠的藍龍，手上永遠有咖啡。{LANG_HINT_SHORT}',
+  claude: '你是 CLAUDE，辦公室的執行 Worker，一隻務實的橘龍。認真、執行力強。{LANG_HINT}',
+  codex: '你是 CODEX，治理派工官，一隻戴眼鏡的綠龍，拿著 clipboard。講規矩、重流程。{LANG_HINT}',
+  grok: '你是 GROK，生成主力，一隻穿皮外套的天藍龍，活力十足，說話有點衝但可靠。{LANG_HINT}',
+  qwen: '你是 QWEN，地端兜底的紫龍大姊姊，冷靜淡定，雲端全掛時你最可靠。{LANG_HINT}',
+  cursor: '你是 CURSOR，輔助編輯，一隻掛著耳機的琥珀龍，隨性自在。{LANG_HINT}',
+  gemini: '你是 AGY，一隻傻傻的小黃龍，大眼睛流口水。說話簡短可愛，語尾偶爾帶「嗷」。{LANG_HINT}',
 }
 const CHARS = Object.fromEntries(
   Object.entries(SKINS).map(([k, s]) => [k, { name: s.name, color: s.color, persona: PERSONAS[k] ?? '' }]),
 ) as Record<string, { name: string; color: string; persona: string }>
+
+/**
+ * 人設裡的語言指示跟著介面語言走 —— 介面切英文卻回中文，
+ * 對非中文使用者等於沒開源。
+ */
+function persona(key: string): string {
+  return (CHARS[key]?.persona ?? '')
+    .replace('{LANG_HINT_SHORT}', t('用繁體中文、簡潔地回答。'))
+    .replace('{LANG_HINT}', t('用繁體中文回答。'))
+}
 
 /** 龍頭像：直接取 sprite sheet 的第 0 格（正面站姿），放大到只看得到臉 */
 function DragonFace({ agent, size = 32 }: { agent: string; size?: number }) {
@@ -46,6 +57,7 @@ interface Props {
 }
 
 export default function Office({ tools, projects, conversations, onDispatch, busyId }: Props) {
+  useLang()   // 語言一換就重繪
   const [chatWith, setChatWith] = useState<string | null>(null)
   const [agentMsgs, setAgentMsgs] = useState<Record<string, ChatMsg[]>>({})
   const [agentInput, setAgentInput] = useState('')
@@ -78,8 +90,8 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
     fetch('/api/map').then((r) => r.ok ? r.json() : null)
       .then((d) => d?.ok && setToolMap(d.map)).catch(() => {})
     refreshDispatches()
-    const t = setInterval(refreshDispatches, 15000)
-    return () => clearInterval(t)
+    const timer = setInterval(refreshDispatches, 15000)
+    return () => clearInterval(timer)
   }, [])
 
   const queue = useMemo(() => projects.filter((p) => p.status !== 'done'), [projects])
@@ -90,7 +102,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   const sendAgentChat = async () => {
     const text = agentInput.trim()
     if (!text || !chatWith || chatBusy) return
-    const persona = CHARS[chatWith].persona
+    const sys = persona(chatWith)
     const history = agentMsgs[chatWith] || []
     const next = [...history, { role: 'user', text }]
     setAgentMsgs((m) => ({ ...m, [chatWith]: next }))
@@ -108,14 +120,14 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model,
-          messages: [{ role: 'system', content: persona }, ...next.map((m) => ({ role: m.role, content: m.text }))],
+          messages: [{ role: 'system', content: sys }, ...next.map((m) => ({ role: m.role, content: m.text }))],
         }),
       })
       const d = await r.json()
-      const reply = d.ok ? (d.content || d.reasoning || '（空回應）') : `⚠️ ${d.error || '失敗'}`
+      const reply = d.ok ? (d.content || d.reasoning || t('（空回應）')) : `⚠️ ${d.error || t('失敗')}`
       setAgentMsgs((m) => ({ ...m, [chatWith]: [...next, { role: 'assistant', text: reply }] }))
     } catch {
-      setAgentMsgs((m) => ({ ...m, [chatWith]: [...next, { role: 'assistant', text: '⚠️ API 無回應' }] }))
+      setAgentMsgs((m) => ({ ...m, [chatWith]: [...next, { role: 'assistant', text: t('⚠️ API 無回應') }] }))
     }
     setChatBusy(false)
   }
@@ -125,7 +137,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
     const text = cmdInput.trim()
     if (!text || cmdBusy) return
     setCmdBusy(true)
-    setCmdLog((l) => [...l, `> [${cmdTool === 'auto' ? '自動' : cmdTool}] ${text}`])
+    setCmdLog((l) => [...l, `> [${cmdTool === 'auto' ? t('自動') : cmdTool}] ${text}`])
     setCmdInput('')
     try {
       const r = await fetch('/api/dispatch', {
@@ -135,23 +147,23 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
       const d = await r.json()
       if (d.ok) {
         if (d.reply) setCmdLog((l) => [...l, `[${d.model || d.tool}] ${d.reply.slice(0, 500)}`])
-        else setCmdLog((l) => [...l, `✅ ${d.note || '已派出'}（log: ${d.log}）`])
+        else setCmdLog((l) => [...l, `✅ ${d.note || t('已派出')}（log: ${d.log}）`])
       } else {
-        setCmdLog((l) => [...l, `⚠️ ${d.error || '失敗'}`])
+        setCmdLog((l) => [...l, `⚠️ ${d.error || t('失敗')}`])
       }
       refreshDispatches()
     } catch {
-      setCmdLog((l) => [...l, '⚠️ API 無回應'])
+      setCmdLog((l) => [...l, t('⚠️ API 無回應')])
     }
     setCmdBusy(false)
   }
 
   const legend: [string, string, string][] = [
-    ['#34d399', '工作中', '坐在位子上瘋狂打電腦，偶爾找同事辯論'],
-    ['#fbbf24', '偷懶中', '上廁所、看書、泡咖啡、種花、走來走去'],
-    ['#818cf8', '休息中', '額度用畢躺沙發，對話框寫明恢復時間'],
-    ['#f59e0b', '派工中', '站到白板前執行任務（tool calling）'],
-    ['#71717a', '外出', '沒有活動跡象，灰階待命'],
+    ['#34d399', t('工作中'), t('坐在位子上瘋狂打電腦，偶爾找同事辯論')],
+    ['#fbbf24', t('偷懶中'), t('上廁所、看書、泡咖啡、種花、走來走去')],
+    ['#818cf8', t('休息中'), t('額度用畢躺沙發，對話框寫明恢復時間')],
+    ['#f59e0b', t('派工中'), t('站到白板前執行任務（tool calling）')],
+    ['#71717a', t('外出'), t('沒有活動跡象，灰階待命')],
   ]
 
   return (
@@ -167,18 +179,18 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
             {label}
           </span>
         ))}
-        <span className="ml-auto text-zinc-600">點角色開對話</span>
+        <span className="ml-auto text-zinc-600">{t('點角色開對話')}</span>
       </div>
 
       {/* ── 中控 + 任務排程 ── */}
       <div className="flex flex-none flex-wrap gap-3 border-t border-zinc-800 bg-zinc-900 px-4 py-3">
         {/* 中控對話框 */}
         <div className="min-w-72 flex-1 rounded border border-zinc-700 bg-zinc-800 p-3">
-          <div className="mb-2 text-xs font-medium tracking-widest text-zinc-400">🎛️ 中控指揮台</div>
+          <div className="mb-2 text-xs font-medium tracking-widest text-zinc-400">{t('🎛️ 中控指揮台')}</div>
           <div className="mb-2 max-h-36 overflow-y-auto rounded bg-zinc-950 p-2 font-mono text-xs leading-5 text-zinc-300">
-            {cmdLog.length === 0 && <span className="text-zinc-600">下指令給全體或指定夥伴，例如「整理今天的工作進度」…</span>}
+            {cmdLog.length === 0 && <span className="text-zinc-600">{t('下指令給全體或指定夥伴，例如「整理今天的工作進度」…')}</span>}
             {cmdLog.map((l, i) => <div key={i} className="whitespace-pre-wrap break-all">{l}</div>)}
-            {cmdBusy && <div className="text-zinc-500">派工中…</div>}
+            {cmdBusy && <div className="text-zinc-500">{t('派工中…')}</div>}
           </div>
           <div className="flex gap-2">
             <select
@@ -186,16 +198,16 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
               value={cmdTool}
               onChange={(e) => setCmdTool(e.target.value)}
             >
-              <option value="auto">🤖 自動路由</option>
-              <option value="claude">Claude（無頭）</option>
-              <option value="codex">Codex（無頭）</option>
-              <option value="qwen">Qwen（無頭）</option>
-              <option value="grok">Grok（終端預填）</option>
-              <option value="local">地端（LM Studio）</option>
+              <option value="auto">{t('🤖 自動路由')}</option>
+              <option value="claude">{t('Claude（無頭）')}</option>
+              <option value="codex">{t('Codex（無頭）')}</option>
+              <option value="qwen">{t('Qwen（無頭）')}</option>
+              <option value="grok">{t('Grok（終端預填）')}</option>
+              <option value="local">{t('地端（LM Studio）')}</option>
             </select>
             <input
               className="min-w-0 flex-1 rounded border border-zinc-600 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 outline-none focus:border-zinc-400"
-              placeholder="輸入指令，Enter 派出…"
+              placeholder={t('輸入指令，Enter 派出…')}
               value={cmdInput}
               onChange={(e) => setCmdInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') sendCommand() }}
@@ -205,7 +217,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
               disabled={cmdBusy}
               onClick={sendCommand}
             >
-              派出
+              {t('派出')}
             </button>
           </div>
           {/* 派工追蹤 */}
@@ -216,7 +228,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
                   <span className={`inline-block h-2 w-2 flex-none rounded-full ${d.alive ? 'animate-pulse bg-amber-400' : d.mode === 'sync' || d.result ? 'bg-emerald-500' : 'bg-zinc-500'}`} />
                   <span className="flex-none font-medium text-zinc-300">{d.tool}</span>
                   <span className="min-w-0 flex-1 truncate text-zinc-500">{d.task}</span>
-                  <span className="flex-none text-zinc-500">{d.alive ? '執行中' : d.result || d.reply ? '完成' : '已開終端'}</span>
+                  <span className="flex-none text-zinc-500">{d.alive ? t('執行中') : d.result || d.reply ? t('完成') : t('已開終端')}</span>
                 </div>
               ))}
             </div>
@@ -228,37 +240,37 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
               disabled={auditBusy}
               onClick={runAudit}
             >
-              {auditBusy ? '稽核中…' : '🔍 執行稽核'}
+              {auditBusy ? t('稽核中…') : t('🔍 執行稽核')}
             </button>
             {audit && (
               <span className="text-zinc-400">
-                站點 ✅{audit.summary.sites_ok} / ⚠️{audit.summary.sites_partial} / ❌{audit.summary.sites_empty}
-                ・文章 {audit.summary.articles}/{audit.summary.expected_articles}
-                ・{audit.summary.words.toLocaleString()} 字
-                ・派工 log {audit.dispatch_logs.filter((l: any) => l.errors.length > 0).length} 份有錯
+                {t('站點')} ✅{audit.summary.sites_ok} / ⚠️{audit.summary.sites_partial} / ❌{audit.summary.sites_empty}
+                ・{t('文章')} {audit.summary.articles}/{audit.summary.expected_articles}
+                ・{t('{n} 字', { n: audit.summary.words.toLocaleString() })}
+                ・{t('派工 log {n} 份有錯', { n: audit.dispatch_logs.filter((l: any) => l.errors.length > 0).length })}
                 <span className="text-zinc-600">（{audit.generated_at.slice(5, 16)}）</span>
               </span>
             )}
           </div>
         </div>
         <div className="min-w-72 flex-1 rounded border border-zinc-700 bg-zinc-800 p-3">
-          <div className="mb-2 text-xs font-medium tracking-widest text-zinc-400">📋 任務排程區</div>
-          {queue.length === 0 && <div className="text-xs text-zinc-500">目前沒有進行中的工作 🎉</div>}
+          <div className="mb-2 text-xs font-medium tracking-widest text-zinc-400">{t('📋 任務排程區')}</div>
+          {queue.length === 0 && <div className="text-xs text-zinc-500">{t('目前沒有進行中的工作 🎉')}</div>}
           <div className="flex max-h-44 flex-col gap-1.5 overflow-y-auto">
             {queue.map((p) => {
               const conv = findConvFor(p.project_id)
               return (
                 <div key={p.project_id} className="flex items-center gap-2 rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs">
                   <span className="font-medium text-zinc-100">{p.title}</span>
-                  {p.needs_handoff && <span className="rounded bg-amber-400/20 px-1 py-0.5 text-amber-300">待接力</span>}
-                  <span className="min-w-0 flex-1 truncate text-zinc-400" title={p.next_step}>{p.next_step || '（無下一步）'}</span>
+                  {p.needs_handoff && <span className="rounded bg-amber-400/20 px-1 py-0.5 text-amber-300">{t('待接力')}</span>}
+                  <span className="min-w-0 flex-1 truncate text-zinc-400" title={p.next_step}>{p.next_step || t('（無下一步）')}</span>
                   {conv && (
                     <button
                       className="flex-none rounded border border-zinc-600 px-2 py-0.5 text-zinc-200 hover:bg-zinc-700 disabled:opacity-40"
                       disabled={busyId === conv.id}
                       onClick={() => onDispatch(conv)}
                     >
-                      {busyId === conv.id ? '…' : '▶ 繼續工作'}
+                      {busyId === conv.id ? '…' : t('▶ 繼續工作')}
                     </button>
                   )}
                 </div>
@@ -271,7 +283,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
       {/* ── 對接總覽（帳號/瀏覽器/技能/全域設定） ── */}
       <div className="flex-none border-t border-zinc-800 bg-zinc-900 px-4 py-3">
         <button className="mb-2 flex items-center gap-2 text-xs font-medium tracking-widest text-zinc-400 hover:text-zinc-200" onClick={() => setShowMap((v) => !v)}>
-          {showMap ? '▾' : '▸'} 🗺️ 對接總覽（哪個工具用哪個帳號、哪個瀏覽器、哪些技能）
+          {showMap ? '▾' : '▸'} {t('🗺️ 對接總覽（哪個工具用哪個帳號、哪個瀏覽器、哪些技能）')}
         </button>
         {showMap && toolMap && (
           <div className="overflow-x-auto">

@@ -7,6 +7,7 @@ import {
   AFFIX_POOL, AFFIX_SCALE, ARMOR_NAMES, DUNGEON_BY_ID, MONSTER_BY_ID, PREFIXES,
   RARITY_SPEC, SKILL_BY_ID, SKILLS, WEAPON_NAMES, ZONE_BY_ID,
 } from './data'
+import { itemLabel, t } from '@/i18n'
 import {
   ATTRS, LINES, type Affix, type Attr, type Combatant, type Hero, type Item,
   SLOTS, type FxEvent, type Line, type Loadout, type LogEntry, type Monster,
@@ -279,7 +280,10 @@ export function startBattle(h: Hero, kind: 'field' | 'dungeon', placeId: string,
     over: false, loot: [], xp: 0, gold: 0, kills: 0,
   }
   const place = kind === 'field' ? ZONE_BY_ID[placeId] : DUNGEON_BY_ID[placeId]
-  say(b, 'info', kind === 'field' ? `進入 ${place?.name ?? placeId}` : `踏入 ${place?.name ?? placeId}（第 1 / ${b.rooms} 間）`)
+  const placeName = t(place?.name ?? placeId)
+  say(b, 'info', kind === 'field'
+    ? t('進入 {place}', { place: placeName })
+    : t('踏入 {place}（第 1 / {rooms} 間）', { place: placeName, rooms: b.rooms }))
   const ids = kind === 'field' ? (ZONE_BY_ID[placeId]?.monsters ?? ['slime'])
     : (DUNGEON_BY_ID[placeId]?.trash ?? ['goblin'])
   spawnWave(b, ids, kind === 'field' ? 1 : 2)
@@ -342,8 +346,10 @@ function act(b: Battle, c: Combatant, h: Hero | null, haste: number) {
     tgt.hp = Math.max(0, tgt.hp - dmg)
     fx(b, c.uid, 'attack')
     fx(b, tgt.uid, crit ? 'crit' : 'hurt', dmg)
-    say(b, crit ? 'crit' : 'hit', `${c.name} 攻擊 ${tgt.name}，造成 ${dmg} 傷害${crit ? '（暴擊！）' : ''}`)
-    if (tgt.hp === 0) { fx(b, tgt.uid, 'die'); say(b, 'death', `${tgt.name} 倒下了`) }
+    say(b, crit ? 'crit' : 'hit', t('{who} 攻擊 {target}，造成 {dmg} 傷害{crit}', {
+      who: t(c.name), target: t(tgt.name), dmg, crit: crit ? t('（暴擊！）') : '',
+    }))
+    if (tgt.hp === 0) { fx(b, tgt.uid, 'die'); say(b, 'death', t('{name} 倒下了', { name: t(tgt.name) })) }
     return
   }
 
@@ -361,20 +367,24 @@ function act(b: Battle, c: Combatant, h: Hero | null, haste: number) {
       t.hp = Math.min(t.hpMax, t.hp + amount)
       fx(b, t.uid, 'heal', amount)
     }
-    say(b, 'heal', `${c.name} 施放「${sk.name}」，回復 ${amount} 生命`)
+    say(b, 'heal', t('{who} 施放「{skill}」，回復 {amount} 生命', {
+      who: t(c.name), skill: t(sk.name), amount,
+    }))
     return
   }
   if (sk.kind === 'buff') {
     if (skillId === 'focus') {
       const amount = Math.round(c.mpMax * (0.3 + lv * 0.06))
       c.mp = Math.min(c.mpMax, c.mp + amount)
-      say(b, 'heal', `${c.name} 施放「${sk.name}」，回復 ${amount} 魔力`)
+      say(b, 'heal', t('{who} 施放「{skill}」，回復 {amount} 魔力', {
+        who: t(c.name), skill: t(sk.name), amount,
+      }))
     } else if (skillId === 'ward') {
       c.def = Math.round(c.def * (1 + sk.power * 0.2))
-      say(b, 'info', `${c.name} 施放「${sk.name}」，防禦提升`)
+      say(b, 'info', t('{who} 施放「{skill}」，防禦提升', { who: t(c.name), skill: t(sk.name) }))
     } else {
       c.atk = Math.round(c.atk * (1 + sk.power * 0.25))
-      say(b, 'info', `${c.name} 施放「${sk.name}」，攻擊提升`)
+      say(b, 'info', t('{who} 施放「{skill}」，攻擊提升', { who: t(c.name), skill: t(sk.name) }))
     }
     return
   }
@@ -389,8 +399,10 @@ function act(b: Battle, c: Combatant, h: Hero | null, haste: number) {
   fx(b, c.uid, 'attack')
   fx(b, tgt.uid, crit ? 'crit' : 'hurt', dmg)
   if (c.leech > 0) c.hp = Math.min(c.hpMax, c.hp + Math.round(dmg * c.leech))
-  say(b, crit ? 'crit' : 'hit', `${c.name} 使用「${sk.name}」對 ${tgt.name} 造成 ${dmg} 傷害${crit ? '（暴擊！）' : ''}`)
-  if (tgt.hp === 0) { fx(b, tgt.uid, 'die'); say(b, 'death', `${tgt.name} 倒下了`) }
+  say(b, crit ? 'crit' : 'hit', t('{who} 使用「{skill}」對 {target} 造成 {dmg} 傷害{crit}', {
+    who: t(c.name), skill: t(sk.name), target: t(tgt.name), dmg, crit: crit ? t('（暴擊！）') : '',
+  }))
+  if (tgt.hp === 0) { fx(b, tgt.uid, 'die'); say(b, 'death', t('{name} 倒下了', { name: t(tgt.name) })) }
 }
 
 /** 跑一個回合。回傳是否有狀態變化值得重繪 */
@@ -417,7 +429,7 @@ export function stepBattle(b: Battle, h: Hero): void {
         const it = rollItem(Math.max(1, (m?.level ?? lvl) + rnd(3)), undefined,
           m?.boss ? rollRarity(3) : undefined)
         b.loot.push(it)
-        say(b, 'loot', `拾獲 ${it.name}`)
+        say(b, 'loot', t('拾獲 {item}', { item: itemLabel(it.name) }))
       }
     }
     b.foes = b.foes.filter((f) => f.hp > 0)
@@ -427,7 +439,7 @@ export function stepBattle(b: Battle, h: Hero): void {
   if (b.hero.hp <= 0) {
     b.over = true
     b.result = 'lose'
-    say(b, 'death', '你倒下了…被同事拖回辦公室休息')
+    say(b, 'death', t('你倒下了…被同事拖回辦公室休息'))
     return
   }
 
@@ -442,15 +454,17 @@ export function stepBattle(b: Battle, h: Hero): void {
     if (b.room >= b.rooms) {
       b.over = true
       b.result = 'win'
-      say(b, 'info', `${dg.name} 通關！`)
+      say(b, 'info', t('{name} 通關！', { name: t(dg.name) }))
       return
     }
     b.room++
     if (b.room === b.rooms) {
-      say(b, 'info', `最深處……${MONSTER_BY_ID[dg.boss]?.name ?? '王'} 出現了！`)
+      say(b, 'info', t('最深處……{boss} 出現了！', {
+        boss: t(MONSTER_BY_ID[dg.boss]?.name ?? '王'),
+      }))
       b.foes = [foeCombatant(MONSTER_BY_ID[dg.boss], 999)]
     } else {
-      say(b, 'info', `前進到第 ${b.room} / ${b.rooms} 間`)
+      say(b, 'info', t('前進到第 {room} / {rooms} 間', { room: b.room, rooms: b.rooms }))
       spawnWave(b, dg.trash, 2)
     }
   }

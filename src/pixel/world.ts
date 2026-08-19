@@ -13,6 +13,7 @@ import {
 } from './room'
 import { AGENT_KEYS, F, SKINS } from './sprites'
 import { COLS, ROWS, TILE, mulberry32 } from './theme'
+import { t } from '@/i18n'
 
 export type Mode = 'working' | 'idle' | 'resting' | 'tool' | 'meeting' | 'away'
 export type ActKind =
@@ -171,21 +172,23 @@ export class World {
   }
 
   private goto(a: Agent, spot: Spot) {
-    const t = this.tileOf(a)
-    a.path = findPath(t.x, t.y, spot.x, spot.y)
+    const tile = this.tileOf(a)
+    a.path = findPath(tile.x, tile.y, spot.x, spot.y)
   }
 
   private say(a: Agent, text: string, secs = 3.5) {
-    a.bubble = { text, until: this.time + secs }
+    // 對白統一在這裡翻譯：句子都來自上面幾張固定的表。
+    // 已經翻過的字串再進來也安全 —— 查不到就原樣回傳。
+    a.bubble = { text: t(text), until: this.time + secs }
   }
 
   /** 挑一個新的微行為 */
   private chooseAct(a: Agent) {
-    const t = this.time
+    const now = this.time
     switch (a.mode) {
       case 'resting': {
         const spot = SOFA_SPOTS[this.agents.filter((o) => o.mode === 'resting').indexOf(a) % SOFA_SPOTS.length]
-        a.act = { kind: 'sleep', target: spot, until: t + 9999 }
+        a.act = { kind: 'sleep', target: spot, until: now + 9999 }
         break
       }
       case 'tool': {
@@ -194,7 +197,7 @@ export class World {
         a.act = {
           kind: 'board',
           target: { ...BOARD_SPOT, x: BOARD_SPOT.x + (i % 3) - 1 },
-          until: t + 9999,
+          until: now + 9999,
         }
         break
       }
@@ -212,9 +215,9 @@ export class World {
           // 精靈寬約 3 格，站位要拉開才不會疊在一起
           const side = pt.x > 21 ? -3 : 3
           const spot: Spot = { x: Math.max(1, Math.min(COLS - 2, pt.x + side)), y: pt.y, face: side > 0 ? 'left' : 'right' }
-          a.act = { kind: 'debate', target: spot, until: t + 7 + this.rand() * 5, partner: p.key }
+          a.act = { kind: 'debate', target: spot, until: now + 7 + this.rand() * 5, partner: p.key }
         } else {
-          a.act = { kind: 'desk', target: a.seatSpot, until: t + 10 + this.rand() * 14 }
+          a.act = { kind: 'desk', target: a.seatSpot, until: now + 10 + this.rand() * 14 }
         }
         break
       }
@@ -233,13 +236,13 @@ export class World {
           : kind === 'water' ? this.pickPlant(a)
           : { ...this.pick(WANDER_SPOTS), face: 'down' as Dir }
         const dur = kind === 'pace' ? 2 + this.rand() * 3 : 8 + this.rand() * 8
-        a.act = { kind, target, until: t + dur }
+        a.act = { kind, target, until: now + dur }
         break
       }
       default: {
         // 外出：在門口一帶散開站著，不要疊成一團
         const i = this.agents.filter((o) => o.mode === 'away').indexOf(a)
-        a.act = { kind: 'idlestand', target: { x: 18 + i * 3, y: 22, face: 'down' }, until: t + 20 }
+        a.act = { kind: 'idlestand', target: { x: 18 + i * 3, y: 22, face: 'down' }, until: now + 20 }
       }
     }
     if (a.act.target) this.goto(a, a.act.target)
@@ -321,7 +324,7 @@ export class World {
       }
       // 睡覺：對話框寫明休息到幾點
       if (a.act.kind === 'sleep' && !a.bubble && this.rand() < 0.02) {
-        this.say(a, a.resetAt ? `休息到 ${a.resetAt}` : '額度用完了…', 6)
+        this.say(a, a.resetAt ? t('休息到 {time}', { time: a.resetAt }) : t('額度用完了…'), 6)
       }
       // 派工中：唸出任務
       if (a.act.kind === 'board' && !a.bubble && a.task && this.rand() < 0.02) {

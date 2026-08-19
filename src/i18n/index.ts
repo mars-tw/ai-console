@@ -70,6 +70,29 @@ export function t(zh: string, vars?: Record<string, string | number>): string {
   return s
 }
 
+/**
+ * 裝備名是「前綴 + 基礎名」組出來的（例如「銳利的長弓」），整串查不到對照，
+ * 所以拆成兩段分別翻。前綴表由 data.ts 在載入時註冊，避免 i18n 反過來相依遊戲資料。
+ *
+ * 名稱本身仍以中文存進存檔 —— 換語言只影響顯示，舊存檔不會壞，
+ * 而且圖示是靠中文名比對的，翻譯後也不會對不上。
+ */
+const prefixes: string[] = []
+
+export function registerItemPrefixes(list: string[]) {
+  for (const p of list) if (p && !prefixes.includes(p)) prefixes.push(p)
+  // 長的先比，否則「精工」會先吃掉「精工的」這種情形
+  prefixes.sort((a, b) => b.length - a.length)
+}
+
+export function itemLabel(name: string): string {
+  if (current !== 'en' || !name) return name
+  for (const p of prefixes) {
+    if (name.startsWith(p)) return t(p) + t(name.slice(p.length))
+  }
+  return t(name)
+}
+
 /** 開發用：列出還沒翻譯的字串（production 會被摺掉）*/
 export function missingTranslations(all: string[]): string[] {
   return all.filter((s) => !(s in EN))

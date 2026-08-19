@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import BattleScene from '@/components/BattleScene'
 import { SKINS } from '@/pixel/sprites'
+import { itemLabel, t, useLang } from '@/i18n'
 import { DUNGEONS, RARITY_ORDER, SKILLS_OF_LINE, SKILL_BY_ID, ZONES } from '@/rpg/data'
 import {
   activeLoadout, allyCombatant, autoEquipBest, collect, computeStats, isUpgrade,
@@ -99,14 +100,14 @@ function ItemIcon({ it, size = 22 }: { it: Item; size?: number }) {
 function ItemLine({ it, dim }: { it: Item; dim?: boolean }) {
   return (
     <div className={dim ? 'opacity-60' : ''}>
-      <span style={{ color: RARITY_COLOR[it.rarity] }}>{it.name}</span>
+      <span style={{ color: RARITY_COLOR[it.rarity] }}>{itemLabel(it.name)}</span>
       <span className="ml-1 text-zinc-500">
-        ({RARITY_NAME[it.rarity]} · iLv{it.ilvl}
-        {it.atk ? ` · 攻${it.atk}` : ''}{it.def ? ` · 防${it.def}` : ''})
+        ({t(RARITY_NAME[it.rarity])} · iLv{it.ilvl}
+        {it.atk ? ` · ${t('攻')}${it.atk}` : ''}{it.def ? ` · ${t('防')}${it.def}` : ''})
       </span>
       {it.affixes.length > 0 && (
         <span className="ml-1 text-emerald-400/80">
-          {it.affixes.map((a) => `${AFFIX_NAME[a.key]}+${AFFIX_PCT.includes(a.key) ? `${(a.value * 100).toFixed(1)}%` : a.value}`).join(' ')}
+          {it.affixes.map((a) => `${t(AFFIX_NAME[a.key])}+${AFFIX_PCT.includes(a.key) ? `${(a.value * 100).toFixed(1)}%` : a.value}`).join(' ')}
         </span>
       )}
     </div>
@@ -118,6 +119,7 @@ interface Props {
 }
 
 export default function Adventure({ tools }: Props) {
+  useLang()   // 語言一換就重繪
   const [hero, setHero] = useState<Hero>(() => loadHero())
   const [battle, setBattle] = useState<Battle | null>(null)
   const [auto, setAuto] = useState(true)
@@ -156,16 +158,16 @@ export default function Adventure({ tools }: Props) {
    */
   const allyState = (key: string) => {
     switch (tools[key]?.status) {
-      case 'idle': return { why: '精神飽滿', bonus: 1.15 }
-      case 'active': return { why: '邊工作邊陪你', bonus: 1 }
-      case 'rate_limited': return { why: '睡眼惺忪', bonus: 0.85 }
-      default: return { why: '待命中', bonus: 1 }
+      case 'idle': return { why: t('精神飽滿'), bonus: 1.15 }
+      case 'active': return { why: t('邊工作邊陪你'), bonus: 1 }
+      case 'rate_limited': return { why: t('睡眼惺忪'), bonus: 0.85 }
+      default: return { why: t('待命中'), bonus: 1 }
     }
   }
 
   // ── 戰鬥 tick ──
   useEffect(() => {
-    const t = setInterval(() => {
+    const timer = setInterval(() => {
       const b = battleRef.current
       const h = heroRef.current
       if (!b || b.over) return
@@ -174,13 +176,13 @@ export default function Adventure({ tools }: Props) {
       // 每回合把獎勵收進角色，這樣掛著離開也不會白打
       if (b.xp || b.gold || b.loot.length) {
         const gained = collect(h, b)
-        if (gained.levels > 0) flash(`升到 Lv.${h.level}！獲得技能點與屬性點`)
+        if (gained.levels > 0) flash(t('升到 Lv.{lv}！獲得技能點與屬性點', { lv: h.level }))
         saveHero(h)
         setHero({ ...h })
       }
       setBattle({ ...b })
     }, TICK_MS)
-    return () => clearInterval(t)
+    return () => clearInterval(timer)
   }, [])
 
   const enterZone = (id: string) => {
@@ -206,13 +208,13 @@ export default function Adventure({ tools }: Props) {
 
   const enterDungeon = (id: string) => {
     const dg = DUNGEONS.find((d) => d.id === id)!
-    if (hero.level < dg.minLevel) return flash(`等級不足，${dg.name} 需要 Lv.${dg.minLevel}`)
+    if (hero.level < dg.minLevel) return flash(t('等級不足，{name} 需要 Lv.{lv}', { name: t(dg.name), lv: dg.minLevel }))
     // 人不夠不擋你，直接叫 AI 夥伴補位
     const members = party.length + 1 < dg.partySize ? autoParty(dg.partySize) : party
     if (members.length !== party.length) {
       setParty(members)
       const added = members.filter((k) => !party.includes(k)).map((k) => SKINS[k].name).join('、')
-      flash(`人手不夠，${added} 自動加入隊伍`)
+      flash(t('人手不夠，{who} 自動加入隊伍', { who: added }))
     }
     setBattle(startBattle(hero, 'dungeon', id, buildParty(members)))
   }
@@ -249,8 +251,11 @@ export default function Adventure({ tools }: Props) {
   const equipBest = () => update((h) => {
     const changed = autoEquipBest(h)
     setTimeout(() => flash(changed.length
-      ? `已換上 ${changed.length} 件：${changed.map((c) => `${SLOT_NAME[c.slot]}→${c.to}`).join('、')}`
-      : '目前已經是最佳配置'), 0)
+      ? t('已換上 {n} 件：{list}', {
+        n: changed.length,
+        list: changed.map((c) => `${t(SLOT_NAME[c.slot])}→${itemLabel(c.to)}`).join('、'),
+      })
+      : t('目前已經是最佳配置')), 0)
   })
 
   /** 賣掉所有「不是最佳、也沒裝著」的裝備，換錢清背包 */
@@ -265,7 +270,7 @@ export default function Adventure({ tools }: Props) {
     const sold = h.bag.filter((i) => !keep.has(i.id))
     h.gold += sold.reduce((n, i) => n + Math.max(1, Math.round(itemScore(i) / 4)), 0)
     h.bag = h.bag.filter((i) => keep.has(i.id))
-    setTimeout(() => flash(sold.length ? `賣掉 ${sold.length} 件雜物` : '沒有可賣的雜物'), 0)
+    setTimeout(() => flash(sold.length ? t('賣掉 {n} 件雜物', { n: sold.length }) : t('沒有可賣的雜物')), 0)
   })
 
   /** 套用篩選與排序後的背包內容 */
@@ -294,22 +299,22 @@ export default function Adventure({ tools }: Props) {
         {/* ── 角色 ── */}
         <div className="min-w-64 flex-1 rounded border border-zinc-800 bg-zinc-900 p-3">
           <div className="mb-2 flex items-baseline gap-2">
-            <span className="text-sm font-bold">{hero.name}</span>
+            <span className="text-sm font-bold">{t(hero.name)}</span>
             <span className="text-xs text-zinc-400">Lv.{hero.level}</span>
             <span className="ml-auto text-xs text-amber-300">🪙 {hero.gold}</span>
           </div>
-          <div className="mb-1 text-[10px] text-zinc-500">經驗 {hero.xp} / {xpNeed}</div>
+          <div className="mb-1 text-[10px] text-zinc-500">{t('經驗')} {hero.xp} / {xpNeed}</div>
           <Bar v={hero.xp} max={xpNeed} color="#a78bfa" />
           <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs text-zinc-400">
-            <div>生命 <span className="text-zinc-200">{stats.hpMax}</span></div>
-            <div>魔力 <span className="text-zinc-200">{stats.mpMax}</span></div>
-            <div>攻擊 <span className="text-zinc-200">{stats.atk}</span></div>
-            <div>防禦 <span className="text-zinc-200">{stats.def}</span></div>
-            <div>暴擊 <span className="text-zinc-200">{(stats.crit * 100).toFixed(1)}%</span></div>
-            <div>急速 <span className="text-zinc-200">{(stats.haste * 100).toFixed(1)}%</span></div>
+            <div>{t('生命')} <span className="text-zinc-200">{stats.hpMax}</span></div>
+            <div>{t('魔力')} <span className="text-zinc-200">{stats.mpMax}</span></div>
+            <div>{t('攻擊')} <span className="text-zinc-200">{stats.atk}</span></div>
+            <div>{t('防禦')} <span className="text-zinc-200">{stats.def}</span></div>
+            <div>{t('暴擊')} <span className="text-zinc-200">{(stats.crit * 100).toFixed(1)}%</span></div>
+            <div>{t('急速')} <span className="text-zinc-200">{(stats.haste * 100).toFixed(1)}%</span></div>
           </div>
           <div className="mt-2 border-t border-zinc-800 pt-2">
-            <div className="mb-1 text-[10px] text-zinc-500">屬性點：{hero.attrPoints}</div>
+            <div className="mb-1 text-[10px] text-zinc-500">{t('屬性點：{n}', { n: hero.attrPoints })}</div>
             <div className="flex flex-wrap gap-1.5">
               {ATTRS.map((a) => (
                 <button
@@ -318,13 +323,13 @@ export default function Adventure({ tools }: Props) {
                   disabled={hero.attrPoints <= 0}
                   onClick={() => addAttr(a)}
                 >
-                  {ATTR_NAME[a]} {stats.attrs[a]} <span className="text-emerald-400">+</span>
+                  {t(ATTR_NAME[a])} {stats.attrs[a]} <span className="text-emerald-400">+</span>
                 </button>
               ))}
             </div>
           </div>
           <div className="mt-2 border-t border-zinc-800 pt-2">
-            <div className="mb-1 text-[10px] text-zinc-500">套裝（裝備 + 技能 + 屬性整組切換）</div>
+            <div className="mb-1 text-[10px] text-zinc-500">{t('套裝（裝備 + 技能 + 屬性整組切換）')}</div>
             <div className="flex gap-1.5">
               {hero.loadouts.map((l, i) => (
                 <button
@@ -332,41 +337,43 @@ export default function Adventure({ tools }: Props) {
                   className={`flex-1 rounded px-2 py-1 text-xs ${i === hero.active ? 'bg-zinc-100 text-zinc-900' : 'border border-zinc-700 text-zinc-300 hover:bg-zinc-800'}`}
                   onClick={() => update((h) => { h.active = i })}
                 >
-                  {l.name}
+                  {t(l.name)}
                 </button>
               ))}
             </div>
           </div>
           <div className="mt-2 flex items-center justify-between text-[10px] text-zinc-600">
-            <span>擊殺 {hero.kills} · 陣亡 {hero.deaths}</span>
-            <button className="hover:text-zinc-300" onClick={() => { if (confirm('重置角色與存檔？')) { setHero(resetHero()); setBattle(null) } }}>重置</button>
+            <span>{t('擊殺')} {hero.kills} · {t('陣亡')} {hero.deaths}</span>
+            <button className="hover:text-zinc-300" onClick={() => { if (confirm(t('重置角色與存檔？'))) { setHero(resetHero()); setBattle(null) } }}>{t('重置')}</button>
           </div>
         </div>
 
         {/* ── 戰鬥 ── */}
         <div className="min-w-80 flex-[2] rounded border border-zinc-800 bg-zinc-900 p-3">
           <div className="mb-2 flex flex-wrap items-center gap-2">
-            <span className="text-xs font-medium tracking-widest text-zinc-400">⚔️ 戰鬥</span>
+            <span className="text-xs font-medium tracking-widest text-zinc-400">{t('⚔️ 戰鬥')}</span>
             <button
               className={`rounded px-2 py-0.5 text-xs ${auto ? 'bg-emerald-600 text-white' : 'border border-zinc-700 text-zinc-400'}`}
               onClick={() => setAuto((v) => !v)}
             >
-              {auto ? '沉浸自動' : '手動操作'}
+              {auto ? t('沉浸自動') : t('手動操作')}
             </button>
             {battle && !battle.over && (
               <button className="rounded border border-zinc-700 px-2 py-0.5 text-xs text-zinc-400 hover:bg-zinc-800" onClick={() => setBattle(null)}>
-                撤退
+                {t('撤退')}
               </button>
             )}
             {battle && (
               <span className="ml-auto text-[10px] text-zinc-500">
-                {battle.kind === 'dungeon' ? `第 ${battle.room}/${battle.rooms} 間` : '野外'} · 回合 {battle.tick}
+                {battle.kind === 'dungeon'
+                  ? t('第 {room}/{rooms} 間', { room: battle.room, rooms: battle.rooms })
+                  : t('野外')} · {t('回合')} {battle.tick}
               </span>
             )}
           </div>
 
           {!battle && (
-            <div className="py-6 text-center text-xs text-zinc-500">選一個地方出發，或先去配點與換裝</div>
+            <div className="py-6 text-center text-xs text-zinc-500">{t('選一個地方出發，或先去配點與換裝')}</div>
           )}
 
           {battle && (
@@ -378,7 +385,7 @@ export default function Adventure({ tools }: Props) {
               <div className="mb-2 flex flex-wrap gap-x-4 gap-y-0.5 text-[11px]">
                 {allSides.map((c) => (
                   <span key={c.uid} className="flex items-center gap-1">
-                    <span style={{ color: c.color }}>{c.name}</span>
+                    <span style={{ color: c.color }}>{t(c.name)}</span>
                     <span className="text-zinc-500">{c.hp}/{c.hpMax}</span>
                     {c.mpMax > 0 && <span className="text-sky-400/80">MP {c.mp}</span>}
                   </span>
@@ -419,8 +426,8 @@ export default function Adventure({ tools }: Props) {
               </div>
               {battle.over && (
                 <div className="mt-2 text-center text-xs text-zinc-400">
-                  {battle.result === 'win' ? '🏆 通關！' : '💀 全滅'}
-                  <button className="ml-2 rounded border border-zinc-700 px-2 py-0.5 hover:bg-zinc-800" onClick={() => setBattle(null)}>返回</button>
+                  {battle.result === 'win' ? t('🏆 通關！') : t('💀 全滅')}
+                  <button className="ml-2 rounded border border-zinc-700 px-2 py-0.5 hover:bg-zinc-800" onClick={() => setBattle(null)}>{t('返回')}</button>
                 </div>
               )}
             </>
@@ -430,16 +437,16 @@ export default function Adventure({ tools }: Props) {
         {/* ── 隊伍 ── */}
         <div className="min-w-56 flex-1 rounded border border-zinc-800 bg-zinc-900 p-3">
           <div className="mb-2 flex items-center gap-2">
-            <span className="text-xs font-medium tracking-widest text-zinc-400">🤝 AI 夥伴</span>
+            <span className="text-xs font-medium tracking-widest text-zinc-400">{t('🤝 AI 夥伴')}</span>
             <button
               className="ml-auto rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
               onClick={() => setParty(autoParty(4))}
             >
-              自動組隊
+              {t('自動組隊')}
             </button>
             {party.length > 0 && (
               <button className="rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800" onClick={() => setParty([])}>
-                解散
+                {t('解散')}
               </button>
             )}
           </div>
@@ -454,41 +461,41 @@ export default function Adventure({ tools }: Props) {
                   onClick={() => setParty((p) => (joined ? p.filter((x) => x !== c.key) : [...p, c.key]))}
                 >
                   <span className="h-2 w-2 flex-none rounded-full" style={{ background: c.color }} />
-                  <span className="flex-none font-medium">{c.name}</span>
-                  <span className="flex-none text-[10px]" style={{ color: LINE_COLOR[c.line] }}>{LINE_NAME[c.line]}</span>
-                  <span className="ml-auto truncate text-[10px] text-zinc-500">{joined ? '已入隊' : st.why}</span>
+                  <span className="flex-none font-medium">{t(c.name)}</span>
+                  <span className="flex-none text-[10px]" style={{ color: LINE_COLOR[c.line] }}>{t(LINE_NAME[c.line])}</span>
+                  <span className="ml-auto truncate text-[10px] text-zinc-500">{joined ? t('已入隊') : st.why}</span>
                 </button>
               )
             })}
           </div>
-          <div className="mt-2 text-[10px] text-zinc-600">隊伍 {party.length + 1} 人（含你）</div>
+          <div className="mt-2 text-[10px] text-zinc-600">{t('隊伍 {n} 人（含你）', { n: party.length + 1 })}</div>
         </div>
       </div>
 
       {/* ── 出發地點 ── */}
       <div className="rounded border border-zinc-800 bg-zinc-900 p-3">
-        <div className="mb-2 text-xs font-medium tracking-widest text-zinc-400">🗺️ 出發</div>
+        <div className="mb-2 text-xs font-medium tracking-widest text-zinc-400">{t('🗺️ 出發')}</div>
         <div className="flex flex-wrap gap-2">
           {ZONES.map((z) => (
             <button
               key={z.id}
-              title={z.desc}
+              title={t(z.desc)}
               className="rounded border border-zinc-700 px-2.5 py-1 text-xs hover:bg-zinc-800 disabled:opacity-40"
               disabled={hero.level < z.minLevel}
               onClick={() => enterZone(z.id)}
             >
-              {z.name} <span className="text-zinc-500">Lv.{z.minLevel}+</span>
+              {t(z.name)} <span className="text-zinc-500">Lv.{z.minLevel}+</span>
             </button>
           ))}
           <span className="mx-1 w-px bg-zinc-700" />
           {DUNGEONS.map((d) => (
             <button
               key={d.id}
-              title={`${d.desc}（需要 ${d.partySize} 人）`}
+              title={`${t(d.desc)}${t('（需要 {n} 人）', { n: d.partySize })}`}
               className="rounded border border-amber-700/60 px-2.5 py-1 text-xs text-amber-200 hover:bg-amber-950/40 disabled:opacity-40"
               onClick={() => enterDungeon(d.id)}
             >
-              🏰 {d.name} <span className="text-amber-500/70">Lv.{d.minLevel}+ · {d.partySize}人</span>
+              🏰 {t(d.name)} <span className="text-amber-500/70">Lv.{d.minLevel}+ · {t('{n}人', { n: d.partySize })}</span>
             </button>
           ))}
         </div>
@@ -497,7 +504,11 @@ export default function Adventure({ tools }: Props) {
       {/* ── 技能 / 裝備 / 背包 ── */}
       <div className="rounded border border-zinc-800 bg-zinc-900 p-3">
         <div className="mb-2 flex gap-2">
-          {([['skills', `技能（${hero.skillPoints} 點）`], ['gear', '裝備'], ['bag', `背包（${hero.bag.length}）`]] as const).map(([k, label]) => (
+          {([
+            ['skills', t('技能（{n} 點）', { n: hero.skillPoints })],
+            ['gear', t('裝備')],
+            ['bag', t('背包（{n}）', { n: hero.bag.length })],
+          ] as const).map(([k, label]) => (
             <button
               key={k}
               className={`rounded px-2.5 py-1 text-xs ${tab === k ? 'bg-zinc-100 text-zinc-900' : 'border border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}
@@ -511,7 +522,7 @@ export default function Adventure({ tools }: Props) {
             {LINES.map((line) => (
               <div key={line}>
                 <div className="mb-1 text-xs font-bold" style={{ color: LINE_COLOR[line] }}>
-                  {LINE_NAME[line]} <span className="text-zinc-500">已投 {linePoints(lo, line)} 點</span>
+                  {t(LINE_NAME[line])} <span className="text-zinc-500">{t('已投 {n} 點', { n: linePoints(lo, line) })}</span>
                 </div>
                 <div className="flex flex-col gap-1">
                   {SKILLS_OF_LINE(line).map((sk) => {
@@ -520,12 +531,12 @@ export default function Adventure({ tools }: Props) {
                     return (
                       <button
                         key={sk.id}
-                        title={`${sk.desc}${open ? '' : `（需要 ${LINE_NAME[line]} 投入 ${sk.req} 點）`}`}
+                        title={`${t(sk.desc)}${open ? '' : t('（需要 {line} 投入 {n} 點）', { line: t(LINE_NAME[line]), n: sk.req })}`}
                         className="flex items-center gap-1.5 rounded border border-zinc-800 px-2 py-1 text-left text-xs hover:bg-zinc-800 disabled:opacity-40"
                         disabled={!open || hero.skillPoints <= 0 || lv >= sk.maxLv}
                         onClick={() => addSkill(sk.id)}
                       >
-                        <span className={open ? '' : 'text-zinc-600'}>{sk.name}</span>
+                        <span className={open ? '' : 'text-zinc-600'}>{t(sk.name)}</span>
                         <span className="ml-auto text-zinc-500">{lv}/{sk.maxLv}</span>
                         {open && hero.skillPoints > 0 && lv < sk.maxLv && <span className="text-emerald-400">+</span>}
                       </button>
@@ -544,11 +555,11 @@ export default function Adventure({ tools }: Props) {
               return (
                 <div key={s} className="flex items-center gap-2 rounded border border-zinc-800 px-2 py-1 text-xs">
                   {it ? <ItemIcon it={it} /> : <span className="inline-block h-[22px] w-[22px] flex-none rounded-sm bg-zinc-950" />}
-                  <span className="w-12 flex-none text-zinc-500">{SLOT_NAME[s]}</span>
+                  <span className="w-12 flex-none text-zinc-500">{t(SLOT_NAME[s])}</span>
                   <div className="min-w-0 flex-1 truncate">
-                    {it ? <ItemLine it={it} /> : <span className="text-zinc-600">（空）</span>}
+                    {it ? <ItemLine it={it} /> : <span className="text-zinc-600">{t('（空）')}</span>}
                   </div>
-                  {it && <button className="flex-none text-zinc-500 hover:text-zinc-200" onClick={() => unequip(s)}>卸下</button>}
+                  {it && <button className="flex-none text-zinc-500 hover:text-zinc-200" onClick={() => unequip(s)}>{t('卸下')}</button>}
                 </div>
               )
             })}
@@ -563,48 +574,48 @@ export default function Adventure({ tools }: Props) {
                 className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5"
                 value={fSlot} onChange={(e) => setFSlot(e.target.value as Slot | 'all')}
               >
-                <option value="all">全部部位</option>
-                {SLOTS.map((s2) => <option key={s2} value={s2}>{SLOT_NAME[s2]}</option>)}
+                <option value="all">{t('全部部位')}</option>
+                {SLOTS.map((s2) => <option key={s2} value={s2}>{t(SLOT_NAME[s2])}</option>)}
               </select>
               <select
                 className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5"
                 value={fRarity} onChange={(e) => setFRarity(e.target.value as Rarity | 'all')}
               >
-                <option value="all">全部品質</option>
-                {RARITY_ORDER.map((r) => <option key={r} value={r}>{RARITY_NAME[r]}</option>)}
+                <option value="all">{t('全部品質')}</option>
+                {RARITY_ORDER.map((r) => <option key={r} value={r}>{t(RARITY_NAME[r])}</option>)}
               </select>
               <select
                 className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5"
                 value={fSort} onChange={(e) => setFSort(e.target.value as 'score' | 'ilvl' | 'rarity')}
               >
-                <option value="score">依分數</option>
-                <option value="ilvl">依等級</option>
-                <option value="rarity">依品質</option>
+                <option value="score">{t('依分數')}</option>
+                <option value="ilvl">{t('依等級')}</option>
+                <option value="rarity">{t('依品質')}</option>
               </select>
               <label className="flex items-center gap-1 text-zinc-400">
                 <input type="checkbox" checked={fUpgrade} onChange={(e) => setFUpgrade(e.target.checked)} />
-                只看可升級
+                {t('只看可升級')}
               </label>
               <span className="text-zinc-600">{bagView.length} / {hero.bag.length}</span>
               <button
                 className="ml-auto rounded bg-emerald-700 px-2 py-0.5 text-white hover:bg-emerald-600"
                 onClick={equipBest}
               >
-                ⚡ 一鍵擇優裝備
+                {t('⚡ 一鍵擇優裝備')}
               </button>
               <button
                 className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-400 hover:bg-zinc-800"
-                title="每個部位保留最好的三件與裝備中的，其餘賣掉"
+                title={t('每個部位保留最好的三件與裝備中的，其餘賣掉')}
                 onClick={sellJunk}
               >
-                🧹 清雜物
+                {t('🧹 清雜物')}
               </button>
             </div>
 
             <div className="flex max-h-72 flex-col gap-1 overflow-y-auto">
-              {hero.bag.length === 0 && <div className="text-xs text-zinc-500">背包空空的，去打點怪吧</div>}
+              {hero.bag.length === 0 && <div className="text-xs text-zinc-500">{t('背包空空的，去打點怪吧')}</div>}
               {hero.bag.length > 0 && bagView.length === 0 && (
-                <div className="text-xs text-zinc-500">沒有符合篩選條件的裝備</div>
+                <div className="text-xs text-zinc-500">{t('沒有符合篩選條件的裝備')}</div>
               )}
               {bagView.map((it) => {
                 const equipped = Object.values(lo.equipped).includes(it.id)
@@ -612,13 +623,13 @@ export default function Adventure({ tools }: Props) {
                 return (
                   <div key={it.id} className="flex items-center gap-2 rounded border border-zinc-800 px-2 py-1 text-xs">
                     <ItemIcon it={it} />
-                    <span className="w-12 flex-none text-zinc-500">{SLOT_NAME[it.slot]}</span>
+                    <span className="w-12 flex-none text-zinc-500">{t(SLOT_NAME[it.slot])}</span>
                     <div className="min-w-0 flex-1 truncate"><ItemLine it={it} dim={equipped} /></div>
-                    {better && <span className="flex-none text-emerald-400" title="比目前裝著的好">▲</span>}
+                    {better && <span className="flex-none text-emerald-400" title={t('比目前裝著的好')}>▲</span>}
                     <span className="flex-none text-zinc-600">{itemScore(it)}</span>
-                    {!equipped && <button className="flex-none text-emerald-400 hover:text-emerald-300" onClick={() => equip(it)}>裝備</button>}
-                    {!equipped && <button className="flex-none text-zinc-500 hover:text-red-400" onClick={() => sell(it)}>賣</button>}
-                    {equipped && <span className="flex-none text-zinc-600">使用中</span>}
+                    {!equipped && <button className="flex-none text-emerald-400 hover:text-emerald-300" onClick={() => equip(it)}>{t('裝備')}</button>}
+                    {!equipped && <button className="flex-none text-zinc-500 hover:text-red-400" onClick={() => sell(it)}>{t('賣')}</button>}
+                    {equipped && <span className="flex-none text-zinc-600">{t('使用中')}</span>}
                   </div>
                 )
               })}

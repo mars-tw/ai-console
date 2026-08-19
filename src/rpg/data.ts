@@ -3,6 +3,7 @@
 // 四條技能線刻意做成可以互相補位：近戰高傷高風險、遠程穩定、
 // 魔法爆發但吃 MP、信仰負責補血與減傷。沒有職業，所以混搭才是玩法。
 
+import { registerItemPrefixes } from '@/i18n'
 import type { AffixKey, Dungeon, Line, Monster, Rarity, Skill, Zone } from './types'
 
 // ── 技能 ───────────────────────────────────────────
@@ -128,6 +129,9 @@ export const PREFIXES: Record<Rarity, string[]> = {
   rare: ['秘銀', '符文', '風行'],
   legend: ['龍紋', '曙光', '終末'],
 }
+
+// 裝備名是「前綴 + 基礎名」組出來的，i18n 要知道前綴有哪些才拆得開
+registerItemPrefixes(Object.values(PREFIXES).flat())
 
 export const AFFIX_POOL: AffixKey[] = ['str', 'dex', 'int', 'fai', 'vit', 'atk', 'def', 'crit', 'haste', 'leech']
 /** 每點 ilvl 給的詞綴數值，百分比類要小很多 */

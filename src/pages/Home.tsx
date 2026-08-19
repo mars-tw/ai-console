@@ -22,12 +22,12 @@ const PROJ_BADGE: Record<string, { label: string; cls: string }> = {
 const WEEK_MS = 7 * 86400 * 1000
 
 function relTime(msOrIso: number | string): string {
-  const t = typeof msOrIso === 'number' ? msOrIso : new Date(msOrIso).getTime()
-  if (!t || Number.isNaN(t)) return ''
-  const s = Math.max(0, (Date.now() - t) / 1000)
-  if (s < 3600) return `${Math.floor(s / 60)} 分鐘前`
-  if (s < 86400) return `${Math.floor(s / 3600)} 小時前`
-  return `${Math.floor(s / 86400)} 天前`
+  const ms = typeof msOrIso === 'number' ? msOrIso : new Date(msOrIso).getTime()
+  if (!ms || Number.isNaN(ms)) return ''
+  const s = Math.max(0, (Date.now() - ms) / 1000)
+  if (s < 3600) return t('{n} 分鐘前', { n: Math.floor(s / 60) })
+  if (s < 86400) return t('{n} 小時前', { n: Math.floor(s / 3600) })
+  return t('{n} 天前', { n: Math.floor(s / 86400) })
 }
 
 function fmtSize(bytes: number): string {
@@ -37,7 +37,7 @@ function fmtSize(bytes: number): string {
 }
 
 function folderName(dir: string): string {
-  if (!dir) return '（無目錄）'
+  if (!dir) return t('（無目錄）')
   const parts = dir.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean)
   return parts[parts.length - 1] || dir
 }
@@ -96,14 +96,14 @@ export default function Home() {
 
   // 每 60 秒輪詢索引與即時狀態（自動化每 15 分鐘會刷新磁碟上的資料）
   useEffect(() => {
-    const t = setInterval(() => {
+    const timer = setInterval(() => {
       reloadIndex()
       if (apiOk) {
         fetch('/api/status').then((r) => r.ok ? r.json() : null)
           .then((d) => d?.tools && setLiveTools(d.tools)).catch(() => {})
       }
     }, 60000)
-    return () => clearInterval(t)
+    return () => clearInterval(timer)
   }, [apiOk])
 
   // 還原上次選取的對話
@@ -132,7 +132,7 @@ export default function Home() {
     try {
       const r = await fetch('/api/launch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: c.id }) })
       const d = await r.json()
-      if (d.ok) showToast(`已開啟終端：${d.cmd}`)
+      if (d.ok) showToast(t('已開啟終端：{cmd}', { cmd: d.cmd }))
       else {
         if (c.resume) { copy(c.resume, 'resume'); showToast('此工具無法直接啟動，已改為複製接續指令') }
         else showToast('無法啟動：' + (d.error || ''))
@@ -157,7 +157,7 @@ export default function Home() {
       text: m.text.slice(0, 1200),
     }))
     setChatMsgs(seeded)
-    showToast(`已載入近期 ${seeded.length} 則訊息作為上下文`)
+    showToast(t('已載入近期 {n} 則訊息作為上下文', { n: seeded.length }))
   }
 
   const inferTask = (): string => {
@@ -179,13 +179,13 @@ export default function Home() {
         if (rd.ok && rd.model) {
           useModel = rd.model
           setRoutedModel(rd.model)
-          setRouteInfo(`自動選擇：${rd.model} — ${rd.reason}`)
+          setRouteInfo(t('自動選擇：{model} — {reason}', { model: rd.model, reason: rd.reason }))
         } else {
-          setRouteInfo(rd.reason || '自動路由失敗')
+          setRouteInfo(rd.reason || t('自動路由失敗'))
           setChatBusy(false)
           return
         }
-      } catch { setRouteInfo('路由 API 無回應'); return }
+      } catch { setRouteInfo(t('路由 API 無回應')); return }
     }
     const history = chatMsgs.length ? chatMsgs : (detail?.messages?.slice(-8).map((m) => ({
       role: m.role === 'assistant' ? 'assistant' : 'user', text: m.text.slice(0, 1200),
@@ -201,18 +201,18 @@ export default function Home() {
         body: JSON.stringify({
           model: useModel,
           messages: [
-            { role: 'system', content: '你正在接續一段來自其他 AI 工具的對話。以下是對話的近期內容，請直接延續脈絡，用繁體中文回答。' },
+            { role: 'system', content: t('你正在接續一段來自其他 AI 工具的對話。以下是對話的近期內容，請直接延續脈絡，用繁體中文回答。') },
             ...next.map((m) => ({ role: m.role, content: m.text })),
           ],
         }),
       })
       const d = await r.json()
-      const reply = d.ok ? (d.content || d.reasoning || '（空回應）') : `⚠️ ${d.error || '呼叫失敗'}`
+      const reply = d.ok ? (d.content || d.reasoning || t('（空回應）')) : `⚠️ ${d.error || t('呼叫失敗')}`
       const finalMsgs = [...next, { role: 'assistant', text: reply }]
       setChatMsgs(finalMsgs)
       if (selected) localStorage.setItem('ac_chat_' + selected.id, JSON.stringify(finalMsgs.slice(-30)))
     } catch {
-      setChatMsgs([...next, { role: 'assistant', text: '⚠️ 控制 API 無回應' }])
+      setChatMsgs([...next, { role: 'assistant', text: t('⚠️ 控制 API 無回應') }])
     }
     setChatBusy(false)
   }
@@ -259,7 +259,7 @@ export default function Home() {
     })
     const map = new Map<string, ConversationSummary[]>()
     for (const c of filtered) {
-      const key = c.projectDir || '（無目錄）'
+      const key = c.projectDir || t('（無目錄）')
       const arr = map.get(key) || []
       arr.push(c)
       map.set(key, arr)
@@ -293,8 +293,8 @@ export default function Home() {
     setTimeout(() => setCopied(''), 1500)
   }
 
-  if (error) return <div className="p-8 text-red-600">索引載入失敗：{error}（請先執行 tools/indexer.py）</div>
-  if (!index) return <div className="p-8 text-zinc-500">正在掃描全部 AI 對話…</div>
+  if (error) return <div className="p-8 text-red-600">{t('索引載入失敗：{err}（請先執行 tools/indexer.py）', { err: error })}</div>
+  if (!index) return <div className="p-8 text-zinc-500">{t('正在掃描全部 AI 對話…')}</div>
 
   return (
     <div className="flex h-screen flex-col bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
@@ -303,41 +303,41 @@ export default function Home() {
         <aside className="flex w-80 flex-none flex-col border-r border-zinc-200 dark:border-zinc-800">
           <div className="border-b border-zinc-200 p-3 dark:border-zinc-800">
             <div className="mb-2 flex items-baseline justify-between">
-              <h1 className="text-lg font-medium">AI 控制台</h1>
-              <span className="text-xs text-zinc-400">{relTime(index.generated_at)}更新</span>
+              <h1 className="text-lg font-medium">{t('AI 控制台')}</h1>
+              <span className="text-xs text-zinc-400">{t('{time}更新', { time: relTime(index.generated_at) })}</span>
             </div>
             <div className="mb-2 flex items-center gap-2">
               <button
                 className="rounded-md border border-zinc-200 px-3 py-1 text-xs hover:bg-zinc-50 disabled:opacity-40 dark:border-zinc-700 dark:hover:bg-zinc-900"
                 disabled={!apiOk || busy === 'refresh'}
                 onClick={refresh}
-                title={apiOk ? '重新掃描全部工具的對話' : '控制 API 未啟動（npm run dev 會同時啟動）'}
+                title={apiOk ? t('重新掃描全部工具的對話') : t('控制 API 未啟動（npm run dev 會同時啟動）')}
               >
-                {busy === 'refresh' ? '掃描中…' : '↻ 重新掃描'}
+                {busy === 'refresh' ? t('掃描中…') : t('↻ 重新掃描')}
               </button>
-              {!apiOk && <span className="text-xs text-amber-600">控制 API 離線（檢視模式）</span>}
+              {!apiOk && <span className="text-xs text-amber-600">{t('控制 API 離線（檢視模式）')}</span>}
             </div>
             <input
               className="w-full rounded-md border border-zinc-200 bg-transparent px-3 py-1.5 text-sm outline-none focus:border-zinc-400 dark:border-zinc-700"
-              placeholder="搜尋全部對話…"
+              placeholder={t('搜尋全部對話…')}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
             <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs text-zinc-500">
               <input type="checkbox" checked={showSubagent} onChange={(e) => setShowSubagent(e.target.checked)} />
-              顯示子代理對話（{index.stats.subagent} 份）
+              {t('顯示子代理對話（{n} 份）', { n: index.stats.subagent })}
             </label>
             <label className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-zinc-500">
               <input type="checkbox" checked={showDup} onChange={(e) => setShowDup(e.target.checked)} />
-              顯示重複副本（{index.stats.duplicates ?? 0} 份，去重後 {index.stats.unique ?? index.stats.total} 份正本）
+              {t('顯示重複副本（{dup} 份，去重後 {uniq} 份正本）', { dup: index.stats.duplicates ?? 0, uniq: index.stats.unique ?? index.stats.total })}
             </label>
             <label className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-zinc-500">
               <input type="checkbox" checked={showOld} onChange={(e) => setShowOld(e.target.checked)} />
-              顯示一週未使用的舊對話（已收納 {oldCount} 份）
+              {t('顯示一週未使用的舊對話（已收納 {n} 份）', { n: oldCount })}
             </label>
             <label className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-zinc-500">
               <input type="checkbox" checked={showDispatch} onChange={(e) => setShowDispatch(e.target.checked)} />
-              顯示 AI 派工對話（已隱藏 {index.stats.dispatch ?? 0} 份 worker 紀錄）
+              {t('顯示 AI 派工對話（已隱藏 {n} 份 worker 紀錄）', { n: index.stats.dispatch ?? 0 })}
             </label>
           </div>
 
@@ -363,26 +363,26 @@ export default function Home() {
                       </span>
                     )}
                     {badge && <span className={`flex-none rounded-full px-2 py-0.5 text-xs ${badge.cls}`}>{badge.label}</span>}
-                    {hub?.needs_handoff && <span className="flex-none rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-950 dark:text-amber-300">待接力</span>}
+                    {hub?.needs_handoff && <span className="flex-none rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-950 dark:text-amber-300">{t('待接力')}</span>}
                     <span className="flex-none text-xs text-zinc-400">{convs.length}</span>
                     {apiOk && convs.some((c) => c.resume) && (
                       <span
                         role="button"
                         className="flex-none rounded border border-zinc-200 px-1.5 py-0.5 text-xs hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
-                        title="派工：接續此資料夾最新的對話"
+                        title={t('派工：接續此資料夾最新的對話')}
                         onClick={(e) => {
                           e.stopPropagation()
                           const target = convs.find((c) => c.resume)
                           if (target) launch(target)
                         }}
                       >
-                        {busy && convs.some((c) => c.id === busy) ? '…' : '▶ 派工'}
+                        {busy && convs.some((c) => c.id === busy) ? '…' : t('▶ 派工')}
                       </span>
                     )}
                   </button>
                   {open && hub?.next_step && (
                     <div className="mx-3 mb-2 rounded-md bg-zinc-50 px-2 py-1.5 text-xs text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
-                      下一步：{hub.next_step}
+                      {t('下一步：')}{hub.next_step}
                     </div>
                   )}
                   {open && shown.map((c) => (
@@ -393,19 +393,19 @@ export default function Home() {
                     >
                       <span className="truncate text-sm">
                         {c.title}
-                        {c.dup && <span className="ml-1 rounded bg-zinc-100 px-1 text-xs text-zinc-400 dark:bg-zinc-800">副本→{c.dupOfTool}</span>}
-                        {!!c.dupCount && <span className="ml-1 rounded bg-zinc-100 px-1 text-xs text-zinc-400 dark:bg-zinc-800">+{c.dupCount} 副本</span>}
+                        {c.dup && <span className="ml-1 rounded bg-zinc-100 px-1 text-xs text-zinc-400 dark:bg-zinc-800">{t('副本')}→{c.dupOfTool}</span>}
+                        {!!c.dupCount && <span className="ml-1 rounded bg-zinc-100 px-1 text-xs text-zinc-400 dark:bg-zinc-800">+{t('{n} 副本', { n: c.dupCount })}</span>}
                       </span>
                       <span className="flex items-center gap-2 text-xs text-zinc-400">
                         <span className={`inline-block h-1.5 w-1.5 rounded-full ${(liveTools ?? index.tools)[c.tool]?.rate_limited ? 'bg-red-500' : 'bg-emerald-500'}`} />
                         {c.toolLabel} · {relTime(c.mtime)} · {fmtSize(c.size)}
-                        {c.msgCount > 0 && ` · ${c.msgCount} 則`}
+                        {c.msgCount > 0 && ` · ${t('{n} 則', { n: c.msgCount })}`}
                       </span>
                     </button>
                   ))}
                   {open && convs.length > 40 && !showAll[dir] && (
                     <button className="w-full px-3 py-1.5 text-left text-xs text-zinc-400 hover:text-zinc-600" onClick={() => setShowAll((s) => ({ ...s, [dir]: true }))}>
-                      顯示全部 {convs.length} 筆…
+                      {t('顯示全部 {n} 筆…', { n: convs.length })}
                     </button>
                   )}
                 </div>
@@ -450,8 +450,8 @@ export default function Home() {
           ) : !selected ? (
             <div className="flex flex-1 items-center justify-center text-zinc-400">
               <div className="text-center">
-                <p className="mb-2 text-lg">從左側選一個對話</p>
-                <p className="text-sm">共 {index.stats.unique ?? index.stats.total} 份正本對話 · {Object.keys(index.tools).length} 個工具 · {groups.length} 個專案資料夾</p>
+                <p className="mb-2 text-lg">{t('從左側選一個對話')}</p>
+                <p className="text-sm">{t('共 {n} 份正本對話 · {tools} 個工具 · {groups} 個專案資料夾', { n: index.stats.unique ?? index.stats.total, tools: Object.keys(index.tools).length, groups: groups.length })}</p>
               </div>
             </div>
           ) : (
@@ -470,12 +470,12 @@ export default function Home() {
                       disabled={busy === selected.id}
                       onClick={() => launch(selected)}
                     >
-                      {busy === selected.id ? '啟動中…' : '▶ 接續此對話'}
+                      {busy === selected.id ? t('啟動中…') : t('▶ 接續此對話')}
                     </button>
                   )}
                   {selected.resume && (
                     <button className="rounded border border-zinc-200 px-2 py-0.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" onClick={() => copy(selected.resume, 'resume')}>
-                      {copied === 'resume' ? '已複製 ✓' : `複製接續指令：${selected.resume}`}
+                      {copied === 'resume' ? t('已複製 ✓') : t('複製接續指令：{cmd}', { cmd: selected.resume })}
                     </button>
                   )}
                   <button className="rounded border border-zinc-200 px-2 py-0.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" onClick={() => copy(selected.path, 'path')}>
@@ -572,14 +572,14 @@ export default function Home() {
         </div>
       )}
       <footer className="flex flex-none items-center gap-4 overflow-x-auto border-t border-zinc-200 px-4 py-1.5 text-xs dark:border-zinc-800">
-        {Object.entries(liveTools ?? index.tools).map(([key, t]) => (
-          <span key={key} className="flex flex-none items-center gap-1.5" title={t.evidence || t.role}>
-            <span className={`inline-block h-2 w-2 rounded-full ${STATUS_DOT[t.status] || STATUS_DOT.unknown}`} />
-            <span className="text-zinc-600 dark:text-zinc-300">{t.label}</span>
-            <span className="text-zinc-400">{STATUS_LABEL[t.status] || t.status}</span>
+        {Object.entries(liveTools ?? index.tools).map(([key, tool]) => (
+          <span key={key} className="flex flex-none items-center gap-1.5" title={tool.evidence || tool.role}>
+            <span className={`inline-block h-2 w-2 rounded-full ${STATUS_DOT[tool.status] || STATUS_DOT.unknown}`} />
+            <span className="text-zinc-600 dark:text-zinc-300">{tool.label}</span>
+            <span className="text-zinc-400">{t(STATUS_LABEL[tool.status] || tool.status)}</span>
           </span>
         ))}
-        <span className="ml-auto flex-none text-zinc-400">{liveTools ? '即時狀態 · ' : ''}ai-hub 每 15 分鐘自動掃描</span>
+        <span className="ml-auto flex-none text-zinc-400">{liveTools ? t('即時狀態 · ') : ''}{t('ai-hub 每 15 分鐘自動掃描')}</span>
       </footer>
     </div>
   )
