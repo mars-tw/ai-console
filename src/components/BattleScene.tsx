@@ -8,7 +8,7 @@
 
 import { useEffect, useRef } from 'react'
 import {
-  BG_H, BG_W, bgImage, drawAlly, drawHero, drawMonster, drawPet, drawWeapon,
+  BG_H, BG_W, bgImage, drawAlly, drawHero, drawMonster, drawPet, drawSkillFx, drawWeapon,
   loadBattleArt, unitHeight,
 } from '@/rpg/battleArt'
 import {
@@ -27,16 +27,17 @@ const MAX_GAP = 40
 
 interface Slot { c: Combatant; x: number; y: number }
 
-/** 依人數把一邊排開：index 0 站最前面，其餘往自己這側後退並交錯前後 */
-function layout(list: Combatant[], side: 'left' | 'right'): Slot[] {
-  const n = Math.max(1, list.length)
+/** 第 index 個座位在哪（總共 count 個）。index 0 站最前面 */
+function seatAt(index: number, count: number, side: 'left' | 'right') {
+  const n = Math.max(1, count)
   const gap = n > 1 ? Math.min(MAX_GAP, (BAND_INNER - BAND_OUTER) / (n - 1)) : 0
-  return list.map((c, i) => {
-    const off = BAND_INNER - i * gap
-    const x = side === 'left' ? off : BG_W - off
-    return { c, x, y: GROUND_Y + (i % 2 === 0 ? 0 : 16) }
-  })
+  const off = BAND_INNER - index * gap
+  return {
+    x: side === 'left' ? off : BG_W - off,
+    y: GROUND_Y + (index % 2 === 0 ? 0 : 16),
+  }
 }
+
 
 export default function BattleScene({ battle, tick }: { battle: Battle; tick: number }) {
   const ref = useRef<HTMLCanvasElement>(null)
@@ -48,7 +49,7 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
   // 看過的每個單位。死亡動畫需要它 —— 引擎在單位死掉的**同一個 tick**
   // 就把它從 battle.foes 移除了，只掃當前清單的話永遠抓不到死亡事件，
   // 死亡動畫等於從來沒播過（實測才發現）。
-  const seen = useRef(new Map<string, { c: Combatant; index: number; side: 'left' | 'right' }>())
+  const seen = useRef(new Map<string, { c: Combatant; seat: number; side: 'left' | 'right' }>())
 
   useEffect(() => {
     loadBattleArt(
@@ -102,19 +103,37 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
       ctx.imageSmoothingEnabled = false
 
       const ours = [battle.hero, ...(battle.pet ? [battle.pet] : []), ...battle.allies]
-      const mine = layout(ours.filter((c) => c.hp > 0), 'left')
-      const foes = layout(battle.foes.filter((c) => c.hp > 0), 'right')
 
-      // 先把當下看得到的單位記起來（含它排第幾個，死亡動畫要在原位播）
-      for (const [list, side] of [
-        [ours, 'left'] as const,
-        [battle.foes, 'right'] as const,
-      ]) {
-        list.forEach((c, i) => seen.current.set(c.uid, { c, index: i, side }))
+      /**
+       * 座位號在「第一次看到這個單位」時就決定，之後不再變。
+       *
+       * 每幀重新排位會出兩種重疊：死掉的怪被擺到陣型帶最前面（因為
+       * 單一元素的排版永遠算出同一格），以及活著的怪被重新編號後
+       * 剛好滑進屍體的位置。固定座位號兩個都不會發生。
+       */
+      const seat = (c: Combatant, i: number, side: 'left' | 'right') => {
+        const prev = seen.current.get(c.uid)
+        const s2 = prev?.seat ?? i
+        seen.current.set(c.uid, { c, seat: s2, side })
+        return s2
       }
-      if (seen.current.size > 60) {
-        for (const uid of [...seen.current.keys()].slice(0, 30)) seen.current.delete(uid)
+      ours.forEach((c, i) => seat(c, i, 'left'))
+      battle.foes.forEach((c, i) => seat(c, i, 'right'))
+
+      // 每邊的座位總數要含屍體，不然剩下的人會被擠到中間
+      const seatsOf = (side: 'left' | 'right') => {
+        let max = 0
+        for (const r of seen.current.values()) if (r.side === side) max = Math.max(max, r.seat + 1)
+        return Math.max(1, max)
       }
+      const nLeft = seatsOf('left')
+      const nRight = seatsOf('right')
+      const place = (c: Combatant, side: 'left' | 'right'): Slot => {
+        const r = seen.current.get(c.uid)
+        return { c, ...seatAt(r?.seat ?? 0, side === 'left' ? nLeft : nRight, side) }
+      }
+      const mine = ours.filter((c) => c.hp > 0).map((c) => place(c, 'left'))
+      const foes = battle.foes.filter((c) => c.hp > 0).map((c) => place(c, 'right'))
 
       // 死亡事件從 fx 讀，不是從當前清單找 —— 死掉的怪已經被引擎移除了
       for (const e of battle.fx) {
@@ -123,15 +142,18 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
         if (t0 === undefined || now() - t0 > (FX_LIFE.die ?? 1)) continue
         const rec = seen.current.get(e.uid)
         if (!rec) continue
-        const [slot] = layout([rec.c], rec.side)
-        dying.current.set(e.uid, {
-          c: rec.c,
-          slot: { ...slot, y: GROUND_Y + (rec.index % 2 ? 16 : 0) },
-          at: t0,
-        })
+        dying.current.set(e.uid, { c: rec.c, slot: place(rec.c, rec.side), at: t0 })
       }
       for (const [uid, d] of dying.current) {
-        if (now() - d.at > (FX_LIFE.die ?? 1)) dying.current.delete(uid)
+        if (now() - d.at > (FX_LIFE.die ?? 1)) {
+          dying.current.delete(uid)
+          seen.current.delete(uid)     // 動畫播完才放掉座位
+        }
+      }
+      // 清掉已經不在場上、也沒在播動畫的舊紀錄（換波、換場）
+      const live = new Set([...ours, ...battle.foes].map((c) => c.uid))
+      for (const uid of [...seen.current.keys()]) {
+        if (!live.has(uid) && !dying.current.has(uid)) seen.current.delete(uid)
       }
 
       // 全場震動：任何人受擊都會晃，暴擊晃更兇
@@ -232,6 +254,10 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
         if (atk && atk.t > 0.15) {
           drawSlash(ctx, x, s.y, (atk.t - 0.15) / 0.85, facing, !!critFx)
         }
+        // 技能專屬特效（疊在目標身上，畫在命中火花之前）
+        const skillFx = activeFx(s.c.uid, 'skill')
+        if (skillFx?.e.skill) drawSkillFx(ctx, skillFx.e.skill, x, s.y, skillFx.t)
+
         // 命中特效
         if (hurt) {
           drawSparks(ctx, x, s.y - 24, hurt.t, hurt === critFx)

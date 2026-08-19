@@ -218,6 +218,18 @@ export interface Battle {
   focus?: string
   /** 主角本回合處於格擋姿態：擋下重擊的大半傷害 */
   guarding?: boolean
+  /**
+   * 回合制的行動佇列。
+   *
+   * 一個回合不再「一次跑完」，而是排成一串，由畫面一個一個放出來 ——
+   * 這樣每個人出手都看得到、也才有下指令的空檔。
+   * 空的代表現在是「等玩家下令」的階段。
+   */
+  queue: string[]
+  /** 本回合玩家指定的行動：技能 id（null 代表普攻）*/
+  order?: { skill: string | null; target?: string }
+  /** 回合階段：input = 等下令，resolve = 逐個結算中 */
+  phase: 'input' | 'resolve'
   loot: Item[]
   /** 這場戰鬥撿到的藥水，結算時才進背包 */
   potionDrops: { hp: number; mp: number }
@@ -231,8 +243,8 @@ export interface Battle {
 const LOG_MAX = 60
 const FX_MAX = 40
 
-function fx(b: Battle, uid: string, kind: FxEvent['kind'], amount?: number) {
-  b.fx.push({ uid, kind, amount, tick: b.tick })
+function fx(b: Battle, uid: string, kind: FxEvent['kind'], amount?: number, skill?: string) {
+  b.fx.push({ uid, kind, amount, tick: b.tick, skill })
   if (b.fx.length > FX_MAX) b.fx.splice(0, b.fx.length - FX_MAX)
 }
 
@@ -304,6 +316,19 @@ export function allyCombatant(key: string, name: string, color: string, level: n
   }
 }
 
+/**
+ * 一波幾隻怪。
+ *
+ * 回合制的重點是「這回合要打誰」，只有一隻的話根本沒有選擇。
+ * 所以基礎就給多隻，並隨等級再多一點 —— 但上限壓在 4，
+ * 再多陣型就會塞不下、畫面也讀不了。
+ */
+export function waveSize(heroLevel: number, kind: 'field' | 'dungeon'): number {
+  const base = kind === 'dungeon' ? 2 : 1
+  const bonus = heroLevel >= 20 ? 2 : heroLevel >= 8 ? 1 : 0
+  return Math.min(4, base + bonus + (Math.random() < 0.35 ? 1 : 0))
+}
+
 /** 每隻小怪有機會變成精英：血厚攻高，但掉落也好，值得優先集火 */
 const ELITE_CHANCE = 0.18
 const ELITE_MULT = { hp: 1.9, atk: 1.35, def: 1.2 }
@@ -348,6 +373,7 @@ export function startBattle(h: Hero, kind: 'field' | 'dungeon', placeId: string,
     hero: heroCombatant(h), pet: activePet(h), allies, foes: [], log: [], fx: [], tick: 0,
     heroWeapon: equippedWeaponLine(h),
     heroLook: h.look ?? 'hero',
+    queue: [], phase: 'input',
     over: false, loot: [], potionDrops: { hp: 0, mp: 0 }, xp: 0, gold: 0, kills: 0,
   }
   const place = kind === 'field' ? ZONE_BY_ID[placeId] : DUNGEON_BY_ID[placeId]
@@ -357,7 +383,7 @@ export function startBattle(h: Hero, kind: 'field' | 'dungeon', placeId: string,
     : t('踏入 {place}（第 1 / {rooms} 間）', { place: placeName, rooms: b.rooms }))
   const ids = kind === 'field' ? (ZONE_BY_ID[placeId]?.monsters ?? ['slime'])
     : (DUNGEON_BY_ID[placeId]?.trash ?? ['goblin'])
-  spawnWave(b, ids, kind === 'field' ? 1 : 2)
+  spawnWave(b, ids, waveSize(h.level, kind))
   return b
 }
 
@@ -472,6 +498,7 @@ function act(b: Battle, c: Combatant, h: Hero | null, haste: number, skipCd = fa
     const pool = skillId === 'revive' ? [c, ...b.allies].filter((x) => x.hp > 0) : [c]
     for (const t of pool) {
       t.hp = Math.min(t.hpMax, t.hp + amount)
+      fx(b, t.uid, 'skill', undefined, skillId)
       fx(b, t.uid, 'heal', amount)
     }
     say(b, 'heal', t('{who} 施放「{skill}」，回復 {amount} 生命', {
@@ -504,6 +531,7 @@ function act(b: Battle, c: Combatant, h: Hero | null, haste: number, skipCd = fa
   if (skillId === 'execute' && tgt.hp < tgt.hpMax * 0.3) dmg = Math.round(dmg * 1.6)
   tgt.hp = Math.max(0, tgt.hp - dmg)
   fx(b, c.uid, 'attack')
+  fx(b, tgt.uid, 'skill', undefined, skillId)   // 技能專屬特效，疊在目標身上
   fx(b, tgt.uid, crit ? 'crit' : 'hurt', dmg)
   if (c.leech > 0) c.hp = Math.min(c.hpMax, c.hp + Math.round(dmg * c.leech))
   say(b, crit ? 'crit' : 'hit', t('{who} 使用「{skill}」對 {target} 造成 {dmg} 傷害{crit}', {
@@ -569,18 +597,82 @@ export function castNow(b: Battle, h: Hero, skillId: string): boolean {
   return true
 }
 
-export function stepBattle(b: Battle, h: Hero): void {
-  if (b.over) return
+/** 這回合的出手順序：我方由前而後，最後才輪到敵方 */
+function turnOrder(b: Battle): string[] {
+  return [
+    b.hero.uid,
+    ...(b.pet ? [b.pet.uid] : []),
+    ...b.allies.map((a) => a.uid),
+    ...b.foes.map((f) => f.uid),
+  ]
+}
+
+function findUnit(b: Battle, uid: string): Combatant | undefined {
+  if (b.hero.uid === uid) return b.hero
+  if (b.pet?.uid === uid) return b.pet
+  return b.allies.find((a) => a.uid === uid) ?? b.foes.find((f) => f.uid === uid)
+}
+
+/**
+ * 玩家下令，開始結算這一回合。
+ * skill 傳 null 代表普攻；target 沒傳就用目前的集火目標。
+ */
+export function commitOrder(b: Battle, skill: string | null, target?: string): boolean {
+  if (b.over || b.phase !== 'input') return false
+  b.order = { skill, target: target ?? b.focus }
+  if (target) b.focus = target
+  b.queue = turnOrder(b)
+  b.phase = 'resolve'
   b.tick++
-  // 集火目標死了就清掉，不然畫面上會一直標著一個空位
-  if (b.focus && !b.foes.some((f) => f.uid === b.focus && f.hp > 0)) b.focus = undefined
+  return true
+}
+
+/**
+ * 放出佇列裡的下一個行動。回傳 false 代表這回合已經結算完。
+ *
+ * 拆成一次一個是回合制的關鍵：畫面可以在每個行動之間留時間播動畫，
+ * 而不是一瞬間跳完整個回合、只留下一堆看不懂的傷害數字。
+ */
+export function stepTurn(b: Battle, h: Hero): boolean {
+  if (b.over || b.phase !== 'resolve') return false
   const st = computeStats(h)
 
-  act(b, b.hero, h, st.haste)
-  if (b.pet) act(b, b.pet, null, 0)
-  for (const a of b.allies) act(b, a, null, 0.1)
-  for (const f of b.foes) act(b, f, null, 0)
+  while (b.queue.length) {
+    const uid = b.queue.shift()!
+    const c = findUnit(b, uid)
+    if (!c || c.hp <= 0) continue
+    if (c.uid === b.hero.uid) {
+      b.queued = b.order?.skill ?? undefined
+      act(b, c, h, st.haste)
+      b.queued = undefined
+    } else {
+      act(b, c, null, c.side === 'ally' ? 0.1 : 0)
+    }
+    settle(b, h)
+    if (b.queue.length === 0) endRound(b, h)
+    return true
+  }
+  endRound(b, h)
+  return false
+}
 
+function endRound(b: Battle, h: Hero) {
+  b.phase = 'input'
+  b.order = undefined
+  b.guarding = false
+  // 集火目標死了就清掉，不然畫面上會一直標著一個空位
+  if (b.focus && !b.foes.some((f) => f.uid === b.focus && f.hp > 0)) b.focus = undefined
+  settle(b, h)
+}
+
+/**
+ * 一次行動之後的收尾：清屍體、發獎勵、判定勝負、換下一波。
+ *
+ * 即時模式與回合制都會呼叫它。放在同一個函式裡才不會出現
+ * 「其中一種模式忘了換波」這種只在某個模式下才復現的 bug。
+ */
+function settle(b: Battle, h: Hero): void {
+  if (b.over) return
   // 清掉倒下的敵人，結算獎勵
   const dead = b.foes.filter((f) => f.hp <= 0)
   if (dead.length) {
@@ -628,7 +720,7 @@ export function stepBattle(b: Battle, h: Hero): void {
   // 這一波清完 → 下一波 / 下一間 / 王
   if (!b.foes.length) {
     if (b.kind === 'field') {
-      spawnWave(b, ZONE_BY_ID[b.placeId]?.monsters ?? ['slime'], 1)
+      spawnWave(b, ZONE_BY_ID[b.placeId]?.monsters ?? ['slime'], waveSize(h.level, 'field'))
       return
     }
     const dg = DUNGEON_BY_ID[b.placeId]
@@ -647,9 +739,25 @@ export function stepBattle(b: Battle, h: Hero): void {
       b.foes = [foeCombatant(MONSTER_BY_ID[dg.boss], 999)]
     } else {
       say(b, 'info', t('前進到第 {room} / {rooms} 間', { room: b.room, rooms: b.rooms }))
-      spawnWave(b, dg.trash, 2)
+      spawnWave(b, dg.trash, waveSize(h.level, 'dungeon'))
     }
   }
+}
+
+
+/** 舊的即時模式：整個回合一次跑完（自動掛機用） */
+export function stepBattle(b: Battle, h: Hero): void {
+  if (b.over) return
+  b.tick++
+  b.phase = 'input'
+  if (b.focus && !b.foes.some((f) => f.uid === b.focus && f.hp > 0)) b.focus = undefined
+  const st = computeStats(h)
+
+  act(b, b.hero, h, st.haste)
+  if (b.pet) act(b, b.pet, null, 0)
+  for (const a of b.allies) act(b, a, null, 0.1)
+  for (const f of b.foes) act(b, f, null, 0)
+  settle(b, h)
 }
 
 /** 把戰鬥結算進角色；回傳升了幾級 */

@@ -39,6 +39,8 @@ export function loadBattleArt(monsterIds: string[], bgId: string, allyKeys: stri
     }
   }
   if (petArt) load(`pet:${petArt}`, `/office/rpg/pets/${petArt}.png`)
+  // 技能特效在第一次用到時才載，不用開場就把 12 張全抓下來
+
   for (const w of WEAPON_LINES) load(`wpn:${w}`, `/office/rpg/weapons/weapon-${w}.png`)
   for (const k of allyKeys) load(`ally:${k}`, `/office/sprites/${k}.png`)
 }
@@ -59,6 +61,30 @@ export const bgImage = (id: string) => images.get(`bg:${id}`)
 export const monImage = (id: string) => images.get(`mon:${id}`)
 export const heroImage = (pose: string) => images.get(`hero:${pose}`)
 export const petImage = (art: string) => images.get(`pet:${art}`)
+
+/**
+ * 畫技能特效：疊在目標身上，前段放大衝出來、後段淡出。
+ * 素材還沒生好或不存在時什麼都不畫 —— 技能照樣會結算，只是少個花。
+ */
+export function drawSkillFx(
+  c: CanvasRenderingContext2D, skillId: string, x: number, footY: number, t: number,
+) {
+  if (t >= 1) return
+  const key = `fx:${skillId}`
+  if (!images.has(key) && !failed.has(key)) load(key, `/office/rpg/fx/fx-${skillId}.png`)
+  const img = images.get(key)
+  if (!img) return
+  // 前 25% 由小放大（衝擊感），之後維持並淡出
+  const grow = t < 0.25 ? 0.55 + (t / 0.25) * 0.45 : 1
+  const alpha = t < 0.7 ? 1 : 1 - (t - 0.7) / 0.3
+  const w = img.width * grow
+  const h = img.height * grow
+  c.save()
+  c.globalAlpha = Math.max(0, alpha)
+  c.globalCompositeOperation = 'lighter'      // 發光疊加，像素風的特效這樣才亮
+  c.drawImage(img, Math.round(x - w / 2), Math.round(footY - 28 - h / 2), w, h)
+  c.restore()
+}
 
 /** 畫寵物。比主角矮一截，站在隊伍的最外側 */
 export function drawPet(c: CanvasRenderingContext2D, art: string, x: number, footY: number) {

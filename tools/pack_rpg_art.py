@@ -42,6 +42,10 @@ HERO_POSES = ["hero-stand", "hero-attack", "hero-cast", "hero-hurt",
 # 寵物比主角小一號，跟在隊伍旁邊
 PETS = ["pet-slimecat", "pet-fluffbird", "pet-emberfox", "pet-mossturtle", "pet-starmoth"]
 PET_H = 26
+# 技能特效：疊在角色身上，比角色大一點才有魄力
+SKILL_FX = ["fx-slash", "fx-cleave", "fx-shoot", "fx-volley", "fx-bolt", "fx-flame",
+            "fx-meteor", "fx-smite", "fx-mend", "fx-execute", "fx-snipe", "fx-revive"]
+FX_H = 72
 # 武器疊在主角手上，高度抓主角的一半左右才不會比人還大
 WEAPONS = ["weapon-melee", "weapon-ranged", "weapon-magic", "weapon-faith"]
 WEAPON_H = 23
@@ -160,6 +164,22 @@ def pack_pets(names: list[str]) -> dict[str, list[int]]:
     return out
 
 
+def pack_fx(names: list[str]) -> dict[str, list[int]]:
+    """技能特效：等比縮到固定高度"""
+    (OUT / "fx").mkdir(parents=True, exist_ok=True)
+    out: dict[str, list[int]] = {}
+    for n in names:
+        img = trimmed(n)
+        if not img:
+            print(f"[{n}] 找不到素材，跳過")
+            continue
+        r = fit_height(img, FX_H)
+        r.save(OUT / "fx" / f"{n}.png")
+        out[n] = [r.width, r.height]
+        print(f"[{n}] OK  {r.width}x{r.height}")
+    return out
+
+
 def pack_icons(names: list[str]) -> list[str]:
     (OUT / "icons").mkdir(parents=True, exist_ok=True)
     done = []
@@ -200,9 +220,11 @@ def main() -> None:
 
     weapons = [n for n in WEAPONS if not only or n in only]
     pets = [n for n in PETS if not only or n in only]
+    fxs = [n for n in SKILL_FX if not only or n in only]
     m = pack_monsters(mons)
     wp = pack_weapons(weapons)
     pt = pack_pets(pets)
+    fx = pack_fx(fxs)
     h = {}
     for pre in ("hero", "heroine"):
         if not only or any(x in only for x in HERO_POSES if x.startswith(pre + "-")):
@@ -218,6 +240,7 @@ def main() -> None:
         prev["hero"] = h
     prev.setdefault("weapons", {}).update(wp)
     prev.setdefault("pets", {}).update(pt)
+    prev.setdefault("fx", {}).update(fx)
     prev["icons"] = sorted(set(prev.get("icons", []) + i))
     prev["bg"] = sorted(set(prev.get("bg", []) + b))
     prev["icon"] = ICON

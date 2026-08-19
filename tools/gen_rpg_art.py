@@ -154,6 +154,27 @@ PETS: dict[str, str] = {
     "pet-starmoth": "A palm-sized moth with soft violet wings dusted with tiny stars, glowing antennae.",
 }
 
+# ── 技能特效：手動施放時疊在目標身上的一格大圖 ──────
+# 用生成圖而不是純程式畫：刀光可以用程式畫，但「隕星」「烈焰」這種
+# 要有質感的東西，畫出來跟畫不出來差很多。
+FX_STYLE = (PIXEL + ", a single spell effect on a flat pure magenta #FF00FF background, "
+            "the effect only with no character and no ground, centred, "
+            "bold readable shapes, strong glow")
+SKILL_FX: dict[str, str] = {
+    "fx-slash": "Three overlapping white sword slash arcs with sharp motion trails, diagonal.",
+    "fx-cleave": "One huge wide crescent sword shockwave in pale blue-white, sweeping horizontally.",
+    "fx-shoot": "A streaking arrow with a long white motion trail and a small impact spark at the tip.",
+    "fx-volley": "Five arrows in a fan formation with motion trails, all pointing the same way.",
+    "fx-bolt": "A jagged violet arcane bolt with crackling energy around it.",
+    "fx-flame": "A billowing column of orange and yellow flame with ember sparks.",
+    "fx-meteor": "A blazing meteor with a long fiery tail streaking down diagonally, orange and white hot.",
+    "fx-smite": "A vertical shaft of golden holy light with radiating rays and small sparkles.",
+    "fx-mend": "A ring of soft green healing light with rising sparkles and leaf motes.",
+    "fx-execute": "A dark red crescent slash with dripping crimson energy, heavy and final.",
+    "fx-snipe": "A single piercing white beam with a crosshair flare at the impact point.",
+    "fx-revive": "A wide dome of warm golden light with feathers and rising motes.",
+}
+
 GROUPS = {
     "monsters": (MONSTERS, MON_STYLE, "1:1", True),
     "backgrounds": (ZONE_BGS, BG_STYLE, "16:9", False),
@@ -163,6 +184,7 @@ GROUPS = {
     "heroine": ({k.replace("hero-", "heroine-"): f"{HEROINE_DESC} The character is {v}."
                  for k, v in HERO_POSES.items()}, HERO_STYLE, "1:1", True),
     "pets": (PETS, PET_STYLE, "1:1", True),
+    "skillfx": (SKILL_FX, FX_STYLE, "1:1", True),
     "weapons": (WEAPONS, WEAPON_STYLE, "1:1", True),
 }
 

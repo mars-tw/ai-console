@@ -15,7 +15,7 @@ import {
   xpForLevel, type Battle,
 } from '@/rpg/engine'
 import { loadHero, resetHero, saveHero } from '@/rpg/save'
-import { castNow, guard, setFocus, drinkPotion, petXpForLevel } from '@/rpg/engine'
+import { commitOrder, guard, setFocus, stepTurn, drinkPotion, petXpForLevel } from '@/rpg/engine'
 import {
   AFFIX_NAME, AFFIX_PCT, ATTRS, ATTR_NAME, LINES, LINE_NAME, RARITY_COLOR,
   RARITY_NAME, SLOTS, SLOT_NAME, type Combatant, type Hero, type Item,
@@ -23,7 +23,8 @@ import {
 } from '@/rpg/types'
 import type { ToolStatus } from '@/types/data'
 
-const TICK_MS = 1400
+const TICK_MS = 1400        // 自動模式：一次心跳跑完一個回合
+const ACTION_MS = 620       // 回合制：每個人出手之間的間隔，留時間播動畫
 
 const LINE_COLOR: Record<Line, string> = {
   melee: '#f87171', ranged: '#4ade80', magic: '#60a5fa', faith: '#fbbf24',
@@ -148,8 +149,9 @@ export default function Adventure({ tools }: Props) {
   const heroRef = useRef(hero)
   const battleRef = useRef(battle)
   /** 手動模式排隊的技能：放在 ref，不去改動 state 物件 */
-  const queuedRef = useRef<string | null>(null)
   // ref 只在 effect 裡更新，不在 render 期間寫
+  const autoRef = useRef(auto)
+  useEffect(() => { autoRef.current = auto }, [auto])
   useEffect(() => { heroRef.current = hero }, [hero])
   useEffect(() => { battleRef.current = battle }, [battle])
 
@@ -179,14 +181,31 @@ export default function Adventure({ tools }: Props) {
     }
   }
 
-  // ── 戰鬥 tick ──
+  /**
+   * 戰鬥心跳。
+   *
+   * 兩種節奏共用同一顆計時器：
+   *   自動模式 → 每次心跳跑完一整個回合（掛機用）
+   *   手動模式 → 只在「結算中」才放出下一個行動；「等下令」時完全不動，
+   *              停在那裡等你按技能。這就是回合制的手感。
+   * 結算中的間隔刻意比較短，讓一個回合裡每個人出手看得清楚又不拖。
+   */
   useEffect(() => {
-    const timer = setInterval(() => {
+    let timer = 0
+    const beat = () => {
       const b = battleRef.current
       const h = heroRef.current
-      if (!b || b.over) return
-      if (queuedRef.current) { b.queued = queuedRef.current; queuedRef.current = null }
-      stepBattle(b, h)
+      if (!b || b.over) { timer = window.setTimeout(beat, TICK_MS); return }
+      let gap = TICK_MS
+      if (autoRef.current) {
+        stepBattle(b, h)
+      } else if (b.phase === 'resolve') {
+        stepTurn(b, h)
+        gap = ACTION_MS
+      } else {
+        timer = window.setTimeout(beat, 120)   // 等下令：只是輪詢，不推進戰鬥
+        return
+      }
       // 每回合把獎勵收進角色，這樣掛著離開也不會白打
       if (b.xp || b.gold || b.loot.length) {
         const gained = collect(h, b)
@@ -195,8 +214,10 @@ export default function Adventure({ tools }: Props) {
         setHero({ ...h })
       }
       setBattle({ ...b })
-    }, TICK_MS)
-    return () => clearInterval(timer)
+      timer = window.setTimeout(beat, gap)
+    }
+    timer = window.setTimeout(beat, TICK_MS)
+    return () => clearTimeout(timer)
   }, [])
 
   const enterZone = (id: string) => {
@@ -243,7 +264,8 @@ export default function Adventure({ tools }: Props) {
     setBattle({ ...battle })
     saveHero(hero)
   }
-  const castSkill = (id: string) => act((b, h) => castNow(b, h, id))
+  /** 下令：手動模式按技能就等於「這回合我用這招」，按下去整個回合開始結算 */
+  const castSkill = (id: string | null) => act((b) => commitOrder(b, id, b.focus))
   const drink = (kind: 'hp' | 'mp') => act((b, h) => drinkPotion(b, h, kind))
   const doGuard = () => act((b) => guard(b))
   const focusOn = (uid: string) => act((b) => setFocus(b, uid))
@@ -454,8 +476,24 @@ export default function Adventure({ tools }: Props) {
                 })}
               </div>
 
-              {/* ── 操作列：技能 / 格擋 / 藥水 ── */}
+              {/* ── 操作列：回合制下令 ── */}
+              {!auto && (
+                <div className="mb-1 text-[11px]">
+                  {battle.phase === 'input'
+                    ? <span className="text-emerald-400">{t('▶ 輪到你了，選一個行動')}</span>
+                    : <span className="text-zinc-500">{t('結算中…')}</span>}
+                </div>
+              )}
               <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                {!auto && (
+                  <button
+                    className="rounded border border-zinc-500 px-2 py-1 text-xs disabled:opacity-40"
+                    disabled={battle.over || battle.phase !== 'input'}
+                    onClick={() => castSkill(null)}
+                  >
+                    ⚔ {t('普攻')}
+                  </button>
+                )}
                 {battle.hero.skills.map((id) => {
                   const sk = SKILL_BY_ID[id]
                   const cd = battle.hero.cds[id] ?? 0
@@ -466,7 +504,7 @@ export default function Adventure({ tools }: Props) {
                       title={`${t(sk.desc)}${sk.mpCost ? `  ·  MP ${sk.mpCost}` : ''}`}
                       className="rounded border px-2 py-1 text-xs disabled:opacity-40"
                       style={{ borderColor: LINE_COLOR[sk.line] }}
-                      disabled={cd > 0 || noMp || battle.over}
+                      disabled={cd > 0 || noMp || battle.over || (!auto && battle.phase !== 'input')}
                       onClick={() => castSkill(id)}
                     >
                       {t(sk.name)}

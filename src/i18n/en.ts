@@ -422,4 +422,9 @@ export const EN: Record<string, string> = {
   '外觀': 'Look',
   '男': 'M',
   '女': 'F',
+
+  // ── 回合制 ─────────────────────────────────────
+  '▶ 輪到你了，選一個行動': '▶ Your turn — choose an action',
+  '結算中…': 'Resolving…',
+  '普攻': 'Attack',
 }

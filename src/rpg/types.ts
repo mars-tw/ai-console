@@ -227,7 +227,9 @@ export interface Combatant {
  */
 export interface FxEvent {
   uid: string                                  // 誰身上發生的
-  kind: 'attack' | 'hurt' | 'heal' | 'crit' | 'die' | 'guard' | 'charge'
+  kind: 'attack' | 'hurt' | 'heal' | 'crit' | 'die' | 'guard' | 'charge' | 'skill'
+  /** kind='skill' 時帶技能 id，畫面用它決定播哪張特效 */
+  skill?: string
   amount?: number
   tick: number
 }
