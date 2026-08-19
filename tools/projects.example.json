@@ -1,0 +1,36 @@
+{
+  "_說明": "把這個檔複製成 projects.local.json 再改成你自己的專案；local 版不會進版控。",
+  "rules": [
+    {
+      "id": "client-work",
+      "keywords": [
+        "client",
+        "案子",
+        "外包"
+      ]
+    },
+    {
+      "id": "side-project",
+      "keywords": [
+        "side",
+        "個人專案",
+        "hobby"
+      ]
+    },
+    {
+      "id": "infra",
+      "keywords": [
+        "infra",
+        "基礎設施",
+        "deploy",
+        "docker"
+      ]
+    }
+  ],
+  "titles": {
+    "client-work": "客戶專案",
+    "side-project": "side project",
+    "infra": "基礎設施",
+    "other": "其他／未分類"
+  }
+}

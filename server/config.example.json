@@ -1,0 +1,15 @@
+{
+  "_說明": "複製成 config.json 再改。config.json 在 .gitignore，不會進版控。",
+  "status_json": "~/ai-hub/status.json",
+  "bin": {
+    "claude": "",
+    "codex": "",
+    "grok": "",
+    "qwen": "",
+    "kimi": "",
+    "cursor": ""
+  },
+  "audit_script": "",
+  "audit_report": "",
+  "content_batch": ""
+}

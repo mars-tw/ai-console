@@ -1,0 +1,125 @@
+{
+  "monsters": {
+    "slime": [
+      40,
+      30
+    ],
+    "rat": [
+      42,
+      32
+    ],
+    "wolf": [
+      62,
+      40
+    ],
+    "goblin": [
+      35,
+      44
+    ],
+    "bandit": [
+      53,
+      52
+    ],
+    "golem": [
+      54,
+      64
+    ],
+    "wraith": [
+      69,
+      58
+    ],
+    "drake": [
+      83,
+      60
+    ],
+    "revenant": [
+      34,
+      62
+    ],
+    "boss-lich": [
+      78,
+      88
+    ],
+    "boss-wyrm": [
+      132,
+      104
+    ],
+    "boss-ogre": [
+      67,
+      84
+    ]
+  },
+  "hero": {
+    "hero-stand": [
+      26,
+      56
+    ],
+    "hero-attack": [
+      49,
+      45
+    ],
+    "hero-cast": [
+      48,
+      50
+    ],
+    "hero-hurt": [
+      37,
+      46
+    ]
+  },
+  "icons": [
+    "icon-armor",
+    "icon-axe",
+    "icon-boots",
+    "icon-bow",
+    "icon-coin",
+    "icon-crossbow",
+    "icon-dagger",
+    "icon-gloves",
+    "icon-hammer",
+    "icon-helm",
+    "icon-holy",
+    "icon-orb",
+    "icon-potion",
+    "icon-ring",
+    "icon-robe",
+    "icon-shield",
+    "icon-spear",
+    "icon-staff",
+    "icon-sword",
+    "icon-tome"
+  ],
+  "bg": [
+    "bg-abyss",
+    "bg-cave",
+    "bg-crypt",
+    "bg-forest",
+    "bg-lair",
+    "bg-meadow",
+    "bg-ridge",
+    "bg-ruins"
+  ],
+  "icon": 32,
+  "bgSize": [
+    480,
+    270
+  ],
+  "weapons": {
+    "weapon-melee": [
+      23,
+      23
+    ],
+    "weapon-ranged": [
+      20,
+      23
+    ],
+    "weapon-magic": [
+      16,
+      23
+    ],
+    "weapon-faith": [
+      22,
+      23
+    ]
+  }
+}

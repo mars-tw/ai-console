@@ -1,0 +1,29 @@
+{
+  "cell": 48,
+  "footY": 46,
+  "cols": 4,
+  "rows": 3,
+  "frames": [
+    "front-stand",
+    "front-step",
+    "back-stand",
+    "back-step",
+    "side-stand",
+    "side-step",
+    "sit-typing",
+    "sleeping",
+    "arguing",
+    "coffee",
+    "reading",
+    "watering"
+  ],
+  "agents": [
+    "claude",
+    "codex",
+    "cursor",
+    "gemini",
+    "grok",
+    "kimi",
+    "qwen"
+  ]
+}

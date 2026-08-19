@@ -1,0 +1,17 @@
+node_modules/
+dist/
+public/data/
+archives/
+server/*.log
+server/*.flag
+__pycache__/
+*.local
+.DS_Store
+server/config.json
+release/
+# 角色原始生成圖（54MB，可用 tools/gen_sheets_grok.py 重生）
+assets-src/
+# 私人工作流工具與一次性腳本（含個人專案路徑，不進開源版）
+private/
+tools/projects.local.json
+.qwen/

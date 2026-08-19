@@ -1,0 +1,144 @@
+{
+  "tile": 16,
+  "shell": true,
+  "footprint": {
+    "desk": [
+      4,
+      2
+    ],
+    "chair": [
+      1,
+      1
+    ],
+    "meeting-table": [
+      10,
+      3
+    ],
+    "sofa": [
+      9,
+      2
+    ],
+    "coffee-table": [
+      5,
+      2
+    ],
+    "coffee-bar": [
+      5,
+      2
+    ],
+    "bookshelf": [
+      5,
+      2
+    ],
+    "armchair": [
+      2,
+      2
+    ],
+    "plant-small": [
+      2,
+      2
+    ],
+    "plant-big": [
+      2,
+      2
+    ],
+    "whiteboard": [
+      5,
+      2
+    ],
+    "water-cooler": [
+      1,
+      2
+    ],
+    "boxes": [
+      2,
+      2
+    ],
+    "toilet-door": [
+      3,
+      2
+    ],
+    "wall-screen": [
+      5,
+      1
+    ],
+    "rug-lounge": [
+      11,
+      7
+    ],
+    "rug-meeting": [
+      18,
+      9
+    ]
+  },
+  "props": {
+    "chair": [
+      16,
+      24
+    ],
+    "desk": [
+      64,
+      63
+    ],
+    "sofa": [
+      144,
+      104
+    ],
+    "meeting-table": [
+      160,
+      42
+    ],
+    "coffee-table": [
+      80,
+      52
+    ],
+    "plant-small": [
+      32,
+      34
+    ],
+    "plant-big": [
+      32,
+      43
+    ],
+    "whiteboard": [
+      80,
+      86
+    ],
+    "water-cooler": [
+      16,
+      33
+    ],
+    "coffee-bar": [
+      80,
+      68
+    ],
+    "bookshelf": [
+      80,
+      61
+    ],
+    "armchair": [
+      32,
+      33
+    ],
+    "boxes": [
+      32,
+      42
+    ],
+    "toilet-door": [
+      48,
+      69
+    ],
+    "wall-screen": [
+      80,
+      58
+    ],
+    "rug-lounge": [
+      176,
+      117
+    ],
+    "rug-meeting": [
+      288,
+      162
+    ]
+  }
+}
