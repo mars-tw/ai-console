@@ -373,6 +373,33 @@ class Handler(BaseHTTPRequestHandler):
             task = parse_qs(urlparse(self.path).query).get("task", ["general"])[0]
             model, reason, signals = route_model(task)
             return self._json({"ok": bool(model), "model": model, "reason": reason, "signals": signals})
+        if self.path.startswith("/api/dispatch/log"):
+            # 讀某次派工的產出。路徑一律從登錄查，不接受呼叫端指定 ——
+            # 否則這就是「叫本機 API 讀任意檔案」。
+            from urllib.parse import urlparse, parse_qs
+            want = parse_qs(urlparse(self.path).query).get("id", [""])[0]
+            # 登錄檔要先載。重啟伺服器後 DISPATCHES 是空的，
+            # 只有 /api/dispatches 會載 —— 直接開這個端點就查不到任何東西。
+            if not self.DISPATCHES:
+                self._load_registry()
+            rec = next((d for d in self.DISPATCHES if d.get("id") == want), None)
+            if not rec:
+                return self._json({"ok": False, "error": "找不到這次派工"}, 404)
+            f = Path(rec.get("log", ""))
+            if not f.exists():
+                return self._json({"ok": True, "text": "", "note": "還沒有輸出"})
+            try:
+                raw = f.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                return self._json({"ok": False, "error": str(e)}, 500)
+            # 無頭模式的 CLI 會先吐一段警告，對使用者沒意義，濾掉
+            lines = [ln for ln in raw.splitlines()
+                     if "running headless with --yolo" not in ln
+                     and "Shell cwd was reset" not in ln]
+            text = chr(10).join(lines).strip()
+            return self._json({"ok": True, "text": text[-8000:], "path": str(f),
+                               "task": rec.get("task", "")})
+
         if self.path == "/api/map":
             return self.do_map()
         if self.path == "/api/dispatches":
@@ -771,11 +798,32 @@ class Handler(BaseHTTPRequestHandler):
         log_dir = Path.home() / "ai-hub" / "dispatch-log"
         log_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
+        # 時間戳只到秒，同一秒派兩件會寫到同一個檔、後者覆蓋前者。
+        # 實測就踩到了：一次派兩個測試員，第一個的結果直接消失。
         log_file = log_dir / f"{stamp}_{tool}.log"
+        if log_file.exists():
+            n = 2
+            while (log_dir / f"{stamp}_{tool}_{n}.log").exists():
+                n += 1
+            stamp = f"{stamp}_{n}"
+            log_file = log_dir / f"{stamp}_{tool}.log"
 
         if tool in self.DISPATCH_TOOLS:
             cwd = str(Path.home())
-            argv = self.DISPATCH_TOOLS[tool](task)
+            # 工單一律寫成 UTF-8 檔案，命令列只傳一行 ASCII 的「去讀這個檔」。
+            #
+            # 兩個實測踩到的理由：
+            #   1. cmd /c 會在第一個換行處把參數截斷。加了多行執行前置之後，
+            #      qwen 收到的工單只剩第一行 —— 測試員自己回報「沒有任務內容送達」
+            #   2. 中文經過命令列會被當地碼頁轉碼弄壞
+            order_file = log_dir / f"{stamp}_task.md"
+            try:
+                order_file.write_text(task, encoding="utf-8")
+                argv = self.DISPATCH_TOOLS[tool](
+                    f"Read the UTF-8 work order at {order_file} and carry it out. "
+                    f"The file is the full instruction; do not ask for more input.")
+            except OSError:
+                argv = self.DISPATCH_TOOLS[tool](task)   # 寫不了檔就退回原本作法
             try:
                 if tool == "qwen":
                     # qwen 的 node-pty 需要一個 console。
@@ -787,7 +835,7 @@ class Handler(BaseHTTPRequestHandler):
                     si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                     si.wShowWindow = 6  # SW_MINIMIZE
                     proc = subprocess.Popen(
-                        [BIN["qwen"], "-p", task], cwd=cwd,
+                        [BIN["qwen"], "-p", argv[-1]], cwd=cwd,
                         stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                         creationflags=subprocess.CREATE_NEW_CONSOLE, startupinfo=si)
                     proc_pid = proc.pid

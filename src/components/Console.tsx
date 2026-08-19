@@ -29,12 +29,24 @@ const TOOL_COLOR: Record<string, string> = {
 export default function Console() {
   useLang()
   const [input, setInput] = useState('')
-  const [steps, setSteps] = useState<Step[]>([])
+  // 計畫存在 localStorage：切分頁時這個元件會 unmount，
+  // 但 runAll 的迴圈還在背景把後續工單派出去。使用者回來看到空白，
+  // 會以為沒派成功而重新拆解再派一次 —— 派出去的是會改檔案的 agent，
+  // 重複派工代價不小。
+  const [steps, setSteps] = useState<Step[]>(() => {
+    try { return JSON.parse(localStorage.getItem('ac_console_steps') || '[]') } catch { return [] }
+  })
+  useEffect(() => {
+    try { localStorage.setItem('ac_console_steps', JSON.stringify(steps)) } catch { /* 存不了不影響使用 */ }
+  }, [steps])
   const [planning, setPlanning] = useState(false)
   const [note, setNote] = useState('')
   const [autoRun, setAutoRun] = useState(false)
   const [dispatches, setDispatches] = useState<DispatchRecord[]>([])
   const [history, setHistory] = useState<string[]>([])
+  // 展開中的派工與它的產出。派出去卻看不到結果，等於白派。
+  const [openLog, setOpenLog] = useState<string | null>(null)
+  const [logText, setLogText] = useState<Record<string, string>>({})
   const boxRef = useRef<HTMLTextAreaElement>(null)
 
   // 派工狀態每 8 秒刷新一次，讓「執行中 → 完成」自己會動
@@ -61,10 +73,18 @@ export default function Console() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ instruction }),
       })
+      // 一定要看 r.ok。原本直接 .json() 然後照用，後端回 500 時
+      // steps 變空陣列、note 是空字串 —— 按鈕轉一下就沒反應，
+      // 使用者只會覺得程式壞了
+      if (!r.ok) {
+        setNote(t('拆解失敗（HTTP {code}）', { code: r.status }))
+        setPlanning(false)
+        return
+      }
       const d = await r.json()
       const got: Step[] = (d.steps || []).map((s: Step) => ({ ...s, state: 'idle' as const }))
       setSteps(got)
-      setNote(d.note || '')
+      setNote(d.note || (got.length ? '' : t('沒有拆解出任何工作，換個說法試試')))
       setHistory((h) => [instruction, ...h.filter((x) => x !== instruction)].slice(0, 8))
       if (autoRun && got.length) void runAll(got)
     } catch {
@@ -94,11 +114,32 @@ export default function Console() {
     }
   }
 
+  /** 讀某次派工的產出 */
+  const loadLog = async (id: string) => {
+    if (openLog === id) { setOpenLog(null); return }
+    setOpenLog(id)
+    try {
+      const r = await fetch(`/api/dispatch/log?id=${encodeURIComponent(id)}`)
+      const d = await r.json()
+      setLogText((m) => ({ ...m, [id]: d.ok ? (d.text || t('還沒有輸出')) : (d.error || '') }))
+    } catch {
+      setLogText((m) => ({ ...m, [id]: t('控制 API 無回應') }))
+    }
+  }
+
   const editStep = (i: number, patch: Partial<Step>) =>
     setSteps((s) => s.map((x, j) => (j === i ? { ...x, ...patch } : x)))
 
   const pending = steps.some((s) => s.state === 'idle')
   const running = steps.some((s) => s.state === 'sending')
+  const failed = steps.some((s) => s.state === 'failed')
+
+  /** 把失敗的步驟退回可編輯狀態，只重派那幾件（已成功的不會重複派） */
+  const retryFailed = () => {
+    const next = steps.map((s) => (s.state === 'failed' ? { ...s, state: 'idle' as const, note: '' } : s))
+    setSteps(next)
+    void runAll(next.filter((s) => s.state === 'idle'))
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto bg-zinc-950 p-3 text-zinc-200">
@@ -155,13 +196,23 @@ export default function Console() {
             <span className="text-xs font-medium tracking-widest text-zinc-400">
               {t('📋 派工計畫（{n} 件）', { n: steps.length })}
             </span>
-            <button
-              className="ml-auto rounded bg-emerald-600 px-3 py-1 text-xs font-medium text-white disabled:opacity-40"
-              disabled={!pending || running}
-              onClick={() => runAll(steps)}
-            >
-              {running ? t('派工中…') : t('▶ 全部派出')}
-            </button>
+            <div className="ml-auto flex items-center gap-1.5">
+              {failed && !running && (
+                <button
+                  className="rounded border border-amber-600 px-2 py-1 text-xs text-amber-300"
+                  onClick={retryFailed}
+                >
+                  {t('↻ 只重派失敗的')}
+                </button>
+              )}
+              <button
+                className="rounded bg-emerald-600 px-3 py-1 text-xs font-medium text-white disabled:opacity-40"
+                disabled={!pending || running}
+                onClick={() => runAll(steps)}
+              >
+                {running ? t('派工中…') : t('▶ 全部派出')}
+              </button>
+            </div>
           </div>
           <div className="flex flex-col gap-2">
             {steps.map((s, i) => (
@@ -214,14 +265,26 @@ export default function Console() {
         )}
         <div className="flex flex-col gap-1">
           {dispatches.slice(0, 12).map((d) => (
-            <div key={d.id} className="flex items-center gap-2 text-[11px]">
-              <span className="w-14 flex-none font-medium" style={{ color: TOOL_COLOR[d.tool] ?? undefined }}>
-                {d.tool}
-              </span>
-              <span className="min-w-0 flex-1 truncate text-zinc-400" title={d.task}>{d.task}</span>
-              <span className="flex-none text-zinc-500">
-                {d.alive ? t('執行中') : d.result || d.reply ? t('完成') : t('已開終端')}
-              </span>
+            <div key={d.id}>
+              <button
+                onClick={() => loadLog(d.id)}
+                className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-[11px] hover:bg-zinc-800"
+                title={t('點一下看這次派工的產出')}
+              >
+                <span className="w-3 flex-none text-zinc-600">{openLog === d.id ? '▾' : '▸'}</span>
+                <span className="w-14 flex-none font-medium" style={{ color: TOOL_COLOR[d.tool] ?? undefined }}>
+                  {d.tool}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-zinc-400" title={d.task}>{d.task}</span>
+                <span className="flex-none text-zinc-500">
+                  {d.alive ? t('執行中') : d.result || d.reply ? t('完成') : t('已開終端')}
+                </span>
+              </button>
+              {openLog === d.id && (
+                <pre className="mx-4 my-1 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 font-mono text-[11px] leading-5 text-zinc-300">
+                  {logText[d.id] ?? t('讀取中…')}
+                </pre>
+              )}
             </div>
           ))}
         </div>

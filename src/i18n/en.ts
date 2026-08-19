@@ -436,4 +436,20 @@ export const EN: Record<string, string> = {
   '已移到回收區': 'Moved to trash',
   '刪除失敗：{err}': 'Delete failed: {err}',
   '把「{title}」移到回收區？檔案會搬到 ~/.ai-console/trash，可以救回來。': 'Move "{title}" to trash? The file goes to ~/.ai-console/trash and can be restored.',
+
+  // ── 派工產出 ───────────────────────────────────
+  '點一下看這次派工的產出': "Click to see this dispatch's output",
+  '還沒有輸出': 'No output yet',
+  '讀取中…': 'Loading…',
+
+  // ── 測試員回報的修正 ───────────────────────────
+  '拆解失敗（HTTP {code}）': 'Planning failed (HTTP {code})',
+  '沒有拆解出任何工作，換個說法試試': 'No steps produced — try rephrasing',
+  '↻ 只重派失敗的': '↻ Retry failed only',
+  '找不到符合的對話': 'No matching conversations',
+  '目前的過濾條件下沒有東西': 'Nothing matches the current filters',
+  '索引裡共有 {n} 份對話': '{n} conversations in the index',
+  '重設所有過濾條件': 'Reset all filters',
+  '賣掉整個背包裡的 {n} 件雜物（例如 {sample}…），換 {gold} 金？賣掉就拿不回來了。': 'Sell {n} junk items from your whole bag (e.g. {sample}…) for {gold} gold? This cannot be undone.',
+  '賣掉 {n} 件雜物，得到 {gold} 金': 'Sold {n} junk items for {gold} gold',
 }

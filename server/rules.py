@@ -42,7 +42,8 @@ _CJK_RUN_RE = re.compile(r"[一-鿿]+")
 # 命中的詞不是等值的：技能描述常常是英文而工作是中文，這時
 # 「wordpress」這種專有名詞是唯一的橋樑，權重必須遠高於「把這」這類 2-gram。
 _WEIGHT = {"word": 4, "gram3": 2, "gram2": 1}
-MIN_SCORE = 15         # 用標註過的案例掃出來的（見 __main__），不是拍腦袋定的
+MIN_SCORE = 15         # 用標註過的案例掃出來的，不是拍腦袋定的
+MIN_RARE = 2           # 至少要有幾個罕見詞命中（擋掉長工單累積出來的假命中）
 
 
 def _weight(token: str) -> int:
@@ -154,13 +155,24 @@ def match_skills(task: str, skills: list[dict], limit: int = 3) -> list[dict]:
     for s, st in docs:
         if not st:
             continue
+        hits = tt & st
         score = 0.0
-        for tok in tt & st:
-            # 標準 IDF：log(技能總數 / 出現在幾個技能)。
-            # 分級式的稀有度（1.0 / 0.4 / 0.1）太粗 —— 出現在 3/41 個技能的
-            # 「wordpress」其實很有鑑別力，卻被壓到跟泛用詞同一級。
-            score += _weight(tok) * math.log(total / max(1, df.get(tok, 1)))
-        if score >= MIN_SCORE:
+        rare = 0
+        for tok in hits:
+            d = df.get(tok, 1)
+            # 標準 IDF：log(技能總數 / 出現在幾個技能)
+            score += _weight(tok) * math.log(total / max(1, d))
+            # 「罕見」還要「有實質內容」才算證據。
+            # 技能庫只有幾十個，IDF 對常見虛詞完全不可靠 ——
+            # 實測「任何」「只要」「怎麼」都被算成罕見詞，
+            # 於是一份 UX 稽核工單掛上了「蝦皮短影音」。
+            if d <= 2 and (len(tok) >= 3 if not tok.isascii() else len(tok) >= 4):
+                rare += 1
+        # 光看總分會被工單長度帶著走：工單越長、雜訊命中越多、分數越高。
+        # 實測「你是使用者體驗測試員…」因為「使用者」這種到處都有的詞
+        # 就掛上了「蝦皮短影音」。所以再加一條硬性條件：
+        # 至少要有兩個「只出現在一兩個技能裡」的詞命中，才算真的相關。
+        if score >= MIN_SCORE and rare >= MIN_RARE:
             scored.append((score, s))
     scored.sort(key=lambda x: -x[0])
     return [s for _, s in scored[:limit]]
@@ -170,9 +182,9 @@ def preamble(task: str, tool: str, cfg: dict | None = None) -> str:
     """組出要加在工單前面的執行前置。沒有任何規範或技能時回空字串。"""
     cfg = cfg or {}
     files = rule_files(cfg.get("rule_files"))
-    skills = load_skills(cfg.get("skill_dirs"))
-    hit = match_skills(task, skills)
-    if not files and not hit:
+    dirs_exist = any(d.is_dir() for d in
+                     ([Path(x).expanduser() for x in (cfg.get("skill_dirs") or [])] + DEFAULT_SKILL_DIRS))
+    if not files and not dirs_exist:
         return ""
 
     lines = ["【執行前置｜這段是派工系統加的，請先照做再開始工作】",
@@ -198,9 +210,6 @@ def preamble(task: str, tool: str, cfg: dict | None = None) -> str:
         for idx in (d / "SKILLS-INDEX.md" for d in dirs):
             if idx.exists():
                 lines.append(f"   （索引：{idx}）")
-        if hit:
-            lines.append("   系統初步比對到這幾個，可以優先看，但不要只看這幾個：")
-            lines += [f"   - {s['name']}：{s['path']}" for s in hit]
         step += 1
 
     lines.append(f"{step}. 對外發布、付款、刪除資料等不可逆動作，一律先回報並等待授權，不要自行執行。")
@@ -227,8 +236,15 @@ def _neutralize(task: str) -> str:
 
 
 def wrap(task: str, tool: str, cfg: dict | None = None) -> tuple[str, list[str]]:
-    """回傳 (加了前置的工單, 命中的技能名稱)"""
+    """回傳 (加了前置的工單, 命中的技能名稱)
+
+    第二個回傳值現在恆為空。原本會用關鍵字比對挑幾個技能當「提示」，
+    但調了很多輪都調不準：技能庫只有 41 個，IDF 對常見詞完全不可靠，
+    結果一份 UX 稽核工單被掛上「蝦皮短影音」。錯的提示比沒有提示更糟 ——
+    它會把執行者引到錯的方向。
+    現在只給技能目錄與索引，讓執行者自己用 frontmatter 判斷，那本來就是
+    技能系統原生的比對方式，比我在外面猜可靠得多。
+    """
     safe = _neutralize(task)
     pre = preamble(safe, tool, cfg)
-    names = [s["name"] for s in match_skills(safe, load_skills((cfg or {}).get("skill_dirs")))]
-    return (pre + safe if pre else safe), names
+    return (pre + safe if pre else safe), []

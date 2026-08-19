@@ -320,7 +320,8 @@ export default function Adventure({ tools }: Props) {
   })
 
   /** 賣掉所有「不是最佳、也沒裝著」的裝備，換錢清背包 */
-  const sellJunk = () => update((h) => {
+  /** 這次會被賣掉的東西（先算出來，才能在確認框裡講清楚） */
+  const junkPreview = (h: Hero) => {
     const keep = new Set<string>()
     for (const l of h.loadouts) for (const s of SLOTS) if (l.equipped[s]) keep.add(l.equipped[s]!)
     // 每個部位保留分數最高的三件當備用
@@ -329,10 +330,28 @@ export default function Adventure({ tools }: Props) {
         .slice(0, 3).forEach((i) => keep.add(i.id))
     }
     const sold = h.bag.filter((i) => !keep.has(i.id))
-    h.gold += sold.reduce((n, i) => n + Math.max(1, Math.round(itemScore(i) / 4)), 0)
-    h.bag = h.bag.filter((i) => keep.has(i.id))
-    setTimeout(() => flash(sold.length ? t('賣掉 {n} 件雜物', { n: sold.length }) : t('沒有可賣的雜物')), 0)
-  })
+    return { keep, sold, gold: sold.reduce((n, i) => n + Math.max(1, Math.round(itemScore(i) / 4)), 0) }
+  }
+
+  /**
+   * 清雜物。先確認再賣，理由有兩個：
+   *   1. 遊戲裡沒有回收區，賣掉就真的沒了
+   *   2. 它作用在**整個背包**，不是眼前篩選出來的那些 ——
+   *      使用者在篩選視圖裡按下去，很容易以為只清掉看得到的東西
+   */
+  const sellJunk = () => {
+    const { sold, gold } = junkPreview(hero)
+    if (!sold.length) { flash(t('沒有可賣的雜物')); return }
+    const sample = sold.slice(0, 3).map((i) => itemLabel(i.name)).join('、')
+    if (!confirm(t('賣掉整個背包裡的 {n} 件雜物（例如 {sample}…），換 {gold} 金？賣掉就拿不回來了。',
+      { n: sold.length, sample, gold }))) return
+    update((h) => {
+      const r = junkPreview(h)
+      h.gold += r.gold
+      h.bag = h.bag.filter((i) => r.keep.has(i.id))
+      setTimeout(() => flash(t('賣掉 {n} 件雜物，得到 {gold} 金', { n: r.sold.length, gold: r.gold })), 0)
+    })
+  }
 
   /** 套用篩選與排序後的背包內容 */
   const bagView = useMemo(() => {

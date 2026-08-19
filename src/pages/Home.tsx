@@ -274,12 +274,17 @@ export default function Home() {
     const q = search.trim().toLowerCase()
     const cutoff = Date.now() - WEEK_MS
     const filtered = index.conversations.filter((c) => {
-      if (!showSubagent && c.subagent) return false
-      if (!showDup && c.dup) return false
-      if (!showOld && c.mtime < cutoff) return false
-      if (!showDispatch && c.dispatch) return false
       if (deleted.has(c.id)) return false
-      if (!q) return true
+      // 有搜尋字串時豁免所有隱藏過濾器。
+      // 原本只有資料夾層級豁免，對話層級的「一週未使用」照樣擋 ——
+      // 結果搜兩週前的對話永遠是空的，但東西明明還在。
+      if (!q) {
+        if (!showSubagent && c.subagent) return false
+        if (!showDup && c.dup) return false
+        if (!showOld && c.mtime < cutoff) return false
+        if (!showDispatch && c.dispatch) return false
+        return true
+      }
       return c.title.toLowerCase().includes(q) || c.path.toLowerCase().includes(q) || c.projectDir.toLowerCase().includes(q)
     })
     const map = new Map<string, ConversationSummary[]>()
@@ -388,6 +393,24 @@ export default function Home() {
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto">
+            {groups.length === 0 && (
+              // 過濾條件太緊時整個側欄會是空的，沒有提示的話看起來就像程式壞了
+              <div className="px-3 py-6 text-center text-xs text-zinc-400">
+                <div>{search.trim() ? t('找不到符合的對話') : t('目前的過濾條件下沒有東西')}</div>
+                <div className="mt-1 text-zinc-500">
+                  {t('索引裡共有 {n} 份對話', { n: index.conversations.length })}
+                </div>
+                <button
+                  className="mt-3 rounded border border-zinc-300 px-3 py-1 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                  onClick={() => {
+                    setActiveDays(0); setShowOld(true); setShowSubagent(true)
+                    setShowDup(true); setShowDispatch(true); setSearch('')
+                  }}
+                >
+                  {t('重設所有過濾條件')}
+                </button>
+              </div>
+            )}
             {groups.map(({ dir, line, convs }) => {
               const hub = hubProjects.get(line)
               // 專案分組預設收合：一台機器上動輒上百個專案，全展開要滾很久
