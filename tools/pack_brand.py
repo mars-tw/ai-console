@@ -18,6 +18,9 @@ from pathlib import Path
 
 from PIL import Image
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pack_props import strip_plate   # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "assets-src" / "brand" / "logo.png"
 PUBLIC = ROOT / "public"
@@ -28,11 +31,17 @@ ICO_SIZES = [16, 24, 32, 48, 64, 128, 256]
 
 
 def squared(img: Image.Image) -> Image.Image:
-    """去掉透明邊界，置中放進正方形畫布，四周留一點白"""
+    """去掉透明邊界，置中放進正方形畫布，四周留一點白
+
+    生圖模型很愛把圖案畫在一張白卡紙上（實測這個 LOGO 就是），卡紙是不透明的，
+    直接打包出來的工作列圖示外面會多一圈白框。所以先用跟家具打包器同一套
+    白墊偵測把卡紙清掉，再做正方形化。
+    """
     img = img.convert("RGBA")
     box = img.getbbox()
     if box:
         img = img.crop(box)
+    img = strip_plate(img, "logo")
     side = max(img.width, img.height)
     canvas_side = int(side * (1 + MARGIN * 2))
     canvas = Image.new("RGBA", (canvas_side, canvas_side), (0, 0, 0, 0))
