@@ -4,13 +4,14 @@
 // 切到冒險分頁時玩家可以插隊指定技能（手動操作）。
 
 import {
-  AFFIX_POOL, AFFIX_SCALE, ARMOR_NAMES, DUNGEON_BY_ID, MONSTER_BY_ID, PREFIXES,
+  AFFIX_POOL, AFFIX_SCALE, ARMOR_NAMES, DUNGEON_BY_ID, MONSTER_BY_ID,
+  PET_DROP_CHANCE, PET_KINDS, PREFIXES,
   RARITY_SPEC, SKILL_BY_ID, SKILLS, WEAPON_NAMES, ZONE_BY_ID,
 } from './data'
 import { itemLabel, t } from '@/i18n'
 import {
-  ATTRS, LINES, type Affix, type Attr, type Combatant, type Hero, type Item,
-  SLOTS, type FxEvent, type Line, type Loadout, type LogEntry, type Monster,
+  ATTRS, LINES, type Affix, type Attr, type Combatant, type Hero, type HeroLook,
+  type Item, type Pet, SLOTS, type FxEvent, type Line, type Loadout, type LogEntry, type Monster,
   type Rarity, type Slot, type Stats,
 } from './types'
 
@@ -21,7 +22,14 @@ let idSeq = 0
 const nextId = () => `i${Date.now().toString(36)}${(idSeq++).toString(36)}`
 
 // ── 等級 ───────────────────────────────────────────
-export const xpForLevel = (level: number) => Math.round(60 * Math.pow(level, 1.55))
+/**
+ * 升級所需經驗。
+ *
+ * 原本是 60 × lv^1.55，實測升級太快 —— 掛著自動戰鬥大概一分鐘一級。
+ * 指數拉到 1.75 之後，每級要打的怪大約變兩倍（Lv.12 從 34 隻變 69 隻），
+ * 但不會變成純耗時間的苦工。
+ */
+export const xpForLevel = (level: number) => Math.round(75 * Math.pow(level, 1.75))
 
 // ── 套裝 ───────────────────────────────────────────
 export function emptyLoadout(name: string): Loadout {
@@ -33,12 +41,13 @@ export function emptyLoadout(name: string): Loadout {
   }
 }
 
-export function newHero(name = '你'): Hero {
+export function newHero(name = '你', look: HeroLook = 'hero'): Hero {
   const h: Hero = {
-    name, level: 1, xp: 0, skillPoints: 3, attrPoints: 5, gold: 0,
+    name, look, level: 1, xp: 0, skillPoints: 3, attrPoints: 5, gold: 0,
     bag: [], loadouts: [emptyLoadout('主要'), emptyLoadout('第二套'), emptyLoadout('第三套')],
     active: 0, zone: 'meadow', kills: 0, deaths: 0,
     potions: { hp: 3, mp: 2 },
+    pets: [],
   }
   // 給一把起手武器，不然第一場會很難看
   const starter = rollItem(1, 'main', 'common', 'melee')
@@ -189,6 +198,8 @@ export interface Battle {
   room: number
   rooms: number
   hero: Combatant
+  /** 出戰中的寵物（沒帶就是 null）*/
+  pet: Combatant | null
   allies: Combatant[]
   foes: Combatant[]
   log: LogEntry[]
@@ -196,6 +207,8 @@ export interface Battle {
   fx: FxEvent[]
   /** 主角主手武器屬於哪條技能線 —— 畫面用它決定手上疊哪把武器 */
   heroWeapon: Line | null
+  /** 主角外觀（男/女），畫面用它決定取哪組圖 */
+  heroLook: HeroLook
   tick: number
   over: boolean
   result?: 'win' | 'lose'
@@ -208,6 +221,8 @@ export interface Battle {
   loot: Item[]
   /** 這場戰鬥撿到的藥水，結算時才進背包 */
   potionDrops: { hp: number; mp: number }
+  /** 這場遇到的寵物（art），結算時收服 */
+  petDrop?: string
   xp: number
   gold: number
   kills: number
@@ -249,6 +264,33 @@ function foeCombatant(m: Monster, n: number): Combatant {
   }
 }
 
+/**
+ * 寵物的戰鬥數值。刻意做得比隊友弱一截 ——
+ * 它是「陪你打」不是「幫你打完」，太強會讓玩家的操作變得無所謂。
+ */
+export function petCombatant(p: Pet): Combatant {
+  const hp = 40 + p.level * 12
+  return {
+    uid: `pet-${p.id}`, side: 'pet', art: p.art, name: p.name,
+    hp, hpMax: hp, mp: 0, mpMax: 0,
+    atk: Math.round(6 + p.level * 1.6), def: Math.round(2 + p.level * 0.8),
+    crit: 0.1, leech: 0, cds: {}, skills: [], color: '#f472b6',
+  }
+}
+
+/** 寵物升級：跟著主角打，經驗是主角的一半 */
+export function growPet(p: Pet, xp: number): boolean {
+  p.xp += Math.round(xp * 0.5)
+  let up = false
+  while (p.xp >= petXpForLevel(p.level)) {
+    p.xp -= petXpForLevel(p.level)
+    p.level++
+    up = true
+  }
+  return up
+}
+export const petXpForLevel = (lv: number) => Math.round(50 * Math.pow(lv, 1.6))
+
 export function allyCombatant(key: string, name: string, color: string, level: number, line: Line): Combatant {
   const hp = 50 + level * 18
   return {
@@ -285,6 +327,12 @@ function spawnWave(b: Battle, ids: string[], count: number) {
   }
 }
 
+/** 目前出戰的寵物，沒帶回 null */
+export function activePet(h: Hero): Combatant | null {
+  const p = h.pets?.find((x) => x.id === h.activePet)
+  return p ? petCombatant(p) : null
+}
+
 /** 主手裝的是哪一類武器；沒裝或不是武器就回 null */
 export function equippedWeaponLine(h: Hero): Line | null {
   const lo = activeLoadout(h)
@@ -297,8 +345,9 @@ export function startBattle(h: Hero, kind: 'field' | 'dungeon', placeId: string,
   const b: Battle = {
     kind, placeId, room: 1,
     rooms: kind === 'dungeon' ? (DUNGEON_BY_ID[placeId]?.rooms ?? 3) : 0,
-    hero: heroCombatant(h), allies, foes: [], log: [], fx: [], tick: 0,
+    hero: heroCombatant(h), pet: activePet(h), allies, foes: [], log: [], fx: [], tick: 0,
     heroWeapon: equippedWeaponLine(h),
+    heroLook: h.look ?? 'hero',
     over: false, loot: [], potionDrops: { hp: 0, mp: 0 }, xp: 0, gold: 0, kills: 0,
   }
   const place = kind === 'field' ? ZONE_BY_ID[placeId] : DUNGEON_BY_ID[placeId]
@@ -350,7 +399,8 @@ function act(b: Battle, c: Combatant, h: Hero | null, haste: number, skipCd = fa
   // 玩家即時施放時不要再扣一次冷卻 —— 那一回合的冷卻已經在 tick 裡扣過了
   if (!skipCd) for (const k of Object.keys(c.cds)) if (c.cds[k] > 0) c.cds[k]--
 
-  const targets = c.side === 'foe' ? [b.hero, ...b.allies].filter((x) => x.hp > 0) : b.foes.filter((x) => x.hp > 0)
+  const ourSide = [b.hero, ...(b.pet ? [b.pet] : []), ...b.allies]
+  const targets = c.side === 'foe' ? ourSide.filter((x) => x.hp > 0) : b.foes.filter((x) => x.hp > 0)
   if (!targets.length) return
   // 玩家點了集火目標，我方就全部打它 —— 這是「指揮隊伍」最直接的手段
   const focused = c.side !== 'foe' && b.focus
@@ -527,6 +577,7 @@ export function stepBattle(b: Battle, h: Hero): void {
   const st = computeStats(h)
 
   act(b, b.hero, h, st.haste)
+  if (b.pet) act(b, b.pet, null, 0)
   for (const a of b.allies) act(b, a, null, 0.1)
   for (const f of b.foes) act(b, f, null, 0)
 
@@ -539,15 +590,25 @@ export function stepBattle(b: Battle, h: Hero): void {
       // 用 art（怪物 id）查，不要用名字 —— 精英怪的名字被改過，查名字會落空
       const m = MONSTER_BY_ID[d.art]
       const bonus = d.elite ? 2.2 : 1
+      // 等級差懲罰：主角遠高於怪物時經驗大幅衰減。
+      // 沒有這個的話，最有效率的玩法是一直刷新手草原 —— 那不是遊戲，是掛機。
+      const gap = h.level - (m?.level ?? 1)
+      const fade = gap <= 3 ? 1 : Math.max(0.15, 1 - (gap - 3) * 0.12)
       b.kills++
-      b.xp += Math.round((m?.xp ?? 10) * bonus)
-      b.gold += Math.round((m?.gold ?? 5) * bonus)
+      b.xp += Math.round((m?.xp ?? 10) * bonus * fade)
+      b.gold += Math.round((m?.gold ?? 5) * bonus * Math.max(0.4, fade))
       const dropChance = m?.boss ? 1 : d.elite ? 0.75 : 0.35
       if (Math.random() < dropChance) {
         const it = rollItem(Math.max(1, (m?.level ?? lvl) + rnd(3)), undefined,
           m?.boss ? rollRarity(3) : d.elite ? rollRarity(2) : undefined)
         b.loot.push(it)
         say(b, 'loot', t('拾獲 {item}', { item: itemLabel(it.name) }))
+      }
+      // 寵物：打王有機會遇到一隻願意跟你走的
+      const petChance = m?.boss ? PET_DROP_CHANCE.boss : d.elite ? PET_DROP_CHANCE.elite : 0
+      if (petChance && Math.random() < petChance) {
+        const kind = pick(PET_KINDS.filter((k) => !h.pets.some((own) => own.art === k.art)))
+        if (kind) b.petDrop = kind.art
       }
       // 藥水掉落：是玩家撐過硬仗的資源，所以掉率給得比裝備高
       if (Math.random() < (m?.boss ? 1 : 0.22)) b.potionDrops.hp++
@@ -592,12 +653,29 @@ export function stepBattle(b: Battle, h: Hero): void {
 }
 
 /** 把戰鬥結算進角色；回傳升了幾級 */
-export function collect(h: Hero, b: Battle): { levels: number; loot: Item[] } {
+export function collect(h: Hero, b: Battle): { levels: number; loot: Item[]; newPet?: Pet } {
   h.gold += b.gold
   h.kills += b.kills
   h.bag.push(...b.loot)
   h.potions.hp += b.potionDrops.hp
   h.potions.mp += b.potionDrops.mp
+
+  // 收服這場遇到的寵物
+  let newPet: Pet | null = null
+  if (b.petDrop && !h.pets.some((p) => p.art === b.petDrop)) {
+    const kind = PET_KINDS.find((k) => k.art === b.petDrop)
+    if (kind) {
+      newPet = { id: nextId(), name: kind.name, art: kind.art, desc: kind.desc,
+                 line: kind.line, level: 1, xp: 0 }
+      h.pets.push(newPet)
+      if (!h.activePet) h.activePet = newPet.id     // 第一隻自動帶上
+    }
+  }
+  b.petDrop = undefined
+
+  // 出戰的寵物跟著長經驗
+  const active = h.pets.find((p) => p.id === h.activePet)
+  if (active) growPet(active, b.xp)
   if (b.result === 'lose') h.deaths++
 
   let levels = 0
@@ -612,5 +690,5 @@ export function collect(h: Hero, b: Battle): { levels: number; loot: Item[] } {
   const loot = b.loot
   b.xp = 0; b.gold = 0; b.kills = 0; b.loot = []
   b.potionDrops = { hp: 0, mp: 0 }
-  return { levels, loot }
+  return { levels, loot, newPet: newPet ?? undefined }
 }

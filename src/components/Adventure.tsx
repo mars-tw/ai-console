@@ -15,7 +15,7 @@ import {
   xpForLevel, type Battle,
 } from '@/rpg/engine'
 import { loadHero, resetHero, saveHero } from '@/rpg/save'
-import { castNow, guard, setFocus, drinkPotion } from '@/rpg/engine'
+import { castNow, guard, setFocus, drinkPotion, petXpForLevel } from '@/rpg/engine'
 import {
   AFFIX_NAME, AFFIX_PCT, ATTRS, ATTR_NAME, LINES, LINE_NAME, RARITY_COLOR,
   RARITY_NAME, SLOTS, SLOT_NAME, type Combatant, type Hero, type Item,
@@ -117,6 +117,19 @@ function ItemLine({ it, dim }: { it: Item; dim?: boolean }) {
 
 interface Props {
   tools: Record<string, ToolStatus>
+}
+
+/** 寵物小圖示：直接用打包好的寵物圖，縮到一行文字的高度 */
+function PetIcon({ art }: { art: string }) {
+  return (
+    <img
+      src={`/office/rpg/pets/${art}.png`}
+      alt=""
+      className="h-5 w-5 flex-none object-contain"
+      style={{ imageRendering: 'pixelated' }}
+      onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = 'hidden' }}
+    />
+  )
 }
 
 export default function Adventure({ tools }: Props) {
@@ -313,6 +326,20 @@ export default function Adventure({ tools }: Props) {
             <span className="text-sm font-bold">{t(hero.name)}</span>
             <span className="text-xs text-zinc-400">Lv.{hero.level}</span>
             <span className="ml-auto text-xs text-amber-300">🪙 {hero.gold}</span>
+          </div>
+          {/* 外觀只影響用哪組圖，不動任何數值，所以隨時可以換 */}
+          <div className="mb-2 flex items-center gap-1 text-[10px]">
+            <span className="text-zinc-500">{t('外觀')}</span>
+            {([['hero', t('男')], ['heroine', t('女')]] as const).map(([look, label]) => (
+              <button
+                key={look}
+                className={`rounded px-2 py-0.5 ${hero.look === look
+                  ? 'bg-zinc-100 text-zinc-900' : 'border border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}
+                onClick={() => update((h) => { h.look = look })}
+              >
+                {label}
+              </button>
+            ))}
           </div>
           <div className="mb-1 text-[10px] text-zinc-500">{t('經驗')} {hero.xp} / {xpNeed}</div>
           <Bar v={hero.xp} max={xpNeed} color="#a78bfa" />
@@ -535,6 +562,38 @@ export default function Adventure({ tools }: Props) {
             })}
           </div>
           <div className="mt-2 text-[10px] text-zinc-600">{t('隊伍 {n} 人（含你）', { n: party.length + 1 })}</div>
+
+          {/* ── 寵物 ── */}
+          <div className="mt-3 border-t border-zinc-800 pt-2">
+            <div className="mb-1 flex items-center gap-2">
+              <span className="text-xs font-medium tracking-widest text-zinc-400">{t('🐾 寵物')}</span>
+              <span className="text-[10px] text-zinc-600">{t('打王有機會遇到')}</span>
+            </div>
+            {hero.pets.length === 0 && (
+              <div className="text-[11px] text-zinc-600">{t('還沒有寵物。去打地城的王試試')}</div>
+            )}
+            <div className="flex flex-col gap-1">
+              {hero.pets.map((p) => {
+                const on = hero.activePet === p.id
+                return (
+                  <button
+                    key={p.id}
+                    title={t(p.desc)}
+                    onClick={() => update((h) => { h.activePet = h.activePet === p.id ? undefined : p.id })}
+                    className={`flex items-center gap-2 rounded border px-2 py-1 text-left text-[11px] ${
+                      on ? 'border-pink-400/70 bg-pink-400/10' : 'border-zinc-800 hover:bg-zinc-800'
+                    }`}
+                  >
+                    <PetIcon art={p.art} />
+                    <span className={on ? 'text-pink-200' : 'text-zinc-300'}>{t(p.name)}</span>
+                    <span className="text-zinc-500">Lv.{p.level}</span>
+                    <span className="text-zinc-600">{p.xp}/{petXpForLevel(p.level)}</span>
+                    {on && <span className="ml-auto text-pink-300">{t('出戰中')}</span>}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
         </div>
       </div>
 

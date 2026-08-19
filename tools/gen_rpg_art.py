@@ -47,6 +47,15 @@ MONSTERS: dict[str, str] = {
     "revenant": "An undead knight in rusted dented plate armour, empty helm with two burning green eyes. Shown strictly from the side, turned to the LEFT with a chipped greatsword raised on that side.",
     "boss-ogre": "A huge muscular ogre chieftain holding a giant wooden club, wearing a fur shoulder pad and tribal paint, small tusks and a big round belly. Shown strictly from the side, body turned LEFT with the club hefted on that side. Boss-sized and imposing.",
     "boss-lich": "A skeletal lich in a tall crown and flowing frost-blue robes, skeletal hands wreathed in icy magic. Shown strictly from the side, facing LEFT with both hands thrust out that way. Boss-sized and imposing.",
+    # ── 新區域的怪 ──────────────────────────────
+    "sandworm": "A segmented desert worm bursting from sand, ringed maw of teeth, sun-bleached carapace. Shown strictly from the side, lunging LEFT.",
+    "scarab": "A large armoured scarab beetle with iridescent blue-green shell and sharp mandibles. Shown strictly from the side, facing LEFT.",
+    "icewisp": "A floating shard of living ice with a pale glowing core and drifting frost motes. Shown strictly from the side, drifting LEFT.",
+    "yeti": "A shaggy white snow beast with long arms, dark claws and small ice-blue eyes. Shown strictly from the side, striding LEFT.",
+    "voidling": "A small blot of living darkness with two white eyes and tendrils of shadow. Shown strictly from the side, facing LEFT.",
+    "starseer": "A tall robed figure whose hood contains a swirl of stars instead of a face, holding a bone staff. Shown strictly from the side, turned LEFT.",
+    "boss-sandking": "A colossal armoured scorpion king with a jagged tail barb and gold-inlaid carapace. Shown strictly from the side, turned LEFT. Boss-sized and imposing.",
+    "boss-frostjarl": "A giant frost jarl in furs and ice-plate armour wielding a huge frozen axe. Shown strictly from the side, turned LEFT. Boss-sized and imposing.",
     "boss-wyrm": "An ancient enormous black dragon with battle-scarred scales, glowing molten cracks and huge spread wings. Boss-sized and imposing.",
 }
 
@@ -63,6 +72,11 @@ ZONE_BGS: dict[str, str] = {
     # 地城背景：id 直接對應 DUNGEONS 的 id，戰鬥畫面用 `bg-${placeId}` 取圖
     "bg-cave": "A rough underground goblin cave, damp brown rock walls, crude wooden supports, torches burning in iron sconces.",
     "bg-crypt": "A frozen underground crypt, pale blue ice covering stone sarcophagi and carved pillars, cold mist along the floor.",
+    "bg-dunes": "An endless sunlit desert of golden dunes under a pale hot sky, distant rock spires and drifting sand.",
+    "bg-glacier": "A blue glacier valley with towering ice walls, frozen waterfalls and pale cold light.",
+    "bg-void": "A starlit void with floating shattered stone platforms, deep indigo sky and drifting motes of light.",
+    "bg-tomb": "A buried desert tomb interior, sandstone walls with carved hieroglyphs, torchlight and half-buried columns.",
+    "bg-rift": "A frozen rift deep in a glacier, jagged ice pillars and an eerie teal glow from below.",
     "bg-lair": "A vast dragon lair deep in a mountain, huge stone arches, piles of gold and bones, dim orange glow from below.",
 }
 
@@ -102,6 +116,9 @@ HERO_STYLE = (PIXEL + ", chibi proportions about two and a half heads tall, "
 HERO_DESC = ("A young adventurer with short dark hair, a travel-worn green cloak over "
              "simple leather armour and brown boots. Determined but friendly.")
 # 手上不畫武器：武器另外出圖，依實際裝備疊上去，換裝才看得出來。
+# 女主角。與男主角同一套姿勢、同一個縮放基準，換角時大小不會跳動。
+HEROINE_DESC = ("A young woman adventurer with a long dark ponytail, a travel-worn "
+                "burgundy cloak over light scale armour and tall boots. Calm and capable.")
 HERO_POSES: dict[str, str] = {
     "hero-stand": ("standing at rest in side view facing right, weight on the back foot, "
                    "the right arm hanging down with the hand open and empty"),
@@ -125,12 +142,27 @@ WEAPONS: dict[str, str] = {
     "weapon-faith": "A golden ceremonial war mace with a radiant sun emblem on its head.",
 }
 
+# ── 寵物：可愛路線，側面朝右跟在隊伍旁邊 ──────────
+PET_STYLE = (PIXEL + ", a small cute creature companion, chibi and round, "
+             "SIDE PROFILE facing RIGHT, full body, big friendly eyes, "
+             "centred, flat pure magenta #FF00FF background")
+PETS: dict[str, str] = {
+    "pet-slimecat": "A round jelly-cat made of translucent mint-green slime, with a curled tail and a tiny bell.",
+    "pet-fluffbird": "A fluffy round bird chick with oversized peach wings, orange beak and a single tall head feather.",
+    "pet-emberfox": "A tiny fox kit with warm orange fur and a flame-tipped bushy tail, small and playful.",
+    "pet-mossturtle": "A baby turtle with a mossy green shell that has small mushrooms growing on it, sleepy eyes.",
+    "pet-starmoth": "A palm-sized moth with soft violet wings dusted with tiny stars, glowing antennae.",
+}
+
 GROUPS = {
     "monsters": (MONSTERS, MON_STYLE, "1:1", True),
     "backgrounds": (ZONE_BGS, BG_STYLE, "16:9", False),
     "icons": (ITEM_ICONS, ICON_STYLE, "1:1", True),
     "hero": ({k: f"{HERO_DESC} The character is {v}." for k, v in HERO_POSES.items()},
              HERO_STYLE, "1:1", True),
+    "heroine": ({k.replace("hero-", "heroine-"): f"{HEROINE_DESC} The character is {v}."
+                 for k, v in HERO_POSES.items()}, HERO_STYLE, "1:1", True),
+    "pets": (PETS, PET_STYLE, "1:1", True),
     "weapons": (WEAPONS, WEAPON_STYLE, "1:1", True),
 }
 

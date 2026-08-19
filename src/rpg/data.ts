@@ -73,9 +73,17 @@ export const MONSTERS: Monster[] = [
   mob('wraith', '怨靈', 17),
   mob('drake', '幼龍', 22),
   mob('revenant', '亡魂騎士', 28),
+  mob('scarab', '鐵殼聖甲蟲', 11),
+  mob('sandworm', '沙蟲', 19),
+  mob('icewisp', '冰靈', 24),
+  mob('yeti', '雪怪', 31),
+  mob('voidling', '虛影', 35),
+  mob('starseer', '觀星者', 40),
   boss('boss-ogre', '食人魔頭目', 8),
   boss('boss-lich', '巫妖', 16),
+  boss('boss-sandking', '沙蠍王', 21),
   boss('boss-wyrm', '古龍', 26),
+  boss('boss-frostjarl', '霜霸', 33),
 ]
 export const MONSTER_BY_ID = Object.fromEntries(MONSTERS.map((m) => [m.id, m]))
 
@@ -86,15 +94,34 @@ export const ZONES: Zone[] = [
   { id: 'ridge', name: '斷崖山道', minLevel: 8, desc: '山賊盤據的險路。', monsters: ['bandit', 'golem'] },
   { id: 'ruins', name: '遺跡迴廊', minLevel: 14, desc: '怨靈在此徘徊不去。', monsters: ['wraith', 'drake'] },
   { id: 'abyss', name: '深淵裂隙', minLevel: 22, desc: '最深處，只有亡魂與龍。', monsters: ['drake', 'revenant'] },
+  { id: 'dunes', name: '燙金沙丘', minLevel: 11, desc: '烈日下的沙海，蟲群在腳底鑽動。', monsters: ['scarab', 'sandworm'] },
+  { id: 'glacier', name: '冰河谷', minLevel: 24, desc: '藍冰之間，寒氣本身就會傷人。', monsters: ['icewisp', 'yeti'] },
+  { id: 'void', name: '星墟', minLevel: 35, desc: '碎裂的浮島與看得見星星的天空。', monsters: ['voidling', 'starseer'] },
 ]
 export const ZONE_BY_ID = Object.fromEntries(ZONES.map((z) => [z.id, z]))
 
 export const DUNGEONS: Dungeon[] = [
   { id: 'cave', name: '哥布林洞窟', minLevel: 6, desc: '第一個地城，帶一個隊友就夠。', rooms: 3, trash: ['goblin', 'wolf'], boss: 'boss-ogre', partySize: 2 },
   { id: 'crypt', name: '冰封地穴', minLevel: 14, desc: '巫妖的巢穴，建議三人以上。', rooms: 4, trash: ['wraith', 'golem'], boss: 'boss-lich', partySize: 3 },
+  { id: 'tomb', name: '流沙陵墓', minLevel: 20, desc: '沙下的王陵，蠍王守著它。', rooms: 4, trash: ['scarab', 'sandworm'], boss: 'boss-sandking', partySize: 3 },
   { id: 'lair', name: '古龍巢穴', minLevel: 24, desc: '最終試煉。', rooms: 5, trash: ['drake', 'revenant'], boss: 'boss-wyrm', partySize: 4 },
+  { id: 'rift', name: '凍裂之谷', minLevel: 32, desc: '冰河深處的裂縫，霜霸在最底下。', rooms: 5, trash: ['icewisp', 'yeti'], boss: 'boss-frostjarl', partySize: 4 },
 ]
 export const DUNGEON_BY_ID = Object.fromEntries(DUNGEONS.map((d) => [d.id, d]))
+
+// ── 寵物 ───────────────────────────────────────────
+/** 可收服的寵物。每種對應一條技能線，決定它的攻擊風味 */
+export const PET_KINDS: { art: string; name: string; desc: string; line: Line }[] = [
+  { art: 'pet-slimecat', name: '果凍貓', desc: '黏黏軟軟，撞上去意外地痛。', line: 'melee' },
+  { art: 'pet-fluffbird', name: '毛球鳥', desc: '飛得快，會從高處俯衝。', line: 'ranged' },
+  { art: 'pet-emberfox', name: '燼尾狐', desc: '尾巴帶火，吐得出小火球。', line: 'magic' },
+  { art: 'pet-mossturtle', name: '苔背龜', desc: '背上長蘑菇，會分你一點治癒。', line: 'faith' },
+  { art: 'pet-starmoth', name: '星塵蛾', desc: '鱗粉會發光，據說能帶來好運。', line: 'magic' },
+]
+export const PET_BY_ART = Object.fromEntries(PET_KINDS.map((p) => [p.art, p]))
+
+/** 寵物掉落：打完王有機會遇到一隻願意跟你走的 */
+export const PET_DROP_CHANCE = { boss: 0.35, elite: 0.04 }
 
 // ── 裝備產生 ───────────────────────────────────────
 export const RARITY_ORDER: Rarity[] = ['crude', 'common', 'fine', 'rare', 'legend']

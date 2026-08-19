@@ -8,7 +8,8 @@
 
 import { useEffect, useRef } from 'react'
 import {
-  BG_H, BG_W, bgImage, drawAlly, drawHero, drawMonster, drawWeapon, loadBattleArt,
+  BG_H, BG_W, bgImage, drawAlly, drawHero, drawMonster, drawPet, drawWeapon,
+  loadBattleArt, unitHeight,
 } from '@/rpg/battleArt'
 import {
   FX_LIFE, deathTransform, drawCritFlash, drawHealMotes, drawSlash, drawSparks, lunge, shake,
@@ -44,14 +45,19 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
   // 已經死掉但動畫還沒播完的單位：資料層早就把它們移出目標清單了，
   // 這裡自己留一份，否則怪會在最後一刀落下的瞬間憑空消失。
   const dying = useRef(new Map<string, { c: Combatant; slot: Slot; at: number }>())
+  // 看過的每個單位。死亡動畫需要它 —— 引擎在單位死掉的**同一個 tick**
+  // 就把它從 battle.foes 移除了，只掃當前清單的話永遠抓不到死亡事件，
+  // 死亡動畫等於從來沒播過（實測才發現）。
+  const seen = useRef(new Map<string, { c: Combatant; index: number; side: 'left' | 'right' }>())
 
   useEffect(() => {
     loadBattleArt(
       battle.foes.map((f) => f.art),
       `bg-${battle.placeId}`,
       battle.allies.map((a) => a.art),
+      battle.pet?.art,
     )
-  }, [battle.placeId, battle.foes, battle.allies])
+  }, [battle.placeId, battle.foes, battle.allies, battle.pet])
 
   useEffect(() => {
     const canvas = ref.current
@@ -95,19 +101,34 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
       const scale = canvas.width / BG_W
       ctx.imageSmoothingEnabled = false
 
-      const mine = layout([battle.hero, ...battle.allies].filter((c) => c.hp > 0), 'left')
+      const ours = [battle.hero, ...(battle.pet ? [battle.pet] : []), ...battle.allies]
+      const mine = layout(ours.filter((c) => c.hp > 0), 'left')
       const foes = layout(battle.foes.filter((c) => c.hp > 0), 'right')
 
-      // 記下剛死掉的人，讓死亡動畫在原地播完
-      for (const c of [battle.hero, ...battle.allies, ...battle.foes]) {
-        if (c.hp > 0 || dying.current.has(c.uid)) continue
-        const d = activeFx(c.uid, 'die')
-        if (!d) continue
-        const side = c.side === 'foe' ? 'right' : 'left'
-        const peers = c.side === 'foe' ? battle.foes : [battle.hero, ...battle.allies]
-        const i = Math.max(0, peers.findIndex((p) => p.uid === c.uid))
-        const [slot] = layout([c], side)
-        dying.current.set(c.uid, { c, slot: { ...slot, y: GROUND_Y + (i % 2 ? 16 : 0) }, at: now() })
+      // 先把當下看得到的單位記起來（含它排第幾個，死亡動畫要在原位播）
+      for (const [list, side] of [
+        [ours, 'left'] as const,
+        [battle.foes, 'right'] as const,
+      ]) {
+        list.forEach((c, i) => seen.current.set(c.uid, { c, index: i, side }))
+      }
+      if (seen.current.size > 60) {
+        for (const uid of [...seen.current.keys()].slice(0, 30)) seen.current.delete(uid)
+      }
+
+      // 死亡事件從 fx 讀，不是從當前清單找 —— 死掉的怪已經被引擎移除了
+      for (const e of battle.fx) {
+        if (e.kind !== 'die' || dying.current.has(e.uid)) continue
+        const t0 = startedAt.current.get(key(e))
+        if (t0 === undefined || now() - t0 > (FX_LIFE.die ?? 1)) continue
+        const rec = seen.current.get(e.uid)
+        if (!rec) continue
+        const [slot] = layout([rec.c], rec.side)
+        dying.current.set(e.uid, {
+          c: rec.c,
+          slot: { ...slot, y: GROUND_Y + (rec.index % 2 ? 16 : 0) },
+          at: t0,
+        })
       }
       for (const [uid, d] of dying.current) {
         if (now() - d.at > (FX_LIFE.die ?? 1)) dying.current.delete(uid)
@@ -115,7 +136,7 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
 
       // 全場震動：任何人受擊都會晃，暴擊晃更兇
       let sx = 0, sy = 0
-      for (const c of [battle.hero, ...battle.allies, ...battle.foes]) {
+      for (const c of [...ours, ...battle.foes]) {
         for (const [kind, power] of [['hurt', 3], ['crit', 7]] as const) {
           const e = activeFx(c.uid, kind)
           if (!e) continue
@@ -173,9 +194,12 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
         attacking: boolean, hurting: boolean,
       ) {
         if (u.side === 'hero') {
-          const pose = attacking ? 'hero-attack' : hurting ? 'hero-hurt' : 'hero-stand'
+          const who = battle.heroLook
+          const pose = attacking ? `${who}-attack` : hurting ? `${who}-hurt` : `${who}-stand`
           drawHero(c, pose, x, y)
-          drawWeapon(c, battle.heroWeapon, pose, x, y)
+          drawWeapon(c, battle.heroWeapon, pose.replace(who, 'hero'), x, y)
+        } else if (u.side === 'pet') {
+          drawPet(c, u.art, x, y)
         } else if (u.side === 'ally') {
           drawAlly(c, u.art, x, y, attacking, 1)
         } else {
@@ -215,12 +239,15 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
         }
         if (heal) drawHealMotes(ctx, x, s.y, heal.t)
 
-        // 血條
-        const bw = 34
+        // 血條貼在頭頂上方。固定高度不行 —— 史萊姆 30px、古龍 104px，
+        // 用同一個數字會讓小怪的血條飄在半空、大王的血條插在身上。
+        const top = unitHeight(s.c.side, s.c.art, `${battle.heroLook}-stand`)
+        const barY = s.y - top - 8
+        const bw = Math.max(24, Math.min(48, top * 0.7))
         ctx.fillStyle = 'rgba(0,0,0,0.55)'
-        ctx.fillRect(x - bw / 2 - 1, s.y - 62, bw + 2, 5)
-        ctx.fillStyle = s.c.side === 'foe' ? '#ef4444' : '#22c55e'
-        ctx.fillRect(x - bw / 2, s.y - 61, Math.max(0, bw * (s.c.hp / s.c.hpMax)), 3)
+        ctx.fillRect(x - bw / 2 - 1, barY, bw + 2, 5)
+        ctx.fillStyle = s.c.elite ? '#fbbf24' : s.c.side === 'foe' ? '#ef4444' : '#22c55e'
+        ctx.fillRect(x - bw / 2, barY + 1, Math.max(0, bw * (s.c.hp / s.c.hpMax)), 3)
 
         // 跳字（暴擊字更大、往上彈更高）
         for (const [kind, color] of [['hurt', '#fca5a5'], ['crit', '#fbbf24'], ['heal', '#86efac']] as const) {
@@ -234,7 +261,7 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
           ctx.lineWidth = 3
           ctx.strokeStyle = 'rgba(0,0,0,0.65)'
           const label = `${kind === 'heal' ? '+' : ''}${e.e.amount}`
-          const ty = s.y - 66 - e.t * (big ? 34 : 22)
+          const ty = barY - 4 - e.t * (big ? 34 : 22)
           ctx.strokeText(label, x, ty)
           ctx.fillText(label, x, ty)
           ctx.globalAlpha = 1

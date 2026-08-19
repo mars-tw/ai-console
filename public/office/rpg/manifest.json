@@ -47,24 +47,56 @@
     "boss-ogre": [
       67,
       84
+    ],
+    "scarab": [
+      65,
+      34
+    ],
+    "sandworm": [
+      105,
+      62
+    ],
+    "icewisp": [
+      21,
+      40
+    ],
+    "yeti": [
+      52,
+      66
+    ],
+    "voidling": [
+      18,
+      30
+    ],
+    "starseer": [
+      34,
+      60
+    ],
+    "boss-sandking": [
+      110,
+      92
+    ],
+    "boss-frostjarl": [
+      88,
+      96
     ]
   },
   "hero": {
-    "hero-stand": [
-      26,
+    "heroine-stand": [
+      23,
       56
     ],
-    "hero-attack": [
-      49,
-      45
+    "heroine-attack": [
+      54,
+      49
     ],
-    "hero-cast": [
-      48,
-      50
+    "heroine-cast": [
+      41,
+      49
     ],
-    "hero-hurt": [
-      37,
-      46
+    "heroine-hurt": [
+      44,
+      54
     ]
   },
   "icons": [
@@ -93,11 +125,16 @@
     "bg-abyss",
     "bg-cave",
     "bg-crypt",
+    "bg-dunes",
     "bg-forest",
+    "bg-glacier",
     "bg-lair",
     "bg-meadow",
     "bg-ridge",
-    "bg-ruins"
+    "bg-rift",
+    "bg-ruins",
+    "bg-tomb",
+    "bg-void"
   ],
   "icon": 32,
   "bgSize": [
@@ -120,6 +157,28 @@
     "weapon-faith": [
       22,
       23
+    ]
+  },
+  "pets": {
+    "pet-slimecat": [
+      34,
+      26
+    ],
+    "pet-fluffbird": [
+      22,
+      26
+    ],
+    "pet-emberfox": [
+      32,
+      26
+    ],
+    "pet-mossturtle": [
+      32,
+      26
+    ],
+    "pet-starmoth": [
+      31,
+      26
     ]
   }
 }

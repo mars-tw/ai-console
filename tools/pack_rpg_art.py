@@ -33,14 +33,22 @@ MON_H = {
     "slime": 30, "rat": 32, "wolf": 40, "goblin": 44, "bandit": 52,
     "golem": 64, "wraith": 58, "drake": 60, "revenant": 62,
     "boss-ogre": 84, "boss-lich": 88, "boss-wyrm": 104,
+    "scarab": 34, "sandworm": 62, "icewisp": 40, "yeti": 66,
+    "voidling": 30, "starseer": 60,
+    "boss-sandking": 92, "boss-frostjarl": 96,
 }
-HERO_POSES = ["hero-stand", "hero-attack", "hero-cast", "hero-hurt"]
+HERO_POSES = ["hero-stand", "hero-attack", "hero-cast", "hero-hurt",
+              "heroine-stand", "heroine-attack", "heroine-cast", "heroine-hurt"]
+# 寵物比主角小一號，跟在隊伍旁邊
+PETS = ["pet-slimecat", "pet-fluffbird", "pet-emberfox", "pet-mossturtle", "pet-starmoth"]
+PET_H = 26
 # 武器疊在主角手上，高度抓主角的一半左右才不會比人還大
 WEAPONS = ["weapon-melee", "weapon-ranged", "weapon-magic", "weapon-faith"]
 WEAPON_H = 23
 # 區域 + 地城，id 與 data.ts 的 ZONES / DUNGEONS 一致
 BGS = ["bg-meadow", "bg-forest", "bg-ridge", "bg-ruins", "bg-abyss",
-       "bg-cave", "bg-crypt", "bg-lair"]
+       "bg-cave", "bg-crypt", "bg-lair",
+       "bg-dunes", "bg-glacier", "bg-void", "bg-tomb", "bg-rift"]
 
 
 def is_magenta(r: int, g: int, b: int) -> bool:
@@ -99,16 +107,17 @@ def pack_monsters(names: list[str]) -> dict[str, list[int]]:
     return out
 
 
-def pack_hero() -> dict[str, list[int]]:
-    """四個動作共用同一比例（由站姿決定），動畫才不會抖"""
-    stand = trimmed("hero-stand")
+def pack_hero(prefix: str = "hero") -> dict[str, list[int]]:
+    """四個動作共用同一比例（由站姿決定），動畫才不會抖。
+    男女各自算比例，換角時身高才一致。"""
+    stand = trimmed(f"{prefix}-stand")
     if not stand:
-        print("[hero] 沒有站姿，無法決定比例")
+        print(f"[{prefix}] 沒有站姿，無法決定比例")
         return {}
     ratio = HERO_H / stand.height
     (OUT / "hero").mkdir(parents=True, exist_ok=True)
     out: dict[str, list[int]] = {}
-    for n in HERO_POSES:
+    for n in [p for p in HERO_POSES if p.startswith(prefix + "-")]:
         img = trimmed(n) or stand
         w = max(1, round(img.width * ratio))
         h = max(1, round(img.height * ratio))
@@ -130,6 +139,22 @@ def pack_weapons(names: list[str]) -> dict[str, list[int]]:
             continue
         r = fit_height(img, WEAPON_H)
         r.save(OUT / "weapons" / f"{n}.png")
+        out[n] = [r.width, r.height]
+        print(f"[{n}] OK  {r.width}x{r.height}")
+    return out
+
+
+def pack_pets(names: list[str]) -> dict[str, list[int]]:
+    """寵物：等比縮到固定高度，比主角小一號"""
+    (OUT / "pets").mkdir(parents=True, exist_ok=True)
+    out: dict[str, list[int]] = {}
+    for n in names:
+        img = trimmed(n)
+        if not img:
+            print(f"[{n}] 找不到素材，跳過")
+            continue
+        r = fit_height(img, PET_H)
+        r.save(OUT / "pets" / f"{n}.png")
         out[n] = [r.width, r.height]
         print(f"[{n}] OK  {r.width}x{r.height}")
     return out
@@ -174,9 +199,14 @@ def main() -> None:
     bgs = [n for n in BGS if not only or n in only]
 
     weapons = [n for n in WEAPONS if not only or n in only]
+    pets = [n for n in PETS if not only or n in only]
     m = pack_monsters(mons)
     wp = pack_weapons(weapons)
-    h = pack_hero() if (not only or any(x in only for x in HERO_POSES)) else {}
+    pt = pack_pets(pets)
+    h = {}
+    for pre in ("hero", "heroine"):
+        if not only or any(x in only for x in HERO_POSES if x.startswith(pre + "-")):
+            h.update(pack_hero(pre))
     i = pack_icons(icons)
     b = pack_bgs(bgs)
 
@@ -187,6 +217,7 @@ def main() -> None:
     if h:
         prev["hero"] = h
     prev.setdefault("weapons", {}).update(wp)
+    prev.setdefault("pets", {}).update(pt)
     prev["icons"] = sorted(set(prev.get("icons", []) + i))
     prev["bg"] = sorted(set(prev.get("bg", []) + b))
     prev["icon"] = ICON

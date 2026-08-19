@@ -67,8 +67,30 @@ export interface Potions {
   mp: number
 }
 
+/** 主角外觀：只影響用哪一組圖，不影響任何數值 */
+export type HeroLook = 'hero' | 'heroine'
+
+/**
+ * 寵物：跟著出戰的小夥伴。
+ * 刻意做得單純 —— 只有一個等級與一種攻擊，沒有裝備也沒有技能樹。
+ * 它的價值在陪伴與穩定輸出，不是再開一棵養成樹讓人分心。
+ */
+export interface Pet {
+  id: string
+  name: string
+  /** 圖檔名（public/office/rpg/pets/<art>.png）*/
+  art: string
+  desc: string
+  /** 專長：跟主角一樣吃四條線之一，決定它的攻擊風味 */
+  line: Line
+  level: number
+  xp: number
+}
+
 export interface Hero {
   name: string
+  /** 男 / 女，影響戰鬥畫面用哪組圖 */
+  look: HeroLook
   level: number
   xp: number
   skillPoints: number
@@ -84,6 +106,10 @@ export interface Hero {
   deaths: number
   /** 消耗品存量 */
   potions: Potions
+  /** 已收服的寵物 */
+  pets: Pet[]
+  /** 出戰中的寵物 id；沒有就不帶 */
+  activePet?: string
 }
 
 /** 由等級 + 屬性 + 裝備 + 技能算出來的最終數值 */
@@ -163,7 +189,7 @@ export interface Ally {
   line: Line
 }
 
-export type CombatSide = 'hero' | 'ally' | 'foe'
+export type CombatSide = 'hero' | 'ally' | 'foe' | 'pet'
 
 export interface Combatant {
   uid: string

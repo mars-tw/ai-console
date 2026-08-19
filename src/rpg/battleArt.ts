@@ -28,12 +28,17 @@ function load(key: string, url: string) {
 const WEAPON_LINES = ['melee', 'ranged', 'magic', 'faith'] as const
 
 /** 一次把戰鬥要用的素材都排進載入佇列（重複呼叫不會重載）*/
-export function loadBattleArt(monsterIds: string[], bgId: string, allyKeys: string[]) {
+export function loadBattleArt(monsterIds: string[], bgId: string, allyKeys: string[],
+                              petArt?: string | null) {
   load(`bg:${bgId}`, `/office/rpg/bg/${bgId}.png`)
   for (const m of monsterIds) load(`mon:${m}`, `/office/rpg/monsters/${m}.png`)
-  for (const p of ['hero-stand', 'hero-attack', 'hero-cast', 'hero-hurt']) {
-    load(`hero:${p}`, `/office/rpg/hero/${p}.png`)
+  // 男女兩組都先載：換性別時不用等圖
+  for (const who of ['hero', 'heroine']) {
+    for (const pose of ['stand', 'attack', 'cast', 'hurt']) {
+      load(`hero:${who}-${pose}`, `/office/rpg/hero/${who}-${pose}.png`)
+    }
   }
+  if (petArt) load(`pet:${petArt}`, `/office/rpg/pets/${petArt}.png`)
   for (const w of WEAPON_LINES) load(`wpn:${w}`, `/office/rpg/weapons/weapon-${w}.png`)
   for (const k of allyKeys) load(`ally:${k}`, `/office/sprites/${k}.png`)
 }
@@ -53,6 +58,18 @@ const HAND: Record<string, { x: number; y: number; rot: number }> = {
 export const bgImage = (id: string) => images.get(`bg:${id}`)
 export const monImage = (id: string) => images.get(`mon:${id}`)
 export const heroImage = (pose: string) => images.get(`hero:${pose}`)
+export const petImage = (art: string) => images.get(`pet:${art}`)
+
+/** 畫寵物。比主角矮一截，站在隊伍的最外側 */
+export function drawPet(c: CanvasRenderingContext2D, art: string, x: number, footY: number) {
+  const img = petImage(art)
+  if (!img) {
+    c.fillStyle = '#f472b6'
+    c.fillRect(Math.round(x - 8), Math.round(footY - 20), 16, 20)
+    return
+  }
+  c.drawImage(img, Math.round(x - img.width / 2), Math.round(footY - img.height))
+}
 
 /**
  * 畫一隻隊友：從辦公室的動作總表裁「側面」那一格。
@@ -109,6 +126,14 @@ export function drawWeapon(
   // 以握把（圖的左下角）為支點，武器才會像「握著」而不是浮在旁邊
   c.drawImage(img, 0, -img.height)
   c.restore()
+}
+
+/** 這個單位畫出來大概多高（像素）。血條要貼著頭頂，不能用固定高度 */
+export function unitHeight(side: string, art: string, pose = 'hero-stand'): number {
+  if (side === 'foe') return monImage(art)?.height ?? 44
+  if (side === 'hero') return heroImage(pose)?.height ?? 56
+  if (side === 'pet') return petImage(art)?.height ?? 26
+  return 44          // 龍隊友是 48 格切出來的，實際身體約 44
 }
 
 /** 畫主角 */
