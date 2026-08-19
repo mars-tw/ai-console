@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ConversationDetail, ConversationSummary, IndexData } from '@/types/data'
 import Adventure from '@/components/Adventure'
+import Console from '@/components/Console'
 import Office from '@/components/Office'
 import { t, useLang } from '@/i18n'
 import LangSwitch from '@/components/LangSwitch'
@@ -68,7 +69,7 @@ export default function Home() {
   const [chatMsgs, setChatMsgs] = useState<{ role: string; text: string }[]>([])
   const [chatInput, setChatInput] = useState('')
   const [chatBusy, setChatBusy] = useState(false)
-  const [viewMode, setViewMode] = useState<'list' | 'office' | 'rpg'>('list')
+  const [viewMode, setViewMode] = useState<'list' | 'console' | 'office' | 'rpg'>('list')
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 4000) }
 
@@ -424,6 +425,12 @@ export default function Home() {
               {t('📋 對話')}
             </button>
             <button
+              className={`rounded-md px-3 py-1 text-xs ${viewMode === 'console' ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900' : 'text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800'}`}
+              onClick={() => setViewMode('console')}
+            >
+              {t('🎙️ 主控台')}
+            </button>
+            <button
               className={`rounded-md px-3 py-1 text-xs ${viewMode === 'office' ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900' : 'text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800'}`}
               onClick={() => setViewMode('office')}
             >
@@ -437,7 +444,9 @@ export default function Home() {
             </button>
             <LangSwitch />
           </div>
-          {viewMode === 'office' ? (
+          {viewMode === 'console' ? (
+            <Console />
+          ) : viewMode === 'office' ? (
             <Office
               tools={liveTools ?? index.tools}
               projects={index.projects}

@@ -372,4 +372,17 @@ export const EN: Record<string, string> = {
   '格擋': 'Guard',
   '生命藥水': 'HP potion',
   '魔力藥水': 'MP potion',
+
+  // ── 主控台 ─────────────────────────────────────
+  '🎙️ 主控台': '🎙️ Console',
+  '說一句話，自動決定誰做、怎麼做': 'Say it once; it works out who does what',
+  '省略確認，拆完直接派': 'Skip review, dispatch immediately',
+  '例如：把 tools 底下的腳本都加上使用說明，然後跑一次測試': 'e.g. Add usage docs to every script under tools, then run the tests',
+  '拆解中…': 'Planning…',
+  '分析並排程': 'Plan it',
+  '📋 派工計畫（{n} 件）': '📋 Plan ({n} steps)',
+  '▶ 全部派出': '▶ Dispatch all',
+  '移除': 'Remove',
+  '🛰️ 執行中的派工': '🛰️ Running dispatches',
+  '目前沒有派工': 'No dispatches yet',
 }

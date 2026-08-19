@@ -43,6 +43,10 @@ INDEXER = Path(_CFG.get("indexer", str(APP_ROOT / "tools" / "indexer.py")))
 STATUS_JSON = Path(_CFG.get("status_json", str(Path.home() / "ai-hub" / "status.json")))
 LMS_MODELS_DIR = Path.home() / ".lmstudio" / "models"
 LMS_BIN = Path.home() / ".lmstudio" / "bin" / "lms.exe"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import planner   # noqa: E402
+import rules     # noqa: E402
+
 PORT = 5177
 
 # 模型路由表：strengths = 適任任務；min_gb = 磁碟完整門檻（低於視為下載中）；ram_gb ≈ 載入需求
@@ -178,6 +182,22 @@ def detect_heavy_job():
     except Exception:
         pass
     return ""
+
+
+def planner_model():
+    """挑一個拆解派工用的模型
+
+    刻意不走 route_model()：那裡偵測到大型工作（產片、渲染）就會降級到 4B，
+    而 4B 拆不出結構化的派工計畫 —— 實測會把提示詞的範例整段抄回來。
+    拆解只是一次幾秒的短呼叫，不像影片管線是持續佔用，所以這裡優先挑有能力的，
+    真的只剩小模型才用小模型。
+    """
+    available = [m for m in lms_models() if model_complete(m)]
+    for want in ("qwen3.8-27b", "qwen3.6-35b", "gpt-oss-120b", "qwen3-coder-next", "kimi-linear-48b"):
+        for m in available:
+            if want in m:
+                return m
+    return available[0] if available else ""
 
 
 def route_model(task: str = "general"):
@@ -511,6 +531,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json({"ok": False, "error": f"地端模型呼叫失敗：{e}"}, 502)
 
+        if self.path == "/api/plan":
+            return self.do_plan()
         if self.path == "/api/dispatch":
             return self.do_dispatch()
 
@@ -630,12 +652,41 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+    def do_plan(self):
+        """一句話 → 派工計畫。只回計畫，不動手 —— 派工是使用者按下去才發生的。"""
+        body = self._body()
+        instruction = str(body.get("instruction", "")).strip()
+        if not instruction:
+            return self._json({"ok": False, "error": "需要 instruction"}, 400)
+
+        # 拆解用地端模型：不燒雲端額度，雲端全限流時主控台也還能用
+        model = planner_model()
+
+        # 只把「現在真的能用」的工具給拆解器選。限流中的排掉，
+        # 否則計畫做出來全是派不出去的工單。
+        try:
+            status = json.loads(STATUS_JSON.read_text(encoding="utf-8"))
+            limited = {k for k, v in status.get("tools", {}).items() if v.get("rate_limited")}
+        except Exception:
+            limited = set()
+        usable = [t for t in list(self.DISPATCH_TOOLS) + ["grok", "local"]
+                  if t not in limited and (t in ("local",) or BIN.get(t))]
+        if not usable:
+            usable = ["local"]
+
+        skills = _CFG.get("tool_skills") or None
+        result = planner.plan(instruction, model, skills=skills, available=usable)
+        result["usable"] = usable
+        result["limited"] = sorted(limited)
+        return self._json(result)
+
     def do_dispatch(self):
         body = self._body()
         task = str(body.get("task", "")).strip()
         tool = str(body.get("tool", "auto")).strip()
         if not task:
             return self._json({"ok": False, "error": "需要 task"}, 400)
+        raw_task = task
 
         # 自動路由：依 ROUTER 鏈跳過限流的工具
         if tool == "auto":
@@ -645,6 +696,13 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 limited = set()
             tool = next((t for t in self.CLOUD_CHAIN if t not in limited), "local")
+
+        # 掛上規範與技能。派出去的 agent 不會自己知道這台機器的不可違反條款，
+        # 也不會知道有現成技能可用 —— 工單裸奔的代價太高，所以一律加。
+        # body 傳 raw=true 可以跳過（例如系統自己發的探測指令）。
+        applied_skills: list[str] = []
+        if not body.get("raw"):
+            task, applied_skills = rules.wrap(task, tool, _CFG)
 
         log_dir = Path.home() / "ai-hub" / "dispatch-log"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -676,13 +734,14 @@ class Handler(BaseHTTPRequestHandler):
                                             stdin=subprocess.DEVNULL, env=env,
                                             creationflags=subprocess.CREATE_NO_WINDOW)
                     proc_pid = proc.pid
-                self.DISPATCHES.append({"id": stamp, "tool": tool, "task": task[:120],
+                self.DISPATCHES.append({"id": stamp, "tool": tool, "task": raw_task[:120],
                                         "started": stamp, "pid": proc_pid, "log": str(log_file),
                                         "mode": "headless"})
                 self._save_registry()
                 return self._json({"ok": True, "tool": tool, "mode": "headless",
-                                   "log": str(log_file), "id": stamp,
-                                   "note": f"已派出 {tool} 無頭執行，結果寫入 log"})
+                                   "log": str(log_file), "id": stamp, "skills": applied_skills,
+                                   "note": f"已派出 {tool} 無頭執行"
+                                           + (f"（已掛技能：{'、'.join(applied_skills)}）" if applied_skills else "")})
             except Exception as e:
                 return self._json({"ok": False, "error": str(e)}, 500)
 
@@ -702,7 +761,7 @@ class Handler(BaseHTTPRequestHandler):
                 resp = json.loads(urllib.request.urlopen(req, timeout=280).read())
                 content = (resp.get("choices") or [{}])[0].get("message", {}).get("content", "")
                 log_file.write_text(f"[{stamp}] local({model})\n指令：{task}\n\n{content}", encoding="utf-8")
-                self.DISPATCHES.append({"id": stamp, "tool": "local", "task": task[:120],
+                self.DISPATCHES.append({"id": stamp, "tool": "local", "task": raw_task[:120],
                                         "started": stamp, "pid": None, "log": str(log_file),
                                         "mode": "sync", "reply": content[:300]})
                 self._save_registry()
@@ -717,7 +776,7 @@ class Handler(BaseHTTPRequestHandler):
             argv = ["cmd", "/c", "start", f"AI:{tool}", "cmd", "/k", f'"{exe}" "{task}"'] if tool == "grok" \
                 else ["cmd", "/c", "start", f"AI:{tool}", "cmd", "/k", f'"{exe}"']
             subprocess.Popen(argv, cwd=str(Path.home()))
-            self.DISPATCHES.append({"id": stamp, "tool": tool, "task": task[:120],
+            self.DISPATCHES.append({"id": stamp, "tool": tool, "task": raw_task[:120],
                                     "started": stamp, "pid": None, "log": str(log_file),
                                     "mode": "terminal"})
             self._save_registry()
