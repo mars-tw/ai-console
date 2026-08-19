@@ -11,7 +11,7 @@ export const FX_LIFE: Record<string, number> = {
   crit: 1.1,
   heal: 1.0,
   die: 0.85,
-  skill: 0.75,
+  skill: 1.1,
 }
 
 /** 緩動：一開始快、結尾慢，砍下去才有重量 */

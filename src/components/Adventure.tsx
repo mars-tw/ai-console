@@ -200,7 +200,9 @@ export default function Adventure({ tools }: Props) {
       if (autoRef.current) {
         stepBattle(b, h)
       } else if (b.phase === 'resolve') {
-        stepTurn(b, h)
+        // 佇列空了卻還停在結算中 = 有東西沒收尾，直接把它推回等待下令，
+        // 免得玩家卡在一個按不了任何鍵的畫面
+        if (!b.queue.length) { b.phase = 'input' } else { stepTurn(b, h) }
         gap = ACTION_MS
       } else {
         timer = window.setTimeout(beat, 120)   // 等下令：只是輪詢，不推進戰鬥
@@ -213,7 +215,9 @@ export default function Adventure({ tools }: Props) {
         saveHero(h)
         setHero({ ...h })
       }
-      setBattle({ ...b })
+      const next = { ...b }
+      battleRef.current = next        // 立刻同步，不等 React 的 effect
+      setBattle(next)
       timer = window.setTimeout(beat, gap)
     }
     timer = window.setTimeout(beat, TICK_MS)
@@ -258,11 +262,22 @@ export default function Adventure({ tools }: Props) {
    * 玩家的即時操作。全部走「立刻生效 + 立刻重繪」，
    * 排隊到下一回合的話按下去沒有回饋，會以為壞掉。
    */
+  /**
+   * 玩家操作一律作用在 battleRef.current 上，不是 state 裡的 battle。
+   *
+   * 心跳也是改 battleRef.current 再 setBattle({...}) 觸發重繪。兩邊如果
+   * 各自拿自己那份複本去改，就會分岔 —— 實測踩過：玩家下令把階段設成
+   * 「結算中」，心跳用舊複本蓋回去，戰鬥就永遠卡在結算中出不來。
+   */
   const act = (fn: (b: Battle, h: Hero) => boolean | void) => {
-    if (!battle || battle.over) return
-    fn(battle, hero)
-    setBattle({ ...battle })
-    saveHero(hero)
+    const b = battleRef.current
+    const h = heroRef.current
+    if (!b || b.over) return
+    fn(b, h)
+    const next = { ...b }
+    battleRef.current = next
+    setBattle(next)
+    saveHero(h)
   }
   /** 下令：手動模式按技能就等於「這回合我用這招」，按下去整個回合開始結算 */
   const castSkill = (id: string | null) => act((b) => commitOrder(b, id, b.focus))

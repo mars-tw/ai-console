@@ -200,6 +200,11 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
         drawUnit(ctx, c, slot.x, slot.y, false, false)
         ctx.restore()
 
+        // 打死牠的那一招也要看得到。特效綁在目標身上，但目標一死就被移出
+        // 清單，只靠活人的迴圈畫的話，致命一擊的技能特效永遠不會出現。
+        const deadFx = activeFx(c.uid, 'skill')
+        if (deadFx?.e.skill) drawSkillFx(ctx, deadFx.e.skill, slot.x, slot.y, deadFx.t)
+
         // 溶解邊緣的一條亮線，讓「被吸走」看得出來
         if (dissolve > 0 && dissolve < 1) {
           ctx.save()

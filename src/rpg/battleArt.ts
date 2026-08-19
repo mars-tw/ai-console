@@ -26,6 +26,9 @@ function load(key: string, url: string) {
 }
 
 const WEAPON_LINES = ['melee', 'ranged', 'magic', 'faith'] as const
+/** 有專屬特效圖的技能。增益類（狂化、瞄準、凝神、庇護）沒有圖，不畫也合理 */
+const FX_IDS = ['slash', 'cleave', 'shoot', 'volley', 'bolt', 'flame',
+                'meteor', 'smite', 'mend', 'execute', 'snipe', 'revive'] as const
 
 /** 一次把戰鬥要用的素材都排進載入佇列（重複呼叫不會重載）*/
 export function loadBattleArt(monsterIds: string[], bgId: string, allyKeys: string[],
@@ -39,7 +42,10 @@ export function loadBattleArt(monsterIds: string[], bgId: string, allyKeys: stri
     }
   }
   if (petArt) load(`pet:${petArt}`, `/office/rpg/pets/${petArt}.png`)
-  // 技能特效在第一次用到時才載，不用開場就把 12 張全抓下來
+  // 技能特效開場就全部預載。
+  // 原本做成「第一次用到才載」，但載入是非同步的、特效窗口只有 0.75 秒 ——
+  // 結果每個技能的第一次施放永遠看不到特效。12 張小圖，預載成本可以忽略。
+  for (const id of FX_IDS) load(`fx:${id}`, `/office/rpg/fx/fx-${id}.png`)
 
   for (const w of WEAPON_LINES) load(`wpn:${w}`, `/office/rpg/weapons/weapon-${w}.png`)
   for (const k of allyKeys) load(`ally:${k}`, `/office/sprites/${k}.png`)
@@ -70,9 +76,7 @@ export function drawSkillFx(
   c: CanvasRenderingContext2D, skillId: string, x: number, footY: number, t: number,
 ) {
   if (t >= 1) return
-  const key = `fx:${skillId}`
-  if (!images.has(key) && !failed.has(key)) load(key, `/office/rpg/fx/fx-${skillId}.png`)
-  const img = images.get(key)
+  const img = images.get(`fx:${skillId}`)
   if (!img) return
   // 前 25% 由小放大（衝擊感），之後維持並淡出
   const grow = t < 0.25 ? 0.55 + (t / 0.25) * 0.45 : 1
