@@ -459,14 +459,27 @@ class Handler(BaseHTTPRequestHandler):
         "http://127.0.0.1:3000", "http://localhost:3000",
     }
 
+    # 這些端點只是讀狀態，沒有副作用，允許腳本直接呼叫（沒有 Origin 也行）
+    READONLY_POSTS = {"/api/plan"}
+
     def _same_origin(self) -> bool:
+        """會產生副作用的 POST 一律要求來自本應用自己的頁面
+
+        Origin 不符 → 擋掉（瀏覽器一定會帶，所以網頁 CSRF 在這裡就死了）。
+        **完全沒有 Origin 也要擋**：本機任何程式（某個套件的安裝腳本、
+        下載來的執行檔）都能對 127.0.0.1 發 POST，而派工端點會用你的憑證
+        叫 AI 執行任意指令。瀏覽器不會漏掉 Origin，所以要求它不影響正常使用。
+        """
         origin = self.headers.get("Origin")
-        if origin and origin not in self.ALLOWED_ORIGINS:
-            return False
-        # 沒帶 Origin 的跨站送出會帶 Referer；一併檢查
         ref = self.headers.get("Referer")
-        if ref and not any(ref.startswith(o) for o in self.ALLOWED_ORIGINS):
-            return False
+        if origin:
+            if origin not in self.ALLOWED_ORIGINS:
+                return False
+        elif ref:
+            if not any(ref.startswith(o) for o in self.ALLOWED_ORIGINS):
+                return False
+        elif self.path not in self.READONLY_POSTS:
+            return False           # 兩個都沒有 → 不是從本應用頁面來的
         return True
 
     def do_POST(self):
