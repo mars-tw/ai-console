@@ -69,6 +69,9 @@ export default function PixelOffice({ tools, dispatches, onPick }: Props) {
     // import.meta.env.DEV 在 production build 會被常數摺疊掉，整段不會進發行版。
     if (import.meta.env.DEV) {
       ;(window as unknown as { __px?: unknown }).__px = (secs = 0) => {
+        // ResizeObserver 跟 rAF 一樣，分頁沒顯示時不會回呼，
+        // canvas 會卡在掛載當下量到的 0×0。這裡先重新量一次再畫。
+        if (canvas.clientWidth !== wrap.clientWidth) resize()
         world.tick(secs)
         renderer.draw(ctx, world, { ...viewRef.current, hover: null })
         return world.agents.map((a) => {

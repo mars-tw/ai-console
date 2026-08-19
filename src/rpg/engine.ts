@@ -38,6 +38,7 @@ export function newHero(name = '你'): Hero {
     name, level: 1, xp: 0, skillPoints: 3, attrPoints: 5, gold: 0,
     bag: [], loadouts: [emptyLoadout('主要'), emptyLoadout('第二套'), emptyLoadout('第三套')],
     active: 0, zone: 'meadow', kills: 0, deaths: 0,
+    potions: { hp: 3, mp: 2 },
   }
   // 給一把起手武器，不然第一場會很難看
   const starter = rollItem(1, 'main', 'common', 'melee')
@@ -200,7 +201,13 @@ export interface Battle {
   result?: 'win' | 'lose'
   /** 手動模式排隊的技能 id */
   queued?: string
+  /** 玩家點選的集火目標（foe 的 uid）。目標死了會自動清掉 */
+  focus?: string
+  /** 主角本回合處於格擋姿態：擋下重擊的大半傷害 */
+  guarding?: boolean
   loot: Item[]
+  /** 這場戰鬥撿到的藥水，結算時才進背包 */
+  potionDrops: { hp: number; mp: number }
   xp: number
   gold: number
   kills: number
@@ -255,11 +262,26 @@ export function allyCombatant(key: string, name: string, color: string, level: n
   }
 }
 
+/** 每隻小怪有機會變成精英：血厚攻高，但掉落也好，值得優先集火 */
+const ELITE_CHANCE = 0.18
+const ELITE_MULT = { hp: 1.9, atk: 1.35, def: 1.2 }
+
 function spawnWave(b: Battle, ids: string[], count: number) {
   b.foes = []
+  b.focus = undefined                     // 換一波敵人，舊的集火目標作廢
   for (let i = 0; i < count; i++) {
     const m = MONSTER_BY_ID[pick(ids)]
-    if (m) b.foes.push(foeCombatant(m, b.tick * 10 + i))
+    if (!m) continue
+    const c = foeCombatant(m, b.tick * 10 + i)
+    if (Math.random() < ELITE_CHANCE) {
+      c.elite = true
+      c.hpMax = Math.round(c.hpMax * ELITE_MULT.hp)
+      c.hp = c.hpMax
+      c.atk = Math.round(c.atk * ELITE_MULT.atk)
+      c.def = Math.round(c.def * ELITE_MULT.def)
+      c.name = t('精英{name}', { name: t(c.name) })
+    }
+    b.foes.push(c)
   }
 }
 
@@ -277,7 +299,7 @@ export function startBattle(h: Hero, kind: 'field' | 'dungeon', placeId: string,
     rooms: kind === 'dungeon' ? (DUNGEON_BY_ID[placeId]?.rooms ?? 3) : 0,
     hero: heroCombatant(h), allies, foes: [], log: [], fx: [], tick: 0,
     heroWeapon: equippedWeaponLine(h),
-    over: false, loot: [], xp: 0, gold: 0, kills: 0,
+    over: false, loot: [], potionDrops: { hp: 0, mp: 0 }, xp: 0, gold: 0, kills: 0,
   }
   const place = kind === 'field' ? ZONE_BY_ID[placeId] : DUNGEON_BY_ID[placeId]
   const placeName = t(place?.name ?? placeId)
@@ -323,12 +345,17 @@ function chooseSkill(c: Combatant, h: Hero | null): string | null {
   return best
 }
 
-function act(b: Battle, c: Combatant, h: Hero | null, haste: number) {
+function act(b: Battle, c: Combatant, h: Hero | null, haste: number, skipCd = false) {
   if (c.hp <= 0) return
-  for (const k of Object.keys(c.cds)) if (c.cds[k] > 0) c.cds[k]--
+  // 玩家即時施放時不要再扣一次冷卻 —— 那一回合的冷卻已經在 tick 裡扣過了
+  if (!skipCd) for (const k of Object.keys(c.cds)) if (c.cds[k] > 0) c.cds[k]--
 
   const targets = c.side === 'foe' ? [b.hero, ...b.allies].filter((x) => x.hp > 0) : b.foes.filter((x) => x.hp > 0)
   if (!targets.length) return
+  // 玩家點了集火目標，我方就全部打它 —— 這是「指揮隊伍」最直接的手段
+  const focused = c.side !== 'foe' && b.focus
+    ? targets.find((x) => x.uid === b.focus)
+    : undefined
 
   // 玩家排隊的技能優先
   let skillId: string | null = null
@@ -339,9 +366,39 @@ function act(b: Battle, c: Combatant, h: Hero | null, haste: number) {
   }
   if (!skillId) skillId = chooseSkill(c, h)
 
+  // 王的重擊：先蓄力一回合預告，落下時傷害兩倍。
+  // 這是整場戰鬥唯一需要玩家「反應」的節點 —— 看到預告就按格擋。
+  if (c.side === 'foe' && MONSTER_BY_ID[c.art]?.boss) {
+    if ((c.charge ?? 0) > 0) {
+      c.charge = 0
+      const tgt = focused ?? pick(targets)
+      let { dmg } = damage(c, tgt, 2.0)
+      const blocked = tgt.uid === b.hero.uid && b.guarding
+      if (blocked) {
+        dmg = Math.round(dmg * 0.3)
+        fx(b, tgt.uid, 'guard')
+      }
+      tgt.hp = Math.max(0, tgt.hp - dmg)
+      fx(b, c.uid, 'attack')
+      fx(b, tgt.uid, 'crit', dmg)
+      say(b, 'crit', blocked
+        ? t('你擋下了 {who} 的重擊！只受到 {dmg} 傷害', { who: t(c.name), dmg })
+        : t('{who} 的重擊命中 {target}，造成 {dmg} 傷害！', { who: t(c.name), target: t(tgt.name), dmg }))
+      b.guarding = false
+      if (tgt.hp === 0) { fx(b, tgt.uid, 'die'); say(b, 'death', t('{name} 倒下了', { name: t(tgt.name) })) }
+      return
+    }
+    if (Math.random() < 0.3) {
+      c.charge = 1
+      fx(b, c.uid, 'charge')
+      say(b, 'info', t('{who} 開始蓄力…下一擊會很痛', { who: t(c.name) }))
+      return
+    }
+  }
+
   if (!skillId) {
     // 沒技能可用就普攻
-    const tgt = pick(targets)
+    const tgt = focused ?? pick(targets)
     const { dmg, crit } = damage(c, tgt, 1)
     tgt.hp = Math.max(0, tgt.hp - dmg)
     fx(b, c.uid, 'attack')
@@ -391,7 +448,7 @@ function act(b: Battle, c: Combatant, h: Hero | null, haste: number) {
 
   const tgt = skillId === 'execute'
     ? targets.reduce((a, x) => (x.hp / x.hpMax < a.hp / a.hpMax ? x : a), targets[0])
-    : pick(targets)
+    : (focused ?? pick(targets))
   let { dmg, crit } = damage(c, tgt, sk.power * (1 + lv * 0.08), scaleBonus)
   if (skillId === 'snipe') { crit = true; dmg = Math.round(dmg * 1.4) }
   if (skillId === 'execute' && tgt.hp < tgt.hpMax * 0.3) dmg = Math.round(dmg * 1.6)
@@ -406,9 +463,67 @@ function act(b: Battle, c: Combatant, h: Hero | null, haste: number) {
 }
 
 /** 跑一個回合。回傳是否有狀態變化值得重繪 */
+// ── 玩家的即時操作 ────────────────────────────────
+// 這幾個函式是「可玩性」的核心：戰鬥每 tick 自己跑，但玩家隨時可以插手。
+// 全部都是即時生效，不排到下一回合 —— 排隊的操作感覺不到回饋。
+
+/** 喝藥水：立刻回復，不佔回合 */
+export function drinkPotion(b: Battle, h: Hero, kind: 'hp' | 'mp'): boolean {
+  if (b.over || h.potions[kind] <= 0) return false
+  const c = b.hero
+  if (kind === 'hp' && c.hp >= c.hpMax) return false
+  if (kind === 'mp' && c.mp >= c.mpMax) return false
+  h.potions[kind]--
+  const amount = Math.round((kind === 'hp' ? c.hpMax : c.mpMax) * 0.4)
+  if (kind === 'hp') {
+    c.hp = Math.min(c.hpMax, c.hp + amount)
+    fx(b, c.uid, 'heal', amount)
+    say(b, 'heal', t('你喝下藥水，回復 {n} 生命', { n: amount }))
+  } else {
+    c.mp = Math.min(c.mpMax, c.mp + amount)
+    fx(b, c.uid, 'heal', amount)
+    say(b, 'heal', t('你喝下藥水，回復 {n} 魔力', { n: amount }))
+  }
+  return true
+}
+
+/** 進入格擋姿態，撐到下一次被打為止 */
+export function guard(b: Battle): boolean {
+  if (b.over || b.guarding) return false
+  b.guarding = true
+  fx(b, b.hero.uid, 'guard')
+  say(b, 'info', t('你舉起武器格擋'))
+  return true
+}
+
+/** 點選集火目標；再點一次同一個就取消 */
+export function setFocus(b: Battle, uid: string | null) {
+  b.focus = b.focus === uid || !uid ? undefined : uid
+}
+
+/**
+ * 立刻施放技能，不等下一個 tick。
+ *
+ * 排隊式的施放（設 queued、等下一回合）在手感上是致命的：按下去沒有任何反應，
+ * 玩家會以為壞掉了。這裡直接重用 act() 跑一次主角的行動，
+ * 所有目標選擇、傷害、記錄、特效都跟自動戰鬥走同一條路徑。
+ */
+export function castNow(b: Battle, h: Hero, skillId: string): boolean {
+  if (b.over) return false
+  const c = b.hero
+  const sk = SKILL_BY_ID[skillId]
+  if (!sk || c.hp <= 0 || (c.cds[skillId] ?? 0) > 0 || sk.mpCost > c.mp) return false
+  b.queued = skillId
+  act(b, c, h, computeStats(h).haste, true)
+  b.queued = undefined
+  return true
+}
+
 export function stepBattle(b: Battle, h: Hero): void {
   if (b.over) return
   b.tick++
+  // 集火目標死了就清掉，不然畫面上會一直標著一個空位
+  if (b.focus && !b.foes.some((f) => f.uid === b.focus && f.hp > 0)) b.focus = undefined
   const st = computeStats(h)
 
   act(b, b.hero, h, st.haste)
@@ -421,16 +536,22 @@ export function stepBattle(b: Battle, h: Hero): void {
     const place = b.kind === 'field' ? ZONE_BY_ID[b.placeId] : DUNGEON_BY_ID[b.placeId]
     const lvl = place?.minLevel ?? 1
     for (const d of dead) {
-      const m = MONSTERS_BY_NAME[d.name]
+      // 用 art（怪物 id）查，不要用名字 —— 精英怪的名字被改過，查名字會落空
+      const m = MONSTER_BY_ID[d.art]
+      const bonus = d.elite ? 2.2 : 1
       b.kills++
-      b.xp += m?.xp ?? 10
-      b.gold += m?.gold ?? 5
-      if (Math.random() < (m?.boss ? 1 : 0.35)) {
+      b.xp += Math.round((m?.xp ?? 10) * bonus)
+      b.gold += Math.round((m?.gold ?? 5) * bonus)
+      const dropChance = m?.boss ? 1 : d.elite ? 0.75 : 0.35
+      if (Math.random() < dropChance) {
         const it = rollItem(Math.max(1, (m?.level ?? lvl) + rnd(3)), undefined,
-          m?.boss ? rollRarity(3) : undefined)
+          m?.boss ? rollRarity(3) : d.elite ? rollRarity(2) : undefined)
         b.loot.push(it)
         say(b, 'loot', t('拾獲 {item}', { item: itemLabel(it.name) }))
       }
+      // 藥水掉落：是玩家撐過硬仗的資源，所以掉率給得比裝備高
+      if (Math.random() < (m?.boss ? 1 : 0.22)) b.potionDrops.hp++
+      if (Math.random() < (m?.boss ? 0.8 : 0.12)) b.potionDrops.mp++
     }
     b.foes = b.foes.filter((f) => f.hp > 0)
   }
@@ -470,15 +591,13 @@ export function stepBattle(b: Battle, h: Hero): void {
   }
 }
 
-const MONSTERS_BY_NAME: Record<string, Monster> = Object.fromEntries(
-  Object.values(MONSTER_BY_ID).map((m) => [m.name, m]),
-)
-
 /** 把戰鬥結算進角色；回傳升了幾級 */
 export function collect(h: Hero, b: Battle): { levels: number; loot: Item[] } {
   h.gold += b.gold
   h.kills += b.kills
   h.bag.push(...b.loot)
+  h.potions.hp += b.potionDrops.hp
+  h.potions.mp += b.potionDrops.mp
   if (b.result === 'lose') h.deaths++
 
   let levels = 0
@@ -492,5 +611,6 @@ export function collect(h: Hero, b: Battle): { levels: number; loot: Item[] } {
   }
   const loot = b.loot
   b.xp = 0; b.gold = 0; b.kills = 0; b.loot = []
+  b.potionDrops = { hp: 0, mp: 0 }
   return { levels, loot }
 }

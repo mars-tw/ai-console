@@ -31,7 +31,10 @@ FOOTPRINT = {
     "coffee-table": (5, 2), "coffee-bar": (5, 2), "bookshelf": (5, 2), "armchair": (2, 2),
     "plant-small": (2, 2), "plant-big": (2, 2), "whiteboard": (5, 2), "water-cooler": (1, 2),
     "boxes": (2, 2), "toilet-door": (3, 2), "wall-screen": (5, 1),
-    "rug-lounge": (11, 7), "rug-meeting": (18, 9),
+    "printer": (3, 2), "filing-cabinet": (2, 2), "server-rack": (3, 3),
+    "vending-machine": (3, 3), "arcade-machine": (2, 3), "fish-tank": (4, 2),
+    "standing-lamp": (1, 2), "wall-clock": (2, 1), "poster": (3, 2),
+    "rug-lounge": (11, 7), "rug-meeting": (18, 9), "rug-desks": (20, 6),
 }
 
 
@@ -86,7 +89,9 @@ def pack_shell() -> bool:
 
 
 # 地毯本來就是實心矩形，四角不透明是正常的，不能套白墊偵測
-RECTANGULAR = {"rug-lounge", "rug-meeting"}
+# 只有地毯是「本來就該是實心矩形」。牆上的掛畫與時鐘看起來像矩形，
+# 但那個白框其實是生圖模型墊的卡紙，一定要清掉。
+RECTANGULAR = {"rug-lounge", "rug-meeting", "rug-desks"}
 
 
 def strip_plate(img: Image.Image, name: str) -> Image.Image:
@@ -105,7 +110,7 @@ def strip_plate(img: Image.Image, name: str) -> Image.Image:
     if any(c[3] < 250 for c in corners):
         return img
     ref = corners[0][:3]
-    if any(max(abs(a - b) for a, b in zip(c[:3], ref)) > 18 for c in corners):
+    if any(max(abs(a - b) for a, b in zip(c[:3], ref)) > 30 for c in corners):
         return img
 
     def near(c):

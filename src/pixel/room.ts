@@ -57,11 +57,35 @@ export const PLANT_SPOTS: Spot[] = PLANTERS.map((p) => ({ x: p.x, y: p.y + 2, fa
 export const TOILET_DOOR = { x: 1, y: 1, w: 3 }
 export const TOILET_SPOT: Spot = { x: 2, y: 3, face: 'up' }
 
-/** 白板 = 派工台（tool call 時站這裡） */
-export const BOARD = { x: 16, y: 10, w: 5, h: 1 }
-export const BOARD_SPOT: Spot = { x: 18, y: 12, face: 'up' }
+/**
+ * 白板 = 派工台（tool call 時站這裡）
+ *
+ * 位置很挑：白板的圖有 5 格多高，但佔地只登記 1 格，所以它會往上長出去。
+ * 原本擺在 (16,10)，結果整片白板蓋在上一排桌子上，把正在工作的龍擋住。
+ * 現在移到桌區下方的空地，正上方五格必須淨空。
+ */
+export const BOARD = { x: 17, y: 15, w: 5, h: 1 }
+export const BOARD_SPOT: Spot = { x: 19, y: 17, face: 'up' }
 
 export const POTTED = [{ x: 34, y: 19 }, { x: 22, y: 22 }]
+
+/**
+ * 額外的辦公配件。座標是用佔用圖算出來的：
+ * 每件家具的「實際繪製高度」（打包後像素高 ÷ 16）都比佔地高，
+ * 所以擺位時要把往上長出去的部分算進去，否則就會像先前的白板一樣蓋到人。
+ * 驗算工具：tools/check_layout.py
+ */
+export const EXTRAS: { name: string; x: number; y: number; w: number; h: number }[] = [
+  { name: 'printer', x: 32, y: 11, w: 3, h: 2 },
+  { name: 'filing-cabinet', x: 32, y: 15, w: 2, h: 2 },
+  { name: 'server-rack', x: 36, y: 6, w: 3, h: 3 },
+  { name: 'vending-machine', x: 36, y: 19, w: 3, h: 3 },
+  { name: 'arcade-machine', x: 1, y: 23, w: 2, h: 3 },
+  { name: 'fish-tank', x: 5, y: 24, w: 4, h: 2 },
+  { name: 'standing-lamp', x: 20, y: 18, w: 1, h: 2 },
+  { name: 'wall-clock', x: 20, y: 1, w: 2, h: 1 },
+  { name: 'poster', x: 28, y: 1, w: 3, h: 2 },
+]
 export const COOLER = { x: 2, y: 19 }      // 飲水機
 export const BOXES = { x: 18, y: 21 }      // 紙箱堆
 
@@ -102,6 +126,11 @@ PLANTERS.forEach((p) => block(p.x, p.y, 2, 2))
 POTTED.forEach((p) => block(p.x, p.y, 2, 2))
 block(BOARD.x, BOARD.y, BOARD.w, BOARD.h)
 block(COOLER.x, COOLER.y, 1, 2)
+  // 牆上的掛飾不擋路，其餘會擋
+  for (const e of EXTRAS) {
+    if (e.name === 'wall-clock' || e.name === 'poster') continue
+    block(e.x, e.y, e.w, e.h)
+  }
 block(BOXES.x, BOXES.y, 2, 2)
 
 export function isSolid(x: number, y: number): boolean {

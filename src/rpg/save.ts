@@ -16,6 +16,11 @@ export function loadHero(): Hero {
     h.kills ??= 0
     h.deaths ??= 0
     h.zone ??= 'meadow'
+    // 藥水是後來加的，舊存檔沒有；補一組起始量而不是 0，
+    // 否則老玩家一打開就少了一個剛做出來的操作手段
+    h.potions ??= { hp: 3, mp: 2 }
+    h.potions.hp ??= 0
+    h.potions.mp ??= 0
     h.active = Math.min(h.active ?? 0, h.loadouts.length - 1)
     for (const lo of h.loadouts) {
       lo.equipped ??= {}

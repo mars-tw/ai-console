@@ -15,6 +15,7 @@ import {
   xpForLevel, type Battle,
 } from '@/rpg/engine'
 import { loadHero, resetHero, saveHero } from '@/rpg/save'
+import { castNow, guard, setFocus, drinkPotion } from '@/rpg/engine'
 import {
   AFFIX_NAME, AFFIX_PCT, ATTRS, ATTR_NAME, LINES, LINE_NAME, RARITY_COLOR,
   RARITY_NAME, SLOTS, SLOT_NAME, type Combatant, type Hero, type Item,
@@ -219,10 +220,20 @@ export default function Adventure({ tools }: Props) {
     setBattle(startBattle(hero, 'dungeon', id, buildParty(members)))
   }
 
-  const castSkill = (id: string) => {
+  /**
+   * 玩家的即時操作。全部走「立刻生效 + 立刻重繪」，
+   * 排隊到下一回合的話按下去沒有回饋，會以為壞掉。
+   */
+  const act = (fn: (b: Battle, h: Hero) => boolean | void) => {
     if (!battle || battle.over) return
-    queuedRef.current = id
+    fn(battle, hero)
+    setBattle({ ...battle })
+    saveHero(hero)
   }
+  const castSkill = (id: string) => act((b, h) => castNow(b, h, id))
+  const drink = (kind: 'hp' | 'mp') => act((b, h) => drinkPotion(b, h, kind))
+  const doGuard = () => act((b) => guard(b))
+  const focusOn = (uid: string) => act((b) => setFocus(b, uid))
 
   // ── 配點 ──
   const addAttr = (a: typeof ATTRS[number]) => update((h) => {
@@ -391,26 +402,81 @@ export default function Adventure({ tools }: Props) {
                   </span>
                 ))}
               </div>
-              {!auto && (
-                <div className="mb-2 flex flex-wrap gap-1.5">
-                  {battle.hero.skills.map((id) => {
-                    const sk = SKILL_BY_ID[id]
-                    const cd = battle.hero.cds[id] ?? 0
-                    return (
-                      <button
-                        key={id}
-                        title={sk?.desc}
-                        className="rounded border px-2 py-1 text-xs disabled:opacity-40"
-                        style={{ borderColor: LINE_COLOR[sk.line] }}
-                        disabled={cd > 0 || sk.mpCost > battle.hero.mp || battle.over}
-                        onClick={() => castSkill(id)}
-                      >
-                        {sk?.name}{cd > 0 ? `（${cd}）` : ''}
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
+              {/* ── 敵人列：點一下集火 ── */}
+              <div className="mb-2 flex flex-wrap gap-1.5">
+                {battle.foes.map((f) => {
+                  const focused = battle.focus === f.uid
+                  const charging = (f.charge ?? 0) > 0
+                  return (
+                    <button
+                      key={f.uid}
+                      onClick={() => focusOn(f.uid)}
+                      title={t('點選集火。再點一次取消')}
+                      className={`rounded border px-2 py-1 text-[11px] ${
+                        focused ? 'border-amber-400 bg-amber-400/15 text-amber-200'
+                          : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
+                      }`}
+                    >
+                      {focused && '🎯 '}
+                      {f.elite && <span className="text-amber-300">★</span>}
+                      {t(f.name)}
+                      <span className="ml-1 text-zinc-500">{f.hp}/{f.hpMax}</span>
+                      {charging && <span className="ml-1 animate-pulse text-red-400">{t('蓄力中！')}</span>}
+                    </button>
+                  )
+                })}
+              </div>
+
+              {/* ── 操作列：技能 / 格擋 / 藥水 ── */}
+              <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                {battle.hero.skills.map((id) => {
+                  const sk = SKILL_BY_ID[id]
+                  const cd = battle.hero.cds[id] ?? 0
+                  const noMp = sk.mpCost > battle.hero.mp
+                  return (
+                    <button
+                      key={id}
+                      title={`${t(sk.desc)}${sk.mpCost ? `  ·  MP ${sk.mpCost}` : ''}`}
+                      className="rounded border px-2 py-1 text-xs disabled:opacity-40"
+                      style={{ borderColor: LINE_COLOR[sk.line] }}
+                      disabled={cd > 0 || noMp || battle.over}
+                      onClick={() => castSkill(id)}
+                    >
+                      {t(sk.name)}
+                      {cd > 0 && <span className="ml-0.5 text-zinc-500">{cd}</span>}
+                      {cd === 0 && noMp && <span className="ml-0.5 text-sky-500/70">MP</span>}
+                    </button>
+                  )
+                })}
+
+                <span className="mx-1 h-4 w-px bg-zinc-700" />
+
+                <button
+                  className={`rounded border px-2 py-1 text-xs disabled:opacity-40 ${
+                    battle.guarding ? 'border-sky-400 bg-sky-400/15 text-sky-200' : 'border-zinc-600 text-zinc-300'
+                  }`}
+                  title={t('擋下下一次攻擊的大半傷害。王蓄力時特別有用')}
+                  disabled={battle.over || battle.guarding}
+                  onClick={doGuard}
+                >
+                  🛡 {battle.guarding ? t('格擋中') : t('格擋')}
+                </button>
+
+                <button
+                  className="rounded border border-rose-700/70 px-2 py-1 text-xs text-rose-200 disabled:opacity-40"
+                  disabled={battle.over || hero.potions.hp <= 0 || battle.hero.hp >= battle.hero.hpMax}
+                  onClick={() => drink('hp')}
+                >
+                  🧪 {t('生命藥水')} ×{hero.potions.hp}
+                </button>
+                <button
+                  className="rounded border border-sky-700/70 px-2 py-1 text-xs text-sky-200 disabled:opacity-40"
+                  disabled={battle.over || hero.potions.mp <= 0 || battle.hero.mp >= battle.hero.mpMax}
+                  onClick={() => drink('mp')}
+                >
+                  🧪 {t('魔力藥水')} ×{hero.potions.mp}
+                </button>
+              </div>
 
               <div className="max-h-40 overflow-y-auto rounded bg-zinc-950 p-2 font-mono text-[11px] leading-5">
                 {[...battle.log].reverse().map((l, i) => (

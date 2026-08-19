@@ -116,20 +116,30 @@ def _agent_order(prompt: str, out: Path, ratio: str, resolution: str, transparen
 # Kimi 的生圖 API 只吃特定的「比例 × 解析度」組合，送錯會直接 HTTP 400
 # （實測 16:9 + 1K 就被打回來）。這裡換成最接近的可用組合，而不是讓整件工作
 # 失敗丟給下一家 —— 否則所有橫幅素材永遠輪不到 Kimi 畫。
+# 逐一實測出來的（不是猜的）。2026-08-19 用 7 秒逾時探測全部 7×2 組合：
+# 送不支援的組合會在 1 秒內回 HTTP 400，支援的會開始產圖。
+#   1:1  → 1K, 2K
+#   3:2  → 只有 1K
+#   2:3  → 只有 1K
+#   16:9 → 只有 2K
+#   4:3 / 3:4 / 9:16 → 完全不支援
 _KIMI_OK = {
-    "1:1": ("1K", "2K"), "3:2": ("2K",), "2:3": ("2K",),
-    "4:3": ("2K",), "3:4": ("2K",), "16:9": ("2K",), "9:16": ("2K",),
+    "1:1": ("1K", "2K"),
+    "3:2": ("1K",),
+    "2:3": ("1K",),
+    "16:9": ("2K",),
 }
+# 不支援的比例改用形狀最接近的：直式退 2:3，橫式退 3:2
+_KIMI_FALLBACK = {"3:4": "2:3", "9:16": "2:3", "4:3": "3:2", "1:2": "2:3", "2:1": "16:9"}
 
 
 def _kimi_size(ratio: str, resolution: str, transparent: bool) -> tuple[str, str]:
-    """挑一組 Kimi 真的收的參數；比例本身不支援就退回 1:1"""
-    allowed = _KIMI_OK.get(ratio)
-    if not allowed:
-        return "1:1", "1K"
-    # 透明背景實測只有 1K 出得來；該比例沒有 1K 就用它最低階的那個
+    """挑一組 Kimi 真的收的參數；比例不支援就換成形狀最接近的"""
+    r = ratio if ratio in _KIMI_OK else _KIMI_FALLBACK.get(ratio, "1:1")
+    allowed = _KIMI_OK[r]
+    # 透明背景實測只有 1K 出得來；該比例沒有 1K 就用它唯一支援的那個
     want = "1K" if transparent else resolution
-    return ratio, (want if want in allowed else allowed[0])
+    return r, (want if want in allowed else allowed[0])
 
 
 def _gen_kimi(prompt, out, ratio, resolution, transparent, log, timeout) -> bool:

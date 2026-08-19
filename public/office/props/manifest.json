@@ -62,6 +62,42 @@
       5,
       1
     ],
+    "printer": [
+      3,
+      2
+    ],
+    "filing-cabinet": [
+      2,
+      2
+    ],
+    "server-rack": [
+      3,
+      3
+    ],
+    "vending-machine": [
+      3,
+      3
+    ],
+    "arcade-machine": [
+      2,
+      3
+    ],
+    "fish-tank": [
+      4,
+      2
+    ],
+    "standing-lamp": [
+      1,
+      2
+    ],
+    "wall-clock": [
+      2,
+      1
+    ],
+    "poster": [
+      3,
+      2
+    ],
     "rug-lounge": [
       11,
       7
@@ -69,6 +105,10 @@
     "rug-meeting": [
       18,
       9
+    ],
+    "rug-desks": [
+      20,
+      6
     ]
   },
   "props": {
@@ -139,6 +179,46 @@
     "rug-meeting": [
       288,
       162
+    ],
+    "printer": [
+      48,
+      54
+    ],
+    "filing-cabinet": [
+      32,
+      56
+    ],
+    "server-rack": [
+      48,
+      64
+    ],
+    "vending-machine": [
+      48,
+      74
+    ],
+    "arcade-machine": [
+      32,
+      68
+    ],
+    "fish-tank": [
+      64,
+      58
+    ],
+    "standing-lamp": [
+      16,
+      53
+    ],
+    "wall-clock": [
+      32,
+      26
+    ],
+    "poster": [
+      48,
+      34
+    ],
+    "rug-desks": [
+      320,
+      180
     ]
   }
 }

@@ -61,6 +61,12 @@ export interface Loadout {
   attrs: Record<Attr, number>               // 玩家自己分配的點數
 }
 
+/** 消耗品：戰鬥中即時使用，是玩家少數能主動改變戰況的手段 */
+export interface Potions {
+  hp: number
+  mp: number
+}
+
 export interface Hero {
   name: string
   level: number
@@ -76,6 +82,8 @@ export interface Hero {
   /** 累計戰績 */
   kills: number
   deaths: number
+  /** 消耗品存量 */
+  potions: Potions
 }
 
 /** 由等級 + 屬性 + 裝備 + 技能算出來的最終數值 */
@@ -175,6 +183,13 @@ export interface Combatant {
   cds: Record<string, number>
   skills: string[]
   color: string
+  /** 精英怪：數值加成、掉落更好，畫面上會標記 */
+  elite?: boolean
+  /**
+   * 重擊蓄力：>0 表示正在蓄力，數字是還剩幾回合落下。
+   * 這是玩家唯一需要「反應」的時刻 —— 落下前按格擋可以擋掉大半傷害。
+   */
+  charge?: number
 }
 
 /**
@@ -186,7 +201,7 @@ export interface Combatant {
  */
 export interface FxEvent {
   uid: string                                  // 誰身上發生的
-  kind: 'attack' | 'hurt' | 'heal' | 'crit' | 'die'
+  kind: 'attack' | 'hurt' | 'heal' | 'crit' | 'die' | 'guard' | 'charge'
   amount?: number
   tick: number
 }

@@ -5,8 +5,8 @@
 // 素材還沒生好時，room.ts 的程式繪製版本會頂上，畫面不會開天窗。
 
 import {
-  BOARD, BOOKSHELF, BOXES, COFFEE_BAR, COOLER, DESKS, MEETING_SEATS, MEETING_TABLE,
-  PLANTERS, POTTED, READ_SPOT, SOFA, TOILET_DOOR,
+  BOARD, BOOKSHELF, BOXES, COFFEE_BAR, COOLER, DESKS, EXTRAS, MEETING_SEATS,
+  MEETING_TABLE, PLANTERS, POTTED, READ_SPOT, SOFA, TOILET_DOOR,
 } from './room'
 import { BASE_H, BASE_W, TILE } from './theme'
 
@@ -20,6 +20,7 @@ export interface Placement {
 
 /** 地板貼花：地毯類，永遠畫在最底層，不參與深度排序 */
 export const FLOOR_DECALS: Placement[] = [
+  { name: 'rug-desks', x: 1, y: 3, w: 20, h: 9 },
   { name: 'rug-meeting', x: 23, y: 3, w: 18, h: 9 },
   { name: 'rug-lounge', x: 23, y: 16, w: 11, h: 7 },
 ]
@@ -42,6 +43,7 @@ export const PROPS: Placement[] = [
   { name: 'boxes', x: BOXES.x, y: BOXES.y, w: 2, h: 2 },
   { name: 'toilet-door', x: TOILET_DOOR.x, y: TOILET_DOOR.y, w: TOILET_DOOR.w, h: 2 },
   { name: 'wall-screen', x: 34, y: 1, w: 5, h: 2 },
+  ...EXTRAS,
 ]
 
 /** 深度排序鍵：佔地下緣。數字越大代表越靠近鏡頭，越晚畫 */

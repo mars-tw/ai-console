@@ -356,4 +356,20 @@ export const EN: Record<string, string> = {
   '目前已經是最佳配置': 'Already the best setup',
   '賣掉 {n} 件雜物': 'Sold {n} junk items',
   '沒有可賣的雜物': 'Nothing to sell',
+
+  // ── 戰鬥操作 ───────────────────────────────────
+  '你喝下藥水，回復 {n} 生命': 'You drink a potion and recover {n} HP',
+  '你喝下藥水，回復 {n} 魔力': 'You drink a potion and recover {n} MP',
+  '你舉起武器格擋': 'You raise your weapon to guard',
+  '精英{name}': 'Elite {name}',
+  '{who} 開始蓄力…下一擊會很痛': '{who} starts charging… the next hit will hurt',
+  '你擋下了 {who} 的重擊！只受到 {dmg} 傷害': "You block {who}'s heavy blow! Only {dmg} damage",
+  '{who} 的重擊命中 {target}，造成 {dmg} 傷害！': "{who}'s heavy blow lands on {target} for {dmg}!",
+  '點選集火。再點一次取消': 'Click to focus fire. Click again to clear',
+  '蓄力中！': 'CHARGING!',
+  '擋下下一次攻擊的大半傷害。王蓄力時特別有用': 'Blocks most of the next hit. Especially useful when a boss is charging',
+  '格擋中': 'Guarding',
+  '格擋': 'Guard',
+  '生命藥水': 'HP potion',
+  '魔力藥水': 'MP potion',
 }

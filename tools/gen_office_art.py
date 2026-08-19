@@ -159,6 +159,45 @@ PROPS: dict[str, tuple[int, int, str, str]] = {
     "wall-screen": (5, 1, "16:9",
                     "A large wall-mounted flat-screen display in a thin black bezel seen "
                     "head-on, screen glowing with a simple blue dashboard of bars and lines."),
+    # ── 讓房間更有生活感的配件 ──────────────────────
+    "printer": (3, 2, "16:9",
+                "A chunky office laser printer on a low stand seen from a three-quarter "
+                "top-down view, paper tray sticking out with a few printed sheets, "
+                "a small green status light."),
+    "filing-cabinet": (2, 2, "1:1",
+                       "A three-drawer steel filing cabinet in muted grey-blue seen from a "
+                       "three-quarter top-down view, with metal handles and a small label "
+                       "holder on each drawer, and a potted succulent on top."),
+    "server-rack": (3, 3, "3:4",
+                    "A black half-height server rack on castors seen from a three-quarter "
+                    "top-down view, mesh front door, rows of tiny blue and green status "
+                    "LEDs, a bundle of cables running out of the back."),
+    "vending-machine": (3, 3, "3:4",
+                        "A softly glowing drinks vending machine seen from a three-quarter "
+                        "top-down view, illuminated front panel showing rows of colourful "
+                        "cans, a dark dispensing slot at the bottom."),
+    "arcade-machine": (2, 3, "3:4",
+                       "A retro upright arcade cabinet seen from a three-quarter top-down "
+                       "view, glowing CRT screen with an abstract colourful game on it, "
+                       "red and yellow buttons and a joystick, neon side art."),
+    "fish-tank": (4, 2, "16:9",
+                  "A wide glass aquarium on a dark wooden stand seen from a three-quarter "
+                  "top-down view, lit blue-green water with a few small orange fish, "
+                  "green plants and pale gravel inside."),
+    "standing-lamp": (1, 2, "1:2",
+                      "A slim floor lamp with a thin dark metal stem and a warm glowing "
+                      "cone shade, seen from a three-quarter top-down view."),
+    "wall-clock": (2, 1, "1:1",
+                   "A round office wall clock with a plain white face, thin black hands "
+                   "and a dark rim, seen head-on."),
+    "poster": (3, 2, "3:2",
+               "A framed motivational office poster seen head-on: a simple flat "
+               "illustration of a mountain at sunrise in muted teal and orange, "
+               "in a thin dark frame."),
+    "rug-desks": (20, 6, "16:9",
+                  "A large rectangular charcoal-grey office floor rug lying flat on the "
+                  "floor, photographed straight down from the ceiling. A thin piece of "
+                  "fabric with a fine woven texture and a slightly lighter border."),
     "rug-lounge": (11, 7, "3:2",
                    "A large rectangular deep-red persian style area rug seen flat from directly "
                    "above, with a woven gold border and a subtle repeating pattern, slightly "
