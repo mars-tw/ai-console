@@ -544,6 +544,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json({"ok": False, "error": f"地端模型呼叫失敗：{e}"}, 502)
 
+        if self.path == "/api/conv/delete":
+            return self.do_conv_delete()
         if self.path == "/api/plan":
             return self.do_plan()
         if self.path == "/api/dispatch":
@@ -664,6 +666,55 @@ class Handler(BaseHTTPRequestHandler):
             self.REGISTRY.write_text(json.dumps(self.DISPATCHES[-100:], ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
+
+    # 刪掉的對話搬到這裡，不是真的抹掉。誤刪救得回來。
+    TRASH = Path.home() / ".ai-console" / "trash"
+
+    def do_conv_delete(self):
+        """刪除一個對話：把來源檔搬到回收區
+
+        路徑一律從索引查，不接受呼叫端指定 —— 否則這就變成
+        「叫本機 API 搬走任意檔案」的漏洞。
+        """
+        body = self._body()
+        conv_id = str(body.get("id", "")).strip()
+        if not conv_id:
+            return self._json({"ok": False, "error": "需要 id"}, 400)
+        conv = find_conv(conv_id)
+        if not conv:
+            return self._json({"ok": False, "error": "找不到這個對話"}, 404)
+
+        src = Path(conv.get("path", ""))
+        if not src.exists():
+            return self._json({"ok": True, "note": "來源檔已不存在，視為已刪除"})
+        # 只允許動使用者家目錄底下的對話檔，擋掉任何奇怪的路徑
+        try:
+            if not src.resolve().is_relative_to(Path.home().resolve()):
+                return self._json({"ok": False, "error": "路徑不在家目錄內，拒絕"}, 400)
+        except (OSError, ValueError):
+            return self._json({"ok": False, "error": "路徑無法解析"}, 400)
+
+        self.TRASH.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        dest = self.TRASH / f"{stamp}_{conv.get('tool', 'x')}_{src.name}"
+        try:
+            import shutil
+            shutil.move(str(src), str(dest))
+        except OSError as e:
+            return self._json({"ok": False, "error": f"搬移失敗：{e}"}, 500)
+
+        # 同步把索引裡那筆拿掉，畫面不用等重新掃描
+        try:
+            data = json.loads(INDEX_JSON.read_text(encoding="utf-8"))
+            before = len(data.get("conversations", []))
+            data["conversations"] = [c for c in data["conversations"] if c["id"] != conv_id]
+            if len(data["conversations"]) != before:
+                st = data.setdefault("stats", {})
+                st["total"] = max(0, (st.get("total") or before) - 1)
+                INDEX_JSON.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except (OSError, json.JSONDecodeError):
+            pass
+        return self._json({"ok": True, "trash": str(dest)})
 
     def do_plan(self):
         """一句話 → 派工計畫。只回計畫，不動手 —— 派工是使用者按下去才發生的。"""

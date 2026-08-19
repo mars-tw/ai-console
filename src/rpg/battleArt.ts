@@ -74,19 +74,24 @@ export const petImage = (art: string) => images.get(`pet:${art}`)
  */
 export function drawSkillFx(
   c: CanvasRenderingContext2D, skillId: string, x: number, footY: number, t: number,
+  targetH = 44,
 ) {
   if (t >= 1) return
   const img = images.get(`fx:${skillId}`)
   if (!img) return
+  // 特效大小跟著目標走。
+  // 原本固定用素材的 72px，畫在 30px 的史萊姆身上會整隻蓋掉 ——
+  // 看不到打中什麼，就沒有打擊感可言。
+  const fit = Math.min(1, (targetH * 1.35) / img.height)
   // 前 25% 由小放大（衝擊感），之後維持並淡出
-  const grow = t < 0.25 ? 0.55 + (t / 0.25) * 0.45 : 1
-  const alpha = t < 0.7 ? 1 : 1 - (t - 0.7) / 0.3
+  const grow = (t < 0.25 ? 0.55 + (t / 0.25) * 0.45 : 1) * fit
+  const alpha = t < 0.65 ? 1 : 1 - (t - 0.65) / 0.35
   const w = img.width * grow
   const h = img.height * grow
   c.save()
   c.globalAlpha = Math.max(0, alpha)
   c.globalCompositeOperation = 'lighter'      // 發光疊加，像素風的特效這樣才亮
-  c.drawImage(img, Math.round(x - w / 2), Math.round(footY - 28 - h / 2), w, h)
+  c.drawImage(img, Math.round(x - w / 2), Math.round(footY - targetH * 0.55 - h / 2), w, h)
   c.restore()
 }
 

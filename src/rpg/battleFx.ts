@@ -16,8 +16,41 @@ export const FX_LIFE: Record<string, number> = {
 
 /** 緩動：一開始快、結尾慢，砍下去才有重量 */
 export const easeOut = (t: number) => 1 - (1 - t) * (1 - t)
-/** 先衝出去再收回來 */
+/** 先衝出去再收回來（舊版：單純的正弦，沒有預備動作）*/
 export const lunge = (t: number) => Math.sin(Math.min(1, Math.max(0, t)) * Math.PI)
+
+/**
+ * 攻擊的位移曲線：預備 → 突進 → 收招。
+ *
+ * 原本用單純的正弦，看起來像原地抽搐 —— 沒有蓄力、沒有停頓、回得跟去得一樣快。
+ * 真正有打擊感的節奏是：先往後拉一點（預備），快速衝出去（突進），
+ * 在最前面停一下（命中的停頓），再慢慢退回來。
+ *
+ * 回傳 0..1 的「前進比例」，負值代表往後拉。
+ */
+export function attackCurve(t: number): number {
+  if (t <= 0 || t >= 1) return 0
+  if (t < 0.22) return -0.18 * Math.sin((t / 0.22) * Math.PI)   // 預備：往後
+  if (t < 0.42) return easeOut((t - 0.22) / 0.20)               // 突進：快速衝出
+  if (t < 0.62) return 1                                        // 停頓：命中的那一下
+  return 1 - easeOut((t - 0.62) / 0.38)                         // 收招：慢慢退回
+}
+
+/** 攻擊動作分成三段，姿勢跟著換 */
+export function attackPose(t: number): 'ready' | 'strike' | 'idle' {
+  if (t <= 0 || t >= 1) return 'idle'
+  return t < 0.22 ? 'ready' : t < 0.72 ? 'strike' : 'idle'
+}
+
+/**
+ * 待機時的呼吸起伏。
+ *
+ * 沒有這個，角色在等下一個行動的空檔就是完全靜止的雕像 ——
+ * 那才是「不流暢」的主因，不是幀率（實測繪製只要 0.11ms/幀）。
+ */
+export function idleBob(nowSec: number, phase: number): number {
+  return Math.sin(nowSec * 2.2 + phase * 6.3) * 1.2
+}
 
 /**
  * 命中頓幀：受擊後極短時間內把畫面「凍住」一下。

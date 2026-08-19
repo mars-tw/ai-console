@@ -70,6 +70,11 @@ export default function Home() {
   const [chatInput, setChatInput] = useState('')
   const [chatBusy, setChatBusy] = useState(false)
   const [viewMode, setViewMode] = useState<'list' | 'console' | 'office' | 'rpg'>('list')
+  // 只顯示最近幾天有活動的資料夾。142 個資料夾裡今天只用過 25 個，
+  // 全部列出來等於什麼都找不到。0 = 不限。
+  const [activeDays, setActiveDays] = useState(() => Number(localStorage.getItem('ac_activeDays') ?? 7))
+  const [deleted, setDeleted] = useState<Set<string>>(new Set())
+  useEffect(() => { localStorage.setItem('ac_activeDays', String(activeDays)) }, [activeDays])
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 4000) }
 
@@ -117,6 +122,24 @@ export default function Home() {
       }
     }
   }, [index])
+
+  /** 刪除一個對話：伺服器把來源檔搬到回收區，可以救回來 */
+  const removeConv = async (c: ConversationSummary) => {
+    if (!confirm(t('把「{title}」移到回收區？檔案會搬到 ~/.ai-console/trash，可以救回來。',
+      { title: c.title.slice(0, 40) }))) return
+    try {
+      const r = await fetch('/api/conv/delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: c.id }),
+      })
+      const d = await r.json()
+      if (d.ok) {
+        setDeleted((s2) => new Set(s2).add(c.id))
+        if (selected?.id === c.id) setSelected(null)
+        showToast(t('已移到回收區'))
+      } else showToast(t('刪除失敗：{err}', { err: d.error || '' }))
+    } catch { showToast(t('控制 API 無回應')) }
+  }
 
   const refresh = async () => {
     setBusy('refresh')
@@ -255,6 +278,7 @@ export default function Home() {
       if (!showDup && c.dup) return false
       if (!showOld && c.mtime < cutoff) return false
       if (!showDispatch && c.dispatch) return false
+      if (deleted.has(c.id)) return false
       if (!q) return true
       return c.title.toLowerCase().includes(q) || c.path.toLowerCase().includes(q) || c.projectDir.toLowerCase().includes(q)
     })
@@ -265,7 +289,15 @@ export default function Home() {
       arr.push(c)
       map.set(key, arr)
     }
+    // 資料夾層級的活躍度過濾：整個資料夾最近都沒動過就不列出來。
+    // 搜尋時不套用 —— 你明確在找東西的時候不該被時間擋住。
+    //
+    // 基準時間用索引的產生時間而不是 Date.now()：一來 render 期間不該呼叫
+    // 不純函式，二來資料本來就只新到上次掃描為止，用掃描時間才對得上。
+    const scanned = new Date(index.generated_at).getTime() || 0
+    const dirCutoff = activeDays > 0 && !q && scanned ? scanned - activeDays * 86400000 : 0
     return [...map.entries()]
+      .filter(([, convs]) => !dirCutoff || convs.some((c) => c.mtime >= dirCutoff))
       .map(([dir, convs]) => {
         // 該資料夾的主要工作線 = 成員中最常見的分類
         const counts = new Map<string, number>()
@@ -274,7 +306,7 @@ export default function Home() {
         return { dir, line, convs }
       })
       .sort((a, b) => (b.convs[0]?.mtime ?? 0) - (a.convs[0]?.mtime ?? 0))
-  }, [index, search, showSubagent, showDup, showOld, showDispatch])
+  }, [index, search, showSubagent, showDup, showOld, showDispatch, activeDays, deleted])
 
   const oldCount = useMemo(() => {
     if (!index) return 0
@@ -340,6 +372,19 @@ export default function Home() {
               <input type="checkbox" checked={showDispatch} onChange={(e) => setShowDispatch(e.target.checked)} />
               {t('顯示 AI 派工對話（已隱藏 {n} 份 worker 紀錄）', { n: index.stats.dispatch ?? 0 })}
             </label>
+            <label className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500">
+              {t('只看最近')}
+              <select
+                className="rounded border border-zinc-200 bg-transparent px-1 py-0.5 text-xs dark:border-zinc-700"
+                value={activeDays}
+                onChange={(e) => setActiveDays(Number(e.target.value))}
+              >
+                {[1, 3, 7, 30, 0].map((d) => (
+                  <option key={d} value={d}>{d === 0 ? t('全部') : t('{n} 天', { n: d })}</option>
+                ))}
+              </select>
+              {t('有動過的資料夾')}
+            </label>
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto">
@@ -387,22 +432,37 @@ export default function Home() {
                     </div>
                   )}
                   {open && shown.map((c) => (
-                    <button
+                    // 外層用 div 不用 button：裡面還要放一個刪除按鈕，
+                    // 按鈕不能巢狀在按鈕裡
+                    <div
                       key={c.id}
-                      onClick={() => setSelected(c)}
-                      className={`flex w-full flex-col gap-0.5 px-3 py-1.5 pl-7 text-left hover:bg-zinc-50 dark:hover:bg-zinc-900 ${selected?.id === c.id ? 'bg-zinc-100 dark:bg-zinc-800' : ''}`}
+                      className={`group flex w-full items-start gap-1 px-3 py-1.5 pl-7 hover:bg-zinc-50 dark:hover:bg-zinc-900 ${selected?.id === c.id ? 'bg-zinc-100 dark:bg-zinc-800' : ''}`}
                     >
-                      <span className="truncate text-sm">
-                        {c.title}
-                        {c.dup && <span className="ml-1 rounded bg-zinc-100 px-1 text-xs text-zinc-400 dark:bg-zinc-800">{t('副本')}→{c.dupOfTool}</span>}
-                        {!!c.dupCount && <span className="ml-1 rounded bg-zinc-100 px-1 text-xs text-zinc-400 dark:bg-zinc-800">+{t('{n} 副本', { n: c.dupCount })}</span>}
-                      </span>
-                      <span className="flex items-center gap-2 text-xs text-zinc-400">
-                        <span className={`inline-block h-1.5 w-1.5 rounded-full ${(liveTools ?? index.tools)[c.tool]?.rate_limited ? 'bg-red-500' : 'bg-emerald-500'}`} />
-                        {c.toolLabel} · {relTime(c.mtime)} · {fmtSize(c.size)}
-                        {c.msgCount > 0 && ` · ${t('{n} 則', { n: c.msgCount })}`}
-                      </span>
-                    </button>
+                      <button
+                        onClick={() => setSelected(c)}
+                        className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
+                      >
+                        <span className="truncate text-sm">
+                          {c.title}
+                          {c.dup && <span className="ml-1 rounded bg-zinc-100 px-1 text-xs text-zinc-400 dark:bg-zinc-800">{t('副本')}→{c.dupOfTool}</span>}
+                          {!!c.dupCount && <span className="ml-1 rounded bg-zinc-100 px-1 text-xs text-zinc-400 dark:bg-zinc-800">+{t('{n} 副本', { n: c.dupCount })}</span>}
+                        </span>
+                        <span className="flex items-center gap-2 text-xs text-zinc-400">
+                          <span className={`inline-block h-1.5 w-1.5 rounded-full ${(liveTools ?? index.tools)[c.tool]?.rate_limited ? 'bg-red-500' : 'bg-emerald-500'}`} />
+                          {c.toolLabel} · {relTime(c.mtime)} · {fmtSize(c.size)}
+                          {c.msgCount > 0 && ` · ${t('{n} 則', { n: c.msgCount })}`}
+                        </span>
+                      </button>
+                      {apiOk && (
+                        <button
+                          className="flex-none rounded px-1 text-xs text-zinc-300 opacity-0 hover:text-red-500 group-hover:opacity-100 dark:text-zinc-600"
+                          title={t('移到回收區')}
+                          onClick={(e) => { e.stopPropagation(); void removeConv(c) }}
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
                   ))}
                   {open && convs.length > 40 && !showAll[dir] && (
                     <button className="w-full px-3 py-1.5 text-left text-xs text-zinc-400 hover:text-zinc-600" onClick={() => setShowAll((s) => ({ ...s, [dir]: true }))}>

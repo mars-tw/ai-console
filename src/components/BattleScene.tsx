@@ -12,7 +12,8 @@ import {
   loadBattleArt, unitHeight,
 } from '@/rpg/battleArt'
 import {
-  FX_LIFE, deathTransform, drawCritFlash, drawHealMotes, drawSlash, drawSparks, lunge, shake,
+  FX_LIFE, attackCurve, attackPose, deathTransform, drawCritFlash, drawHealMotes,
+  drawSlash, drawSparks, idleBob, shake,
 } from '@/rpg/battleFx'
 import type { Battle } from '@/rpg/engine'
 import type { Combatant, FxEvent } from '@/rpg/types'
@@ -197,7 +198,7 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
         ctx.translate(slot.x, slot.y + sink)
         ctx.rotate(tilt * (c.side === 'foe' ? -1 : 1))
         ctx.translate(-slot.x, -slot.y)
-        drawUnit(ctx, c, slot.x, slot.y, false, false)
+        drawUnit(ctx, c, slot.x, slot.y, 'idle', false)
         ctx.restore()
 
         // 打死牠的那一招也要看得到。特效綁在目標身上，但目標一死就被移出
@@ -218,17 +219,20 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
       /** 畫一個單位的精靈本體（含主角手上的武器）*/
       function drawUnit(
         c: CanvasRenderingContext2D, u: Combatant, x: number, y: number,
-        attacking: boolean, hurting: boolean,
+        stance: 'ready' | 'strike' | 'idle', hurting: boolean,
       ) {
         if (u.side === 'hero') {
           const who = battle.heroLook
-          const pose = attacking ? `${who}-attack` : hurting ? `${who}-hurt` : `${who}-stand`
+          // 預備跟收招都用站姿，只有真正出手那段用攻擊姿勢 ——
+          // 從頭到尾維持攻擊姿勢的話，看起來就是一張圖擺著不動
+          const kind = hurting ? 'hurt' : stance === 'strike' ? 'attack' : 'stand'
+          const pose = `${who}-${kind}`
           drawHero(c, pose, x, y)
-          drawWeapon(c, battle.heroWeapon, pose.replace(who, 'hero'), x, y)
+          drawWeapon(c, battle.heroWeapon, `hero-${kind}`, x, y)
         } else if (u.side === 'pet') {
           drawPet(c, u.art, x, y)
         } else if (u.side === 'ally') {
-          drawAlly(c, u.art, x, y, attacking, 1)
+          drawAlly(c, u.art, x, y, stance === 'strike', 1)
         } else {
           drawMonster(c, u.art, x, y)
         }
@@ -242,38 +246,57 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
         const heal = activeFx(s.c.uid, 'heal')
         const facing = s.c.side === 'foe' ? -1 : 1
 
-        // 出手：往敵方方向前衝再收回
-        let dx = atk ? lunge(atk.t) * 15 * facing : 0
+        /**
+         * 出手：真的衝到目標面前，不是原地位移 15px。
+         * 原本固定 15px，但角色到目標有 80px 以上，看起來像原地抽搐。
+         * 這裡取「到最近目標距離的六成」，遠的目標就衝得遠。
+         */
+        const enemies = s.c.side === 'foe' ? mine : foes
+        const near = enemies.length
+          ? enemies.reduce((a, e) => (Math.abs(e.x - s.x) < Math.abs(a.x - s.x) ? e : a), enemies[0])
+          : null
+        const reach = near ? Math.min(70, Math.abs(near.x - s.x) * 0.6) : 18
+        let dx = atk ? attackCurve(atk.t) * reach * facing : 0
         // 受擊：往後彈
         if (hurt && hurt.age < 0.18) dx -= facing * 5
+        // 待機時的呼吸起伏，讓角色不是雕像
+        const bob = atk || (hurt && hurt.age < 0.3) ? 0 : idleBob(now(), s.c.uid.length * 0.37)
 
         const x = s.x + dx
+        const y = s.y + bob
         ctx.save()
         // 受擊瞬間閃白
         if (hurt && hurt.age < 0.12) ctx.globalAlpha = 0.5
-        drawUnit(ctx, s.c, x, s.y,
-          !!atk && atk.t < 0.7, !!hurt && hurt.age < 0.3)
+        drawUnit(ctx, s.c, x, y, atk ? attackPose(atk.t) : 'idle', !!hurt && hurt.age < 0.3)
         ctx.restore()
 
-        // 揮擊弧線：出手到一半才出現，跟前衝對得上
-        if (atk && atk.t > 0.15) {
-          drawSlash(ctx, x, s.y, (atk.t - 0.15) / 0.85, facing, !!critFx)
+        // 揮擊弧線：只有「這回合沒有任何技能特效在播」時才畫。
+        // 技能有自己的大圖，兩層疊在一起會變成一團看不懂的白光。
+        const anySkillFx = battle.fx.some((e) => {
+          if (e.kind !== 'skill') return false
+          const t0 = startedAt.current.get(key(e))
+          return t0 !== undefined && now() - t0 < (FX_LIFE.skill ?? 1)
+        })
+        if (atk && atk.t > 0.2 && !anySkillFx) {
+          drawSlash(ctx, x, y, (atk.t - 0.2) / 0.8, facing, !!critFx)
         }
+        // 這個單位畫出來多高：特效縮放與血條位置都要用它
+        const top = unitHeight(s.c.side, s.c.art, `${battle.heroLook}-stand`)
+
         // 技能專屬特效（疊在目標身上，畫在命中火花之前）
         const skillFx = activeFx(s.c.uid, 'skill')
-        if (skillFx?.e.skill) drawSkillFx(ctx, skillFx.e.skill, x, s.y, skillFx.t)
+        if (skillFx?.e.skill) drawSkillFx(ctx, skillFx.e.skill, x, y, skillFx.t, top)
 
         // 命中特效
         if (hurt) {
-          drawSparks(ctx, x, s.y - 24, hurt.t, hurt === critFx)
-          if (hurt === critFx) drawCritFlash(ctx, x, s.y - 24, hurt.age)
+          drawSparks(ctx, x, y - top * 0.55, hurt.t, hurt === critFx)
+          if (hurt === critFx) drawCritFlash(ctx, x, y - top * 0.55, hurt.age)
         }
-        if (heal) drawHealMotes(ctx, x, s.y, heal.t)
+        if (heal) drawHealMotes(ctx, x, y, heal.t)
 
         // 血條貼在頭頂上方。固定高度不行 —— 史萊姆 30px、古龍 104px，
         // 用同一個數字會讓小怪的血條飄在半空、大王的血條插在身上。
-        const top = unitHeight(s.c.side, s.c.art, `${battle.heroLook}-stand`)
-        const barY = s.y - top - 8
+        const barY = y - top - 8
         const bw = Math.max(24, Math.min(48, top * 0.7))
         ctx.fillStyle = 'rgba(0,0,0,0.55)'
         ctx.fillRect(x - bw / 2 - 1, barY, bw + 2, 5)

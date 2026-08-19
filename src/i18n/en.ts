@@ -427,4 +427,13 @@ export const EN: Record<string, string> = {
   '▶ 輪到你了，選一個行動': '▶ Your turn — choose an action',
   '結算中…': 'Resolving…',
   '普攻': 'Attack',
+
+  // ── 對話清理 ───────────────────────────────────
+  '只看最近': 'Active in the last',
+  '有動過的資料夾': 'days',
+  '{n} 天': '{n} days',
+  '移到回收區': 'Move to trash',
+  '已移到回收區': 'Moved to trash',
+  '刪除失敗：{err}': 'Delete failed: {err}',
+  '把「{title}」移到回收區？檔案會搬到 ~/.ai-console/trash，可以救回來。': 'Move "{title}" to trash? The file goes to ~/.ai-console/trash and can be restored.',
 }
