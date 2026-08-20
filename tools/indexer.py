@@ -315,6 +315,22 @@ def session_id_from_name(name: str) -> str:
 UUID_RE = r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
 
 
+# 明顯不是對話的目錄名。工具會在自己的資料夾裡放快取、日誌、暫存，
+# 那些檔案的副檔名跟對話一樣，只能靠目錄名擋。
+NOISE_DIR_RE = re.compile(
+    r"^(cache|caches|logs?|tmp|temp|crash|telemetry|metrics|"
+    r"updates?|backups?|node_modules|[.]system_generated)$", re.I)
+
+
+def _in_noise_dir(path: Path, root: Path) -> bool:
+    """這個檔案的路徑上有沒有經過雜訊目錄"""
+    try:
+        parts = path.relative_to(root).parts[:-1]
+    except ValueError:
+        return False
+    return any(NOISE_DIR_RE.match(p) for p in parts)
+
+
 def session_id_for(path: Path, root: Path) -> str:
     """依序從檔名往上四層找 UUID 或 session_ 前綴；都不行就用路徑雜湊"""
     import hashlib
@@ -460,6 +476,15 @@ def main():
         if not root.exists():
             continue
         for path in root.rglob(src["pattern"]):
+            # 跳過工具內部的快取與日誌目錄。
+            #
+            # rglob 本來是完全不挑目錄的，工具自己的暫存檔只要副檔名對就會被
+            # 當成對話收進來。實測：Antigravity 的
+            # brain/<uuid>/.system_generated/logs 底下每個 uuid 都有兩個 .db，
+            # 一次多出兩百多筆假對話，標題是 transcript_full、訊息數 1。
+            # 這一層對每個工具都有用，不是只為了某一家。
+            if _in_noise_dir(path, root):
+                continue
             # 跳過常見的非對話檔
             if path.name in ("updates.jsonl",) and path.stat().st_size > 50 * 1024 * 1024:
                 continue

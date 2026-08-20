@@ -68,7 +68,10 @@ KNOWN_LABELS = {
     "copilot": "GitHub Copilot", "opencode": "OpenCode", "aider": "Aider",
     "goose": "Goose", "continue": "Continue.dev", "codebuddy": "CodeBuddy",
     "vibe": "Mistral Vibe", "kiro": "Kiro", "openclaw": "OpenClaw",
-    "augment": "Augment Code", "craft-agent": "craft-agent", "gemini": "Gemini CLI",
+    "augment": "Augment Code", "craft-agent": "craft-agent",
+    # ~/.gemini 底下裝的是 Antigravity 的 CLI（執行檔叫 agy），不是 Google 的 Gemini CLI。
+    # 介面上那隻龍也叫 ANTIGRAVITY，名稱要一致才不會以為是兩個工具。
+    "gemini": "Antigravity",
     "windsurf": "Windsurf", "cline": "Cline", "zed": "Zed",
 }
 # 目錄名 → 統一的工具 id（同一個工具可能有多個資料夾）
@@ -81,8 +84,13 @@ TOOL_ALIASES = {
 # 對話訊息常見的角色值
 ROLE_WORDS = {"user", "assistant", "system", "tool", "human", "model", "ai",
               "developer", "function"}
-# SQLite 裡面像對話的表名
-DB_TABLE_RE = re.compile(r"thread|session|conversation|message|chat", re.I)
+# SQLite 裡面像對話的表名。
+#
+# trajector 是後來補的：Antigravity（agy）把每一場對話存成一個獨立的 .db，
+# 表名是 trajectory_meta / steps / gen_metadata，一個「對話」字樣都沒有。
+# 這個掃描器的前提是「看內容判斷，不寫死工具清單」，認不出它就是這個前提的漏洞
+# —— 同一系列的工具（Windsurf / Cascade）也用 trajectory 這個詞。
+DB_TABLE_RE = re.compile(r"thread|session|conversation|message|chat|trajector", re.I)
 
 
 def candidate_parents() -> list[Path]:

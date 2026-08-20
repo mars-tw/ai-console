@@ -75,6 +75,9 @@ _BIN_CANDIDATES = {
     "qwen": ["%APPDATA%/npm/qwen.cmd", "~/.local/bin/qwen"],
     "cursor": ["%LOCALAPPDATA%/Programs/cursor/cursor.exe",
                "/Applications/Cursor.app/Contents/MacOS/Cursor"],
+    # ANTIGRAVITY 的 CLI 執行檔叫 agy，不叫 gemini —— 用工具名去 PATH 找永遠找不到，
+    # 所以這一列在很長一段時間裡是缺的，介面上那隻龍就一直顯示「沒紀錄」。
+    "gemini": ["%LOCALAPPDATA%/agy/bin/agy.exe", "~/.local/bin/agy", "~/AppData/Local/agy/bin/agy.exe"],
 }
 
 
@@ -313,6 +316,26 @@ def _fmt_reset(raw: str) -> str:
         return raw.strip().rstrip(".")
 
 
+def enrich_installed(data: dict) -> None:
+    """把「查不到」跟「沒裝」分開。
+
+    上游的掃描器只看 session 檔在不在，找不到就報 unknown。但那兩件事是不同的：
+      · 執行檔在、只是還沒用過  → 它隨時可以派工，應該算「待命中」
+      · 執行檔根本不在          → 真的沒有這個工具
+    全部混成 unknown 的結果，是介面上那隻龍永遠顯示「沒紀錄」，
+    而且自動路由也不會考慮它 —— 明明裝好了、登入了、模型清單也拉得到。
+
+    只在 unknown 時才動，已經有真實狀態（active / idle / rate_limited）的不碰。
+    """
+    for key, v in (data.get("tools") or {}).items():
+        if not isinstance(v, dict) or v.get("status") != "unknown":
+            continue
+        exe = BIN.get(key)
+        if exe and exe != key and Path(exe).exists():
+            v["status"] = "idle"
+            v["evidence"] = f"已安裝但尚無使用紀錄（{Path(exe).name}）"
+
+
 def enrich_reset_times(data: dict) -> None:
     """校正「限流中」的判定，並補上額度恢復時間。
 
@@ -400,6 +423,7 @@ class Handler(BaseHTTPRequestHandler):
             if STATUS_JSON.exists():
                 data = json.loads(STATUS_JSON.read_text(encoding="utf-8"))
                 enrich_reset_times(data)
+                enrich_installed(data)
                 return self._json(data)
             return self._json({"ok": False, "error": "status.json 不存在"}, 404)
         if self.path == "/api/models":
@@ -715,8 +739,18 @@ class Handler(BaseHTTPRequestHandler):
         "claude": lambda task: [BIN["claude"], "-p", task],
         "codex": lambda task: [BIN["codex"], "exec", "--skip-git-repo-check", task],
         "qwen": lambda task: ["cmd", "/c", BIN["qwen"], "-p", task],
+        # ANTIGRAVITY（agy）：--print 是單次非互動，跟 claude -p 同形狀。
+        # 它走的是獨立額度池，所以雲端鏈上多這一條很有價值。
+        #
+        # 兩個旗標都是必要的，實測踩過：
+        #   --dangerously-skip-permissions：非互動模式沒有人可以按同意，
+        #     連「讀工單檔」都會被拒（實測錯誤：user denied permission for read_file）。
+        #     其他無人值守工具本來就是同樣的姿態（qwen 走 --yolo、codex 是 approval never）。
+        #   --print-timeout：預設只有 5 分鐘，真實工單常常不夠。
+        "gemini": lambda task: [BIN["gemini"], "--dangerously-skip-permissions",
+                                "--print-timeout", "30m", "-p", task],
     }
-    CLOUD_CHAIN = ["claude", "codex", "grok", "qwen"]  # 自動路由順序（地端由 LM Studio 兜底）
+    CLOUD_CHAIN = ["claude", "codex", "gemini", "grok", "qwen"]  # 自動路由順序（地端由 LM Studio 兜底）
     DISPATCHES = []  # 派工登錄：{id, tool, task, started, pid, log, mode, reply}
     REGISTRY = Path.home() / "ai-hub" / "dispatch-log" / "_registry.json"
 
