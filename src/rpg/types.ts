@@ -51,6 +51,10 @@ export interface Item {
   atk: number
   def: number
   affixes: Affix[]
+  /** 強化等級 +0 ~ +15。每一級加成，但高等級會爆 */
+  plus?: number
+  /** 彩蛋裝備的圖鑑 id。有值代表這件是獨一無二的特殊裝備 */
+  unique?: string
 }
 
 /** 一整套配置：裝備 + 技能配點 + 屬性配點，可以一鍵整組換掉 */
@@ -108,8 +112,16 @@ export interface Hero {
   pets: Pet[]
   /** 出戰中的寵物 id；沒有就不帶 */
   activePet?: string
-  /** 隊伍成員（SKINS 的 key）。存檔裡才記得住，不然每次重開都要重新揪人 */
+  /** 隊伍成員（Recruit 的 id）。存檔裡才記得住，不然每次重開都要重新揪人 */
   party?: string[]
+  /** 擁有的夥伴。內建七隻 AI 龍在讀檔時補上，所以舊存檔不會少人 */
+  roster?: Recruit[]
+  /** 抽卡票券與強化保護符：打王、清地城會掉，也可以用金幣換 */
+  tickets?: { ally: number; gear: number; protect?: number }
+  /** 已解鎖的彩蛋技能 id */
+  secrets?: string[]
+  /** 解鎖條件用的累計數字 */
+  tally?: Tally
 }
 
 /** 由等級 + 屬性 + 裝備 + 技能算出來的最終數值 */
@@ -178,15 +190,61 @@ export interface Dungeon {
   partySize: number
 }
 
-/** 隊友＝辦公室裡的 AI 龍 */
-export interface Ally {
-  key: string          // 對應 SKINS 的 key
+// ── 夥伴 ───────────────────────────────────────────
+/**
+ * 夥伴分兩個維度：**來源**與**定位**。
+ *
+ * 來源（cat）：`ai` 是辦公室裡那七隻龍，永遠在，不用抽；
+ *              `human` 是人形夥伴，要抽卡才會有。
+ * 定位（role）：坦克／輸出／治療／輔助。這決定數值配比與 AI 出手偏好 ——
+ *              治療會優先補血最低的人，坦克血厚但傷害低。
+ * 兩個維度分開，是因為「哪來的」跟「派上場做什麼」本來就是兩件事，
+ * 混成一個欄位之後想加「抽得到的龍」或「人形坦」就會卡住。
+ */
+export type AllyCat = 'ai' | 'human'
+export type AllyRole = 'tank' | 'dps' | 'healer' | 'support'
+
+export const ALLY_ROLE_NAME: Record<AllyRole, string> = {
+  tank: '坦克', dps: '輸出', healer: '治療', support: '輔助',
+}
+export const ALLY_ROLE_COLOR: Record<AllyRole, string> = {
+  tank: '#60a5fa', dps: '#f87171', healer: '#4ade80', support: '#fbbf24',
+}
+export const ALLY_CAT_NAME: Record<AllyCat, string> = { ai: 'AI 龍', human: '人形' }
+
+/** 圖鑑：一種夥伴長什麼樣、什麼定位。不含等級，等級在 Recruit 上 */
+export interface AllyKind {
+  id: string
   name: string
-  level: number
-  hp: number
-  hpMax: number
-  atk: number
+  cat: AllyCat
+  role: AllyRole
   line: Line
+  rarity: Rarity
+  color: string
+  desc: string
+  /** 人形夥伴的圖檔（public/office/rpg/recruits/<art>.png）。AI 龍用辦公室的動作總表 */
+  art?: string
+}
+
+/** 已經擁有的夥伴。會跟著打怪長等級，不再是每場臨時捏出來的 */
+export interface Recruit {
+  id: string
+  kind: string
+  level: number
+  xp: number
+}
+
+/** 解鎖彩蛋用的累計數字。條件要「做得到但不會不小心達成」才有樂趣 */
+export interface Tally {
+  /** 連續陣亡幾次（贏一場歸零）—— 復仇者的解鎖條件 */
+  deathStreak: number
+  crits: number
+  /** 打倒超級菁英的次數 */
+  superKills: number
+  /** 全程沒喝藥水通關地城的次數 */
+  cleanClears: number
+  /** 強化爆掉幾件 */
+  breaks: number
 }
 
 export type CombatSide = 'hero' | 'ally' | 'foe' | 'pet'
@@ -211,6 +269,11 @@ export interface Combatant {
   color: string
   /** 精英怪：數值加成、掉落更好，畫面上會標記 */
   elite?: boolean
+  /**
+   * 超級菁英的階級（1 起）。每 20 等一階，數值是同級怪的好幾倍。
+   * 存階級而不是 boolean，是因為傷害加成、獎勵、外框顏色都要跟著階級走。
+   */
+  super?: number
   /**
    * 重擊蓄力：>0 表示正在蓄力，數字是還剩幾回合落下。
    * 這是玩家唯一需要「反應」的時刻 —— 落下前按格擋可以擋掉大半傷害。

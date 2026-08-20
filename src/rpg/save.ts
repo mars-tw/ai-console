@@ -1,4 +1,5 @@
 // 存檔：純 localStorage，跟這個專案「資料不出本機」的原則一致
+import { ensureRoster } from './allies'
 import { newHero } from './engine'
 import type { Hero } from './types'
 
@@ -23,6 +24,14 @@ export function loadHero(): Hero {
     h.look ??= 'hero'
     h.pets ??= []
     h.party ??= []
+    // 夥伴、抽卡券、彩蛋都是後來加的。舊存檔要補齊，
+    // 尤其 roster —— 少了它老玩家一打開會發現隊伍全空，像被沒收了一樣。
+    ensureRoster(h)
+    h.tickets ??= { ally: 1, gear: 1 }
+    h.tickets.ally ??= 0
+    h.tickets.gear ??= 0
+    h.secrets ??= []
+    h.tally ??= { deathStreak: 0, crits: 0, superKills: 0, cleanClears: 0, breaks: 0 }
     h.potions.hp ??= 0
     h.potions.mp ??= 0
     h.active = Math.min(h.active ?? 0, h.loadouts.length - 1)

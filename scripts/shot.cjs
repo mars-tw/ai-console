@@ -27,7 +27,17 @@ const SEED = `(async () => {
   h.kills = 1247
   h.deaths = 9
   h.potions = { hp: 6, mp: 4 }
-  h.party = ['kimi', 'claude', 'codex']
+  // 隊伍混一隻 AI 龍與兩個人形夥伴，兩種夥伴都要入鏡
+  const A = await import('/src/rpg/allies.ts')
+  A.ensureRoster(h)
+  for (const kind of ['knight', 'mage', 'cleric', 'miko']) {
+    h.roster.push({ id: kind, kind, level: 24, xp: 0 })
+  }
+  // newHero() 在 level 還是 1 的時候就補了七隻龍，這裡把等級補到跟主角同一段。
+  // 不然畫面上會出現一隻 Lv.1 的隊友被一下秒掉，看起來像壞了
+  for (const r of h.roster) r.level = Math.max(r.level, 24)
+  h.party = ['knight', 'mage', 'kimi']
+  h.tickets = { ally: 3, gear: 2, protect: 2 }
   const lo = E.activeLoadout(h)
   Object.assign(lo.attrs, { str: 26, dex: 14, int: 8, fai: 6, vit: 24 })
   Object.assign(lo.skills, { slash: 5, cleave: 4, execute: 3, guardup: 2 })

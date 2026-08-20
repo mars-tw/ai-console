@@ -130,6 +130,30 @@ HERO_POSES: dict[str, str] = {
                   "head turned away, one arm raised to shield the face"),
 }
 
+# ── 人形夥伴：可以抽到的隊友 ─────────────────────
+# 用跟主角同一套風格與朝向（側面朝右、同樣的頭身比），
+# 這樣一整排站在戰場左側時比例與視線才會一致 —— 混了正面圖就會很突兀。
+# 只出站姿：攻擊的動感由 attackCurve 的位移做，跟龍隊友的處理方式一致。
+RECRUIT_STYLE = HERO_STYLE
+RECRUITS: dict[str, str] = {
+    "ally-knight": ("A stout knight in polished steel plate armour with a dark blue tabard, "
+                    "a large tower shield strapped to the left arm, visor up showing a steady face."),
+    "ally-ranger": ("A lean ranger in a deep green hooded cloak over leather armour, "
+                    "a longbow held at the side, a quiver of arrows on the back."),
+    "ally-mage": ("A young witch in a violet robe with a wide pointed hat, "
+                  "holding a long wooden staff topped with a small glowing crystal."),
+    "ally-cleric": ("A gentle cleric in white and gold layered robes with a hood down, "
+                    "holding a small ornate prayer book, a sun pendant at the chest."),
+    "ally-rogue": ("A nimble rogue in dark grey leathers with a face scarf pulled down, "
+                   "twin daggers held in reverse grip, light and ready to move."),
+    "ally-bard": ("A cheerful bard in a red and cream doublet with a feathered cap, "
+                  "carrying a wooden lute across the body."),
+    "ally-dragoon": ("A dragoon in dark blue armour with a winged helm and a long tapered spear "
+                     "held upright, a short cape behind."),
+    "ally-miko": ("A shrine maiden in a white top and red hakama with long black hair tied low, "
+                  "holding a paper talisman between two fingers."),
+}
+
 # 武器單獨出圖，畫面上疊在主角手裡。這樣換武器看得出來，而且不用替
 # 每一種武器都重畫一整組主角動作。
 WEAPON_STYLE = (PIXEL + ", a single weapon seen from the side with the blade or tip "
@@ -186,6 +210,7 @@ GROUPS = {
     "pets": (PETS, PET_STYLE, "1:1", True),
     "skillfx": (SKILL_FX, FX_STYLE, "1:1", True),
     "weapons": (WEAPONS, WEAPON_STYLE, "1:1", True),
+    "recruits": (RECRUITS, RECRUIT_STYLE, "1:1", True),
 }
 
 

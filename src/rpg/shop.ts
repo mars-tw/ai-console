@@ -102,6 +102,30 @@ export const SHOP: ShopEntry[] = [
     buy: (h) => grantItem(h, rollItem(h.level, undefined, fineRarity())),
   },
   {
+    id: 'protect',
+    icon: '🛡️',
+    name: '強化保護符',
+    desc: '強化失敗時擋下碎裂（仍會退級）。衝 +10 以上前先囤幾張',
+    price: (h) => 380 + h.level * 90,
+    buy: (h) => {
+      h.tickets ??= { ally: 0, gear: 0 }
+      h.tickets.protect = (h.tickets.protect ?? 0) + 1
+      return { msg: '保護符 +1（目前 {n} 張）', params: { n: h.tickets.protect } }
+    },
+  },
+  {
+    id: 'ticket-ally',
+    icon: '🎴',
+    name: '夥伴招募令',
+    desc: '抽一次人形夥伴。打王與超級菁英也會掉',
+    price: (h) => 820 + h.level * 40,
+    buy: (h) => {
+      h.tickets ??= { ally: 0, gear: 0 }
+      h.tickets.ally++
+      return { msg: '招募令 +1（目前 {n} 張）', params: { n: h.tickets.ally } }
+    },
+  },
+  {
     id: 'respec-attr',
     icon: '🔄',
     name: '洗屬性點',

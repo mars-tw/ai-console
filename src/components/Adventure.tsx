@@ -6,19 +6,23 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import BattleScene from '@/components/BattleScene'
-import { SKINS } from '@/pixel/sprites'
 import { itemLabel, t, useLang } from '@/i18n'
 import { DUNGEONS, RARITY_ORDER, SKILLS_OF_LINE, SKILL_BY_ID, ZONES } from '@/rpg/data'
 import {
-  activeLoadout, allyCombatant, attrLeft, autoEquipBest, collect, computeStats, isUpgrade,
+  activeLoadout, attrLeft, autoEquipBest, collect, computeStats, isUpgrade,
   itemById, itemScore, linePoints, skillLeft, skillUnlocked, startBattle, stepBattle,
   xpForLevel, type Battle,
 } from '@/rpg/engine'
 import { SHOP, type BuyResult, type ShopEntry } from '@/rpg/shop'
+import { ALLY_BY_ID, recruitById, recruitCombatant, recruitXpForLevel } from '@/rpg/allies'
+import { ALLY_PULL_GOLD, GEAR_PULL_GOLD, TEN, floorAt, pullAlly, pullGear, tenCost } from '@/rpg/gacha'
+import { MAX_PLUS, enhance, enhanceCost, odds } from '@/rpg/enhance'
+import { SECRETS } from '@/rpg/secrets'
 import { loadHero, resetHero, saveHero } from '@/rpg/save'
 import { commitOrder, guard, setFocus, stepTurn, drinkPotion, petXpForLevel } from '@/rpg/engine'
 import {
-  AFFIX_NAME, AFFIX_PCT, ATTRS, ATTR_NAME, LINES, LINE_NAME, RARITY_COLOR,
+  AFFIX_NAME, AFFIX_PCT, ALLY_CAT_NAME, ALLY_ROLE_COLOR, ALLY_ROLE_NAME,
+  ATTRS, ATTR_NAME, LINES, LINE_NAME, RARITY_COLOR,
   RARITY_NAME, SLOTS, SLOT_NAME, type Combatant, type Hero, type Item,
   type Line, type Rarity, type Slot,
 } from '@/rpg/types'
@@ -31,25 +35,6 @@ const LINE_COLOR: Record<Line, string> = {
   melee: '#f87171', ranged: '#4ade80', magic: '#60a5fa', faith: '#fbbf24',
 }
 /** 每隻龍擅長的技能線 */
-const ALLY_LINE: Record<string, Line> = {
-  kimi: 'faith', claude: 'melee', codex: 'faith',
-  grok: 'magic', qwen: 'magic', cursor: 'ranged', gemini: 'ranged',
-}
-
-/**
- * 隨行 AI 夥伴名單。
- *
- * 這是「單機模式」的關鍵：夥伴是遊戲內建的 AI 機器人，永遠揪得到，
- * 不依賴 ai-hub、不依賴任何外部服務 —— clone 下來就能玩，地城也進得去。
- * 如果剛好接得到本機工具狀態，那只是額外的風味標籤與小幅加成，絕不擋人。
- */
-const COMPANIONS = Object.keys(SKINS).map((key) => ({
-  key,
-  name: SKINS[key].name,
-  color: SKINS[key].color,
-  line: ALLY_LINE[key] ?? 'melee',
-}))
-
 function Bar({ v, max, color, h = 6 }: { v: number; max: number; color: string; h?: number }) {
   const pct = max > 0 ? Math.max(0, Math.min(100, (v / max) * 100)) : 0
   return (
@@ -103,7 +88,11 @@ function ItemIcon({ it, size = 22 }: { it: Item; size?: number }) {
 function ItemLine({ it, dim }: { it: Item; dim?: boolean }) {
   return (
     <div className={dim ? 'opacity-60' : ''}>
-      <span style={{ color: RARITY_COLOR[it.rarity] }}>{itemLabel(it.name)}</span>
+      <span style={{ color: RARITY_COLOR[it.rarity] }}>
+        {it.unique && <span className="mr-0.5 text-amber-300">★</span>}
+        {itemLabel(it.name)}
+        {!!it.plus && <span className="ml-0.5 text-amber-300">+{it.plus}</span>}
+      </span>
       <span className="ml-1 text-zinc-500">
         ({t(RARITY_NAME[it.rarity])} · iLv{it.ilvl}
         {it.atk ? ` · ${t('攻')}${it.atk}` : ''}{it.def ? ` · ${t('防')}${it.def}` : ''})
@@ -140,13 +129,15 @@ export default function Adventure({ tools }: Props) {
   const [battle, setBattle] = useState<Battle | null>(null)
   const [auto, setAuto] = useState(true)
   const [party, setPartyState] = useState<string[]>(() => hero.party ?? [])
-  const [tab, setTab] = useState<'skills' | 'gear' | 'bag' | 'shop'>('skills')
+  const [tab, setTab] = useState<'skills' | 'gear' | 'bag' | 'shop' | 'gacha' | 'secret'>('skills')
   // 背包篩選
   const [fSlot, setFSlot] = useState<Slot | 'all'>('all')
   const [fRarity, setFRarity] = useState<Rarity | 'all'>('all')
   const [fUpgrade, setFUpgrade] = useState(false)
   const [fSort, setFSort] = useState<'score' | 'ilvl' | 'rarity'>('score')
   const [notice, setNotice] = useState('')
+  /** 抽卡結果：最近一次的清單，抽完停在畫面上，不然十連刷過去什麼都看不到 */
+  const [pulls, setPulls] = useState<{ label: string; color: string; note?: string }[]>([])
   const heroRef = useRef(hero)
   const battleRef = useRef(battle)
   const partyRef = useRef(party)
@@ -216,7 +207,10 @@ export default function Adventure({ tools }: Props) {
       // 每回合把獎勵收進角色，這樣掛著離開也不會白打
       if (b.xp || b.gold || b.loot.length) {
         const gained = collect(h, b)
-        if (gained.levels > 0) flash(t('升到 Lv.{lv}！獲得技能點與屬性點', { lv: h.level }))
+        // 解鎖彩蛋比升級更值得報 —— 那是玩家不知道存在的東西，不講他不會發現
+        if (gained.secrets.length) flash(t('🔮 解鎖隱藏技能：{name}', { name: gained.secrets.map((x) => t(x)).join('、') }))
+        else if (gained.levels > 0) flash(t('升到 Lv.{lv}！獲得技能點與屬性點', { lv: h.level }))
+        else if (gained.allyUps.length) flash(t('{who} 升級了', { who: gained.allyUps.map((x) => t(x)).join('、') }))
         saveHero(h)
         setHero({ ...h })
       }
@@ -229,18 +223,36 @@ export default function Adventure({ tools }: Props) {
     return () => clearTimeout(timer)
   }, [])
 
+  /**
+   * 把隊伍名單變成戰鬥單位。
+   *
+   * 夥伴的數值來自各自的等級（存在 roster 裡，會成長），不再是每場
+   * 照主角等級臨時捏一個 —— 那樣練誰都一樣，等於沒有養成。
+   */
   const buildParty = (members: string[] = party): Combatant[] =>
-    members.map((k) => {
-      const lv = Math.max(1, Math.round((hero.level - 1 + Math.random() * 3) * allyState(k).bonus))
-      return allyCombatant(k, SKINS[k]?.name ?? k, SKINS[k]?.color ?? '#888', lv, ALLY_LINE[k] ?? 'melee')
+    members.flatMap((id) => {
+      const r = recruitById(hero, id)
+      if (!r) return []
+      const c = recruitCombatant(r)
+      // AI 龍如果剛好接得到本機工具狀態，給一點風味加成；人形夥伴沒有這層
+      if (ALLY_BY_ID[r.kind]?.cat === 'ai') {
+        const bonus = allyState(r.kind).bonus
+        c.atk = Math.round(c.atk * bonus)
+        c.hpMax = Math.round(c.hpMax * bonus)
+        c.hp = c.hpMax
+      }
+      return [c]
     })
 
-  /** 自動組隊：把隊伍補到指定人數（含自己），單機也進得去地城 */
+  /** 自動組隊：把隊伍補到指定人數（含自己）。優先挑等級高的，單機也進得去地城 */
   const autoParty = (need: number): string[] => {
     const picked = [...party]
-    for (const c of COMPANIONS) {
+    const rest = (hero.roster ?? [])
+      .filter((r) => !picked.includes(r.id))
+      .sort((a, b) => b.level - a.level)
+    for (const r of rest) {
       if (picked.length + 1 >= need) break
-      if (!picked.includes(c.key)) picked.push(c.key)
+      picked.push(r.id)
     }
     return picked
   }
@@ -300,7 +312,8 @@ export default function Adventure({ tools }: Props) {
     // 人不夠不擋你，直接叫 AI 夥伴補位
     const members = party.length + 1 < dg.partySize ? autoParty(dg.partySize) : party
     if (members.length !== party.length) {
-      const added = members.filter((k) => !party.includes(k)).map((k) => SKINS[k].name).join('、')
+      const added = members.filter((k) => !party.includes(k))
+        .map((k) => t(ALLY_BY_ID[recruitById(hero, k)?.kind ?? '']?.name ?? k)).join('、')
       partyRef.current = members
       setPartyState(members)
       update((h) => { h.party = members })
@@ -363,6 +376,89 @@ export default function Adventure({ tools }: Props) {
     let res: BuyResult | undefined
     update((h) => { h.gold -= price; res = e.buy(h) })
     setTimeout(() => { if (res) flash(t(res.msg, res.params)) }, 0)
+  }
+
+  // ── 抽卡 ──
+  // 有券優先用券，沒券才吃金幣。反過來的話玩家會先把金幣花光又不知道自己有券。
+  const rollAllies = (count: number) => {
+    const have = hero.tickets?.ally ?? 0
+    const byTicket = have >= count
+    const cost = byTicket ? 0 : (count === 1 ? ALLY_PULL_GOLD : tenCost(ALLY_PULL_GOLD))
+    if (!byTicket && hero.gold < cost) return flash(t('金幣不夠，還差 {n}', { n: cost - hero.gold }))
+    const out: { label: string; color: string; note?: string }[] = []
+    update((h) => {
+      h.tickets ??= { ally: 0, gear: 0 }
+      if (byTicket) h.tickets.ally -= count
+      else h.gold -= cost
+      for (let i = 0; i < count; i++) {
+        const r = pullAlly(h, floorAt(i, count))
+        out.push({
+          label: t(r.kind.name),
+          color: RARITY_COLOR[r.kind.rarity],
+          note: r.dupeXp ? t('重複 → 經驗 +{n}', { n: r.dupeXp }) : t('新夥伴！'),
+        })
+      }
+    })
+    setPulls(out)
+  }
+
+  const rollGear = (count: number) => {
+    const have = hero.tickets?.gear ?? 0
+    const byTicket = have >= count
+    const cost = byTicket ? 0 : (count === 1 ? GEAR_PULL_GOLD : tenCost(GEAR_PULL_GOLD))
+    if (!byTicket && hero.gold < cost) return flash(t('金幣不夠，還差 {n}', { n: cost - hero.gold }))
+    const out: { label: string; color: string; note?: string }[] = []
+    update((h) => {
+      h.tickets ??= { ally: 0, gear: 0 }
+      if (byTicket) h.tickets.gear -= count
+      else h.gold -= cost
+      for (let i = 0; i < count; i++) {
+        const r = pullGear(h, () => `gx${Date.now().toString(36)}${i}`, floorAt(i, count))
+        h.bag.push(r.item)
+        out.push({
+          label: itemLabel(r.item.name),
+          color: RARITY_COLOR[r.item.rarity],
+          note: r.unique ? t('★ 彩蛋裝備') : t(RARITY_NAME[r.item.rarity]),
+        })
+      }
+      autoEquipBest(h)
+    })
+    setPulls(out)
+  }
+
+  /**
+   * 強化一件裝備。
+   *
+   * 會爆的段位一定先問過 —— 這是遊戲裡唯一會讓玩家永久失去東西的操作，
+   * 手滑點掉一件 +9 主手的體驗，比任何數值調整都傷。
+   */
+  const doEnhance = (it: Item, protect: boolean) => {
+    const cost = enhanceCost(it)
+    if ((it.plus ?? 0) >= MAX_PLUS) return flash(t('已經強化到頂了'))
+    if (hero.gold < cost) return flash(t('金幣不夠，還差 {n}', { n: cost - hero.gold }))
+    if (protect && !(hero.tickets?.protect ?? 0)) return flash(t('沒有保護符了'))
+    const o = odds(it.plus ?? 0, hero)
+    if (!protect && o.destroy > 0 && !confirm(t(
+      '{name} 目前 +{p}。成功率 {s}%，失敗有 {d}% 會直接碎掉。要繼續嗎？',
+      { name: itemLabel(it.name), p: it.plus ?? 0, s: Math.round(o.success * 100), d: Math.round(o.destroy * 100) },
+    ))) return
+    let msg = ''
+    update((h) => {
+      const target = h.bag.find((x) => x.id === it.id)
+      if (!target) return
+      h.gold -= cost
+      const r = enhance(h, target, protect)
+      if (r.usedProtect || (protect && r.outcome !== 'up')) {
+        h.tickets ??= { ally: 0, gear: 0 }
+        h.tickets.protect = Math.max(0, (h.tickets.protect ?? 0) - 1)
+      }
+      if (r.outcome === 'destroy') {
+        h.bag = h.bag.filter((x) => x.id !== target.id)
+        for (const l of h.loadouts) for (const sl of SLOTS) if (l.equipped[sl] === target.id) delete l.equipped[sl]
+      }
+      msg = t(r.msg, r.params)
+    })
+    setTimeout(() => flash(msg), 0)
   }
 
   const equip = (it: Item) => update((h) => { h.loadouts[h.active].equipped[it.slot] = it.id })
@@ -680,20 +776,30 @@ export default function Adventure({ tools }: Props) {
               </button>
             )}
           </div>
-          <div className="flex flex-col gap-1">
-            {COMPANIONS.map((c) => {
-              const st = allyState(c.key)
-              const joined = party.includes(c.key)
+          <div className="flex max-h-64 flex-col gap-1 overflow-y-auto">
+            {(hero.roster ?? []).map((r) => {
+              const k = ALLY_BY_ID[r.kind]
+              if (!k) return null
+              const joined = party.includes(r.id)
+              // AI 龍才有本機工具狀態可以顯示；人形夥伴顯示稀有度
+              const tail = joined ? t('已入隊')
+                : k.cat === 'ai' ? allyState(r.kind).why : t(RARITY_NAME[k.rarity])
               return (
                 <button
-                  key={c.key}
-                  className={`flex items-center gap-2 rounded border px-2 py-1 text-left text-xs ${joined ? 'border-emerald-600 bg-emerald-950/40' : 'border-zinc-800 hover:bg-zinc-800'}`}
-                  onClick={() => setParty((p) => (joined ? p.filter((x) => x !== c.key) : [...p, c.key]))}
+                  key={r.id}
+                  title={`${t(k.desc)} · ${t(ALLY_CAT_NAME[k.cat])} · ${t(ALLY_ROLE_NAME[k.role])}`
+                    + ` · Lv.${r.level} ${r.xp}/${recruitXpForLevel(r.level)}`}
+                  className={`flex items-center gap-1.5 rounded border px-2 py-1 text-left text-xs ${joined ? 'border-emerald-600 bg-emerald-950/40' : 'border-zinc-800 hover:bg-zinc-800'}`}
+                  onClick={() => setParty((p) => (joined ? p.filter((x) => x !== r.id) : [...p, r.id]))}
                 >
-                  <span className="h-2 w-2 flex-none rounded-full" style={{ background: c.color }} />
-                  <span className="flex-none font-medium">{t(c.name)}</span>
-                  <span className="flex-none text-[10px]" style={{ color: LINE_COLOR[c.line] }}>{t(LINE_NAME[c.line])}</span>
-                  <span className="ml-auto truncate text-[10px] text-zinc-500">{joined ? t('已入隊') : st.why}</span>
+                  <span className="h-2 w-2 flex-none rounded-full" style={{ background: k.color }} />
+                  <span className="flex-none font-medium" style={{ color: k.cat === 'human' ? RARITY_COLOR[k.rarity] : undefined }}>{t(k.name)}</span>
+                  <span className="flex-none rounded px-1 text-[9px]" style={{ color: ALLY_ROLE_COLOR[k.role], border: `1px solid ${ALLY_ROLE_COLOR[k.role]}55` }}>
+                    {t(ALLY_ROLE_NAME[k.role])}
+                  </span>
+                  <span className="flex-none text-[10px]" style={{ color: LINE_COLOR[k.line] }}>{t(LINE_NAME[k.line])}</span>
+                  <span className="flex-none text-[10px] text-zinc-400">Lv.{r.level}</span>
+                  <span className="ml-auto truncate text-[10px] text-zinc-500">{tail}</span>
                 </button>
               )
             })}
@@ -771,6 +877,8 @@ export default function Adventure({ tools }: Props) {
             ['gear', t('裝備')],
             ['bag', t('背包（{n}）', { n: hero.bag.length })],
             ['shop', t('🏪 商店')],
+            ['gacha', t('🎴 抽卡')],
+            ['secret', t('🔮 彩蛋')],
           ] as const).map(([k, label]) => (
             <button
               key={k}
@@ -890,6 +998,24 @@ export default function Adventure({ tools }: Props) {
                     <div className="min-w-0 flex-1 truncate"><ItemLine it={it} dim={equipped} /></div>
                     {better && <span className="flex-none text-emerald-400" title={t('比目前裝著的好')}>▲</span>}
                     <span className="flex-none text-zinc-600">{itemScore(it)}</span>
+                    <button
+                      className="flex-none text-amber-400/90 hover:text-amber-300 disabled:opacity-30"
+                      disabled={(it.plus ?? 0) >= MAX_PLUS}
+                      title={t('強化到 +{p}：成功 {s}%，碎裂 {d}%，費用 {g} 金', {
+                        p: (it.plus ?? 0) + 1,
+                        s: Math.round(odds(it.plus ?? 0, hero).success * 100),
+                        d: Math.round(odds(it.plus ?? 0, hero).destroy * 100),
+                        g: enhanceCost(it),
+                      })}
+                      onClick={() => doEnhance(it, false)}
+                    >⚒</button>
+                    {!!(hero.tickets?.protect ?? 0) && odds(it.plus ?? 0, hero).destroy > 0 && (
+                      <button
+                        className="flex-none text-sky-400/90 hover:text-sky-300"
+                        title={t('用一張保護符強化：失敗也不會碎（剩 {n} 張）', { n: hero.tickets?.protect ?? 0 })}
+                        onClick={() => doEnhance(it, true)}
+                      >🛡️</button>
+                    )}
                     {!equipped && <button className="flex-none text-emerald-400 hover:text-emerald-300" onClick={() => equip(it)}>{t('裝備')}</button>}
                     {!equipped && <button className="flex-none text-zinc-500 hover:text-red-400" onClick={() => sell(it)}>{t('賣')}</button>}
                     {equipped && <span className="flex-none text-zinc-600">{t('使用中')}</span>}
@@ -929,6 +1055,93 @@ export default function Adventure({ tools }: Props) {
                     <div className="text-[10px] leading-snug text-zinc-500">{why ? t(why) : t(e.desc)}</div>
                   </button>
                 )
+              })}
+            </div>
+          </>
+        )}
+
+        {tab === 'gacha' && (
+          <>
+            <div className="mb-2 text-[11px] text-zinc-500">
+              {t('券打王與超級菁英會掉，也能在商店買。有券優先用券，沒券才扣金幣。十連付九抽的錢，最後一抽保底稀有。')}
+            </div>
+            <div className="grid gap-2 md:grid-cols-2">
+              {([
+                ['ally', t('🎴 夥伴招募'), hero.tickets?.ally ?? 0, ALLY_PULL_GOLD, rollAllies,
+                  t('抽人形夥伴。重複不會浪費，會轉成那一隻的經驗')],
+                ['gear', t('⚔️ 裝備召喚'), hero.tickets?.gear ?? 0, GEAR_PULL_GOLD, rollGear,
+                  t('抽裝備。有低機率直接掉獨一無二的彩蛋裝備')],
+              ] as const).map(([key, title, tickets, price, fn, desc]) => (
+                <div key={key} className="rounded border border-zinc-800 bg-zinc-950/50 p-3">
+                  <div className="mb-1 flex items-center gap-2 text-xs">
+                    <span className="font-medium text-zinc-200">{title}</span>
+                    <span className="ml-auto text-zinc-500">{t('券 {n} 張', { n: tickets })}</span>
+                  </div>
+                  <div className="mb-2 text-[10px] leading-snug text-zinc-500">{desc}</div>
+                  <div className="flex gap-2">
+                    <button
+                      className="flex-1 rounded border border-amber-700/60 px-2 py-1 text-xs text-amber-200 hover:bg-amber-950/40"
+                      onClick={() => fn(1)}
+                    >
+                      {tickets >= 1 ? t('單抽（用券）') : t('單抽 🪙{n}', { n: price })}
+                    </button>
+                    <button
+                      className="flex-1 rounded border border-amber-700/60 px-2 py-1 text-xs text-amber-200 hover:bg-amber-950/40"
+                      onClick={() => fn(TEN)}
+                    >
+                      {tickets >= TEN ? t('十連（用券）') : t('十連 🪙{n}', { n: tenCost(price) })}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {pulls.length > 0 && (
+              <div className="mt-3 border-t border-zinc-800 pt-2">
+                <div className="mb-1 text-[10px] tracking-widest text-zinc-500">{t('抽卡結果')}</div>
+                <div className="grid gap-1 md:grid-cols-2 lg:grid-cols-5">
+                  {pulls.map((r, i) => (
+                    <div key={i} className="rounded border border-zinc-800 px-2 py-1 text-[11px]">
+                      <div className="truncate" style={{ color: r.color }}>{r.label}</div>
+                      <div className="truncate text-[10px] text-zinc-500">{r.note}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {tab === 'secret' && (
+          <>
+            <div className="mb-2 text-[11px] text-zinc-500">
+              {t('藏起來的常駐技能。條件都做得到，但不會不小心達成 —— 沒解鎖時只給線索，自己去湊。')}
+            </div>
+            <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
+              {SECRETS.map((sc) => {
+                const got = hero.secrets?.includes(sc.id)
+                return (
+                  <div
+                    key={sc.id}
+                    className={`rounded border px-2.5 py-2 ${got ? 'border-violet-500/60 bg-violet-950/25' : 'border-zinc-800'}`}
+                  >
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <span>{got ? '🔮' : '🔒'}</span>
+                      <span className={got ? 'font-medium text-violet-200' : 'text-zinc-500'}>
+                        {got ? t(sc.name) : t('？？？')}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 text-[10px] leading-snug text-zinc-500">
+                      {got ? t(sc.desc) : t(sc.hint)}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+            <div className="mt-2 text-[10px] text-zinc-600">
+              {t('目前：連續陣亡 {a} · 暴擊 {b} · 超級菁英 {c} · 無藥水通關 {d} · 強化碎裂 {e}', {
+                a: hero.tally?.deathStreak ?? 0, b: hero.tally?.crits ?? 0,
+                c: hero.tally?.superKills ?? 0, d: hero.tally?.cleanClears ?? 0,
+                e: hero.tally?.breaks ?? 0,
               })}
             </div>
           </>

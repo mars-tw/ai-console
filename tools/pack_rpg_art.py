@@ -48,6 +48,8 @@ SKILL_FX = ["fx-slash", "fx-cleave", "fx-shoot", "fx-volley", "fx-bolt", "fx-fla
 FX_H = 72
 # 武器疊在主角手上，高度抓主角的一半左右才不會比人還大
 WEAPONS = ["weapon-melee", "weapon-ranged", "weapon-magic", "weapon-faith"]
+RECRUITS = ["ally-knight", "ally-ranger", "ally-mage", "ally-cleric",
+            "ally-rogue", "ally-bard", "ally-dragoon", "ally-miko"]
 WEAPON_H = 23
 # 區域 + 地城，id 與 data.ts 的 ZONES / DUNGEONS 一致
 BGS = ["bg-meadow", "bg-forest", "bg-ridge", "bg-ruins", "bg-abyss",
@@ -164,6 +166,22 @@ def pack_pets(names: list[str]) -> dict[str, list[int]]:
     return out
 
 
+def pack_recruits(names: list[str]) -> dict[str, list[int]]:
+    """人形夥伴：縮到跟主角同高，一整排站著才不會有人高有人矮"""
+    (OUT / "recruits").mkdir(parents=True, exist_ok=True)
+    out: dict[str, list[int]] = {}
+    for n in names:
+        img = trimmed(n)
+        if not img:
+            print(f"[{n}] 找不到素材，跳過")
+            continue
+        r = fit_height(img, HERO_H)
+        r.save(OUT / "recruits" / f"{n}.png")
+        out[n] = [r.width, r.height]
+        print(f"[{n}] OK  {r.width}x{r.height}")
+    return out
+
+
 def pack_fx(names: list[str]) -> dict[str, list[int]]:
     """技能特效：等比縮到固定高度"""
     (OUT / "fx").mkdir(parents=True, exist_ok=True)
@@ -221,10 +239,12 @@ def main() -> None:
     weapons = [n for n in WEAPONS if not only or n in only]
     pets = [n for n in PETS if not only or n in only]
     fxs = [n for n in SKILL_FX if not only or n in only]
+    recs = [n for n in RECRUITS if not only or n in only]
     m = pack_monsters(mons)
     wp = pack_weapons(weapons)
     pt = pack_pets(pets)
     fx = pack_fx(fxs)
+    rc = pack_recruits(recs)
     h = {}
     for pre in ("hero", "heroine"):
         if not only or any(x in only for x in HERO_POSES if x.startswith(pre + "-")):
@@ -241,6 +261,7 @@ def main() -> None:
     prev.setdefault("weapons", {}).update(wp)
     prev.setdefault("pets", {}).update(pt)
     prev.setdefault("fx", {}).update(fx)
+    prev.setdefault("recruits", {}).update(rc)
     prev["icons"] = sorted(set(prev.get("icons", []) + i))
     prev["bg"] = sorted(set(prev.get("bg", []) + b))
     prev["icon"] = ICON

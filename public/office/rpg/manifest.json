@@ -230,5 +230,39 @@
       79,
       72
     ]
+  },
+  "recruits": {
+    "ally-knight": [
+      33,
+      56
+    ],
+    "ally-ranger": [
+      47,
+      56
+    ],
+    "ally-mage": [
+      42,
+      56
+    ],
+    "ally-cleric": [
+      28,
+      56
+    ],
+    "ally-rogue": [
+      48,
+      56
+    ],
+    "ally-bard": [
+      39,
+      56
+    ],
+    "ally-miko": [
+      41,
+      56
+    ],
+    "ally-dragoon": [
+      30,
+      56
+    ]
   }
 }

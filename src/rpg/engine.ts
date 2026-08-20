@@ -9,6 +9,9 @@ import {
   RARITY_SPEC, SKILL_BY_ID, SKILLS, WEAPON_NAMES, ZONE_BY_ID,
 } from './data'
 import { itemLabel, t } from '@/i18n'
+import { ensureRoster, growRecruit } from './allies'
+import { plusMult } from './enhance'
+import { checkSecrets, hasSecret, makeUnique, missingUniques } from './secrets'
 import {
   ATTRS, LINES, type Affix, type Attr, type Combatant, type Hero, type HeroLook,
   type Item, type Pet, SLOTS, type FxEvent, type Line, type Loadout, type LogEntry, type Monster,
@@ -48,7 +51,14 @@ export function newHero(name = '你', look: HeroLook = 'hero'): Hero {
     active: 0, zone: 'meadow', kills: 0, deaths: 0,
     potions: { hp: 3, mp: 2 },
     pets: [],
+    // 一開始就送一張券，讓新玩家第一次打開抽卡分頁就有東西可以按 ——
+    // 空的抽卡介面看起來像還沒做完
+    tickets: { ally: 1, gear: 1 },
+    secrets: [],
+    tally: { deathStreak: 0, crits: 0, superKills: 0, cleanClears: 0, breaks: 0 },
+    roster: [],
   }
+  ensureRoster(h)
   // 給一把起手武器，不然第一場會很難看
   const starter = rollItem(1, 'main', 'common', 'melee')
   starter.name = '練習用短劍'
@@ -102,8 +112,11 @@ export function computeStats(h: Hero): Stats {
   for (const slot of Object.keys(lo.equipped) as Slot[]) {
     const it = itemById(h, lo.equipped[slot])
     if (!it) continue
-    atk += it.atk
-    def += it.def
+    // 強化只加基礎攻防，不放大詞綴 —— 詞綴一起放大的話，
+    // 一件 +15 的傳說會直接讓其他所有裝備變成裝飾品。
+    const pm = plusMult(it)
+    atk += it.atk * pm
+    def += it.def * pm
     for (const af of it.affixes) {
       if (af.key === 'atk') atk += af.value
       else if (af.key === 'def') def += af.value
@@ -116,6 +129,7 @@ export function computeStats(h: Hero): Stats {
 
   atk += attrs.str * 0.9 + attrs.dex * 0.8 + attrs.int * 0.85 + attrs.fai * 0.7
   def += attrs.vit * 0.8 + h.level * 1.2
+  if (hasSecret(h, 'luckyhand')) crit += 0.05
   return {
     hpMax: Math.round(60 + h.level * 22 + attrs.vit * 9),
     mpMax: Math.round(30 + h.level * 6 + attrs.int * 4 + attrs.fai * 4),
@@ -230,6 +244,14 @@ export interface Battle {
   tick: number
   over: boolean
   result?: 'win' | 'lose'
+  /** 這一場打出幾次暴擊（解鎖「幸運手」用） */
+  critHits: number
+  /** 這一場有沒有喝過藥水（解鎖「苦行者」用） */
+  potionUsed: boolean
+  /** 這一場打倒幾隻超級菁英 */
+  superKills: number
+  /** 這一場掉了幾張抽卡券 */
+  tickets: { ally: number; gear: number }
   /** 手動模式排隊的技能 id */
   queued?: string
   /** 玩家點選的集火目標（foe 的 uid）。目標死了會自動清掉 */
@@ -351,13 +373,63 @@ export function waveSize(heroLevel: number, kind: 'field' | 'dungeon'): number {
 const ELITE_CHANCE = 0.18
 const ELITE_MULT = { hp: 1.9, atk: 1.35, def: 1.2 }
 
-function spawnWave(b: Battle, ids: string[], count: number) {
+/**
+ * 超級菁英：每 20 等開一個新階級。
+ *
+ * 設計目標是「打不過也是正常的」—— 這是遊戲裡少數會逼你回去整理裝備的東西。
+ * 數值刻意做成同級精英的好幾倍，全身高階裝備再加上等級略高才有勝算；
+ * 相對地一隻抵一整波的獎勵，還會掉抽卡券與彩蛋裝備。
+ *
+ * 階級從 Lv.20 起算，上限四階（Lv.80+）。再往上加階級只是數字膨脹，
+ * 沒有新的玩法。
+ */
+export const superTier = (heroLevel: number) => Math.min(4, Math.floor(heroLevel / 20))
+const SUPER_CHANCE = 0.07
+
+/**
+ * 一個「當前等級、身上是像樣裝備」的主角大概長什麼樣。
+ *
+ * 超級菁英的數值必須對著這個算，不能像一般精英那樣去乘小怪的基礎值 ——
+ * 小怪的防禦是 2 + 等級×1.2（Lv.20 約 26），主角的防禦是裝備堆出來的（實測 264），
+ * 兩者差一個數量級。乘小怪的結果就是：血條看起來很嚇人（×9.5），
+ * 但減免只有 0.63，主角一招處決打掉三分之一，三回合就結束。
+ *
+ * 這三條是拿 Lv.20 全身普通裝的實測值回歸出來的：攻 187 / 防 264 / 血 842。
+ */
+const refAtk = (lv: number) => 40 + lv * 7.5
+const refDef = (lv: number) => 30 + lv * 11
+const refHp = (lv: number) => 60 + lv * 34
+
+function makeSuper(c: Combatant, tier: number, heroLevel: number) {
+  const lv = Math.max(heroLevel, 1)
+  c.super = tier
+  c.elite = true
+  // 血：撐得住十幾回合，但不是拖時間。太厚只會變成一邊倒的按鍵練習
+  c.hpMax = Math.round(refHp(lv) * (5.5 + tier * 2.5))
+  c.hp = c.hpMax
+  // 攻：打在滿裝主角身上要有「再挨兩下就沒了」的實感
+  c.atk = Math.round(refAtk(lv) * (2.9 + tier * 0.55))
+  // 防：把主角的技能爆發壓下來。這是「要穿高階裝」的主要理由 ——
+  // 攻擊力不夠的話減免會把你的傷害吃到只剩零頭
+  c.def = Math.round(refDef(lv) * (2.5 + tier * 0.9))
+  c.crit = Math.min(0.5, 0.12 + 0.06 * tier)
+  c.name = t('超級菁英·{name}', { name: t(c.name) })
+}
+
+function spawnWave(b: Battle, ids: string[], count: number, heroLevel = 1) {
   b.foes = []
   b.focus = undefined                     // 換一波敵人，舊的集火目標作廢
   for (let i = 0; i < count; i++) {
     const m = MONSTER_BY_ID[pick(ids)]
     if (!m) continue
     const c = foeCombatant(m, b.tick * 10 + i)
+    // 一波最多一隻超級菁英。兩隻同時出現不是難，是直接沒得打
+    const tier = superTier(heroLevel)
+    if (tier > 0 && !b.foes.some((f) => f.super) && Math.random() < SUPER_CHANCE) {
+      makeSuper(c, tier, heroLevel)
+      b.foes.push(c)
+      continue
+    }
     if (Math.random() < ELITE_CHANCE) {
       c.elite = true
       c.hpMax = Math.round(c.hpMax * ELITE_MULT.hp)
@@ -393,6 +465,7 @@ export function startBattle(h: Hero, kind: 'field' | 'dungeon', placeId: string,
     heroLook: h.look ?? 'hero',
     queue: [], phase: 'input',
     over: false, loot: [], potionDrops: { hp: 0, mp: 0 }, xp: 0, gold: 0, kills: 0,
+    critHits: 0, potionUsed: false, superKills: 0, tickets: { ally: 0, gear: 0 },
   }
   const place = kind === 'field' ? ZONE_BY_ID[placeId] : DUNGEON_BY_ID[placeId]
   const placeName = t(place?.name ?? placeId)
@@ -401,7 +474,7 @@ export function startBattle(h: Hero, kind: 'field' | 'dungeon', placeId: string,
     : t('踏入 {place}（第 1 / {rooms} 間）', { place: placeName, rooms: b.rooms }))
   const ids = kind === 'field' ? (ZONE_BY_ID[placeId]?.monsters ?? ['slime'])
     : (DUNGEON_BY_ID[placeId]?.trash ?? ['goblin'])
-  spawnWave(b, ids, waveSize(h.level, kind))
+  spawnWave(b, ids, waveSize(h.level, kind), h.level)
   return b
 }
 
@@ -413,9 +486,12 @@ export function startBattle(h: Hero, kind: 'field' | 'dungeon', placeId: string,
 const DEF_K = 110
 const mitigation = (def: number) => DEF_K / (DEF_K + Math.max(0, def))
 
-function damage(src: Combatant, dst: Combatant, power: number, scaleBonus = 0): { dmg: number; crit: boolean } {
+function damage(src: Combatant, dst: Combatant, power: number, scaleBonus = 0,
+                slayer = false): { dmg: number; crit: boolean } {
   const crit = Math.random() < src.crit
-  const raw = src.atk * power * (1 + scaleBonus) * mitigation(dst.def)
+  // 彩蛋技能「巨人殺手」：打倒三隻超級菁英之後才拿得到，正好用在下一隻身上
+  const bonus = slayer && dst.super ? 1.3 : 1
+  const raw = src.atk * power * (1 + scaleBonus) * mitigation(dst.def) * bonus
   const dmg = Math.max(1, Math.round(raw * (crit ? 1.8 : 1) * (0.9 + Math.random() * 0.2)))
   return { dmg, crit }
 }
@@ -493,10 +569,11 @@ function act(b: Battle, c: Combatant, h: Hero | null, haste: number, skipCd = fa
   if (!skillId) {
     // 沒技能可用就普攻
     const tgt = focused ?? pick(targets)
-    const { dmg, crit } = damage(c, tgt, 1)
+    const { dmg, crit } = damage(c, tgt, 1, 0, !!h && hasSecret(h, 'giantslayer'))
     tgt.hp = Math.max(0, tgt.hp - dmg)
     fx(b, c.uid, 'attack')
     fx(b, tgt.uid, crit ? 'crit' : 'hurt', dmg)
+    if (crit && c.side !== 'foe') b.critHits++
     say(b, crit ? 'crit' : 'hit', t('{who} 攻擊 {target}，造成 {dmg} 傷害{crit}', {
       who: t(c.name), target: t(tgt.name), dmg, crit: crit ? t('（暴擊！）') : '',
     }))
@@ -508,7 +585,9 @@ function act(b: Battle, c: Combatant, h: Hero | null, haste: number, skipCd = fa
   const lo = h ? activeLoadout(h) : null
   const lv = lo ? (lo.skills[skillId] ?? 1) : 1
   const scaleBonus = h ? computeStats(h).attrs[sk.scale] / 60 : lv * 0.05
-  c.mp = Math.max(0, c.mp - sk.mpCost)
+  // 彩蛋技能「苦行者」：不喝藥水通關三次地城才拿得到，回報是魔力更耐用
+  const mpCost = h && hasSecret(h, 'ascetic') ? Math.round(sk.mpCost * 0.8) : sk.mpCost
+  c.mp = Math.max(0, c.mp - mpCost)
   c.cds[skillId] = Math.max(0, Math.round(sk.cd * (1 - haste)))
 
   if (sk.kind === 'heal') {
@@ -544,7 +623,7 @@ function act(b: Battle, c: Combatant, h: Hero | null, haste: number, skipCd = fa
   const tgt = skillId === 'execute'
     ? targets.reduce((a, x) => (x.hp / x.hpMax < a.hp / a.hpMax ? x : a), targets[0])
     : (focused ?? pick(targets))
-  let { dmg, crit } = damage(c, tgt, sk.power * (1 + lv * 0.08), scaleBonus)
+  let { dmg, crit } = damage(c, tgt, sk.power * (1 + lv * 0.08), scaleBonus, !!h && hasSecret(h, 'giantslayer'))
   if (skillId === 'snipe') { crit = true; dmg = Math.round(dmg * 1.4) }
   if (skillId === 'execute' && tgt.hp < tgt.hpMax * 0.3) dmg = Math.round(dmg * 1.6)
   tgt.hp = Math.max(0, tgt.hp - dmg)
@@ -565,6 +644,7 @@ function act(b: Battle, c: Combatant, h: Hero | null, haste: number, skipCd = fa
 
 /** 喝藥水：立刻回復，不佔回合 */
 export function drinkPotion(b: Battle, h: Hero, kind: 'hp' | 'mp'): boolean {
+  b.potionUsed = true
   if (b.over || h.potions[kind] <= 0) return false
   const c = b.hero
   if (kind === 'hp' && c.hp >= c.hpMax) return false
@@ -675,6 +755,12 @@ export function stepTurn(b: Battle, h: Hero): boolean {
 }
 
 function endRound(b: Battle, h: Hero) {
+  // 彩蛋技能「復仇者」：倒下十次才拿得到的常駐再生。
+  // 放在回合結束而不是每次行動 —— 掛在行動上的話，隊友越多回得越快，
+  // 那不是「常駐再生」是「隊伍規模獎勵」。
+  if (hasSecret(h, 'avenger') && b.hero.hp > 0) {
+    b.hero.hp = Math.min(b.hero.hpMax, b.hero.hp + Math.round(b.hero.hpMax * 0.1))
+  }
   b.phase = 'input'
   b.order = undefined
   b.guarding = false
@@ -699,7 +785,8 @@ function settle(b: Battle, h: Hero): void {
     for (const d of dead) {
       // 用 art（怪物 id）查，不要用名字 —— 精英怪的名字被改過，查名字會落空
       const m = MONSTER_BY_ID[d.art]
-      const bonus = d.elite ? 2.2 : 1
+      // 超級菁英一隻抵一整波。倍率隨階級走，不然到後期又變成不值得打
+      const bonus = d.super ? 9 + d.super * 4 : d.elite ? 2.2 : 1
       // 等級差懲罰：主角遠高於怪物時經驗大幅衰減。
       // 沒有這個的話，最有效率的玩法是一直刷新手草原 —— 那不是遊戲，是掛機。
       const gap = h.level - (m?.level ?? 1)
@@ -707,13 +794,30 @@ function settle(b: Battle, h: Hero): void {
       b.kills++
       b.xp += Math.round((m?.xp ?? 10) * bonus * fade)
       b.gold += Math.round((m?.gold ?? 5) * bonus * Math.max(0.4, fade))
+      if (d.super) {
+        // 打贏這種東西一定要有實感：保底傳說、抽卡券，還有機會直接掉彩蛋裝
+        b.superKills++
+        b.tickets.ally += 1
+        b.tickets.gear += 2
+        const gear = rollItem(Math.max(1, h.level + 2), undefined, 'legend')
+        b.loot.push(gear)
+        say(b, 'loot', t('拾獲 {item}', { item: itemLabel(gear.name) }))
+        const left = missingUniques(h)
+        if (left.length && Math.random() < 0.34) {
+          const u = makeUnique(left[rnd(left.length)], h.level, nextId())
+          b.loot.push(u)
+          say(b, 'loot', t('★ 掉落彩蛋裝備：{item}', { item: itemLabel(u.name) }))
+        }
+      }
       const dropChance = m?.boss ? 1 : d.elite ? 0.75 : 0.35
-      if (Math.random() < dropChance) {
+      if (!d.super && Math.random() < dropChance) {
         const it = rollItem(Math.max(1, (m?.level ?? lvl) + rnd(3)), undefined,
           m?.boss ? rollRarity(3) : d.elite ? rollRarity(2) : undefined)
         b.loot.push(it)
         say(b, 'loot', t('拾獲 {item}', { item: itemLabel(it.name) }))
       }
+      // 王也會掉抽卡券，這是券的主要來源 —— 不然抽卡只能靠金幣換，等於沒有第二條路
+      if (m?.boss) { b.tickets.ally += 1; b.tickets.gear += 1 }
       // 寵物：打王有機會遇到一隻願意跟你走的
       const petChance = m?.boss ? PET_DROP_CHANCE.boss : d.elite ? PET_DROP_CHANCE.elite : 0
       if (petChance && Math.random() < petChance) {
@@ -738,7 +842,7 @@ function settle(b: Battle, h: Hero): void {
   // 這一波清完 → 下一波 / 下一間 / 王
   if (!b.foes.length) {
     if (b.kind === 'field') {
-      spawnWave(b, ZONE_BY_ID[b.placeId]?.monsters ?? ['slime'], waveSize(h.level, 'field'))
+      spawnWave(b, ZONE_BY_ID[b.placeId]?.monsters ?? ['slime'], waveSize(h.level, 'field'), h.level)
       return
     }
     const dg = DUNGEON_BY_ID[b.placeId]
@@ -757,7 +861,7 @@ function settle(b: Battle, h: Hero): void {
       b.foes = [foeCombatant(MONSTER_BY_ID[dg.boss], 999)]
     } else {
       say(b, 'info', t('前進到第 {room} / {rooms} 間', { room: b.room, rooms: b.rooms }))
-      spawnWave(b, dg.trash, waveSize(h.level, 'dungeon'))
+      spawnWave(b, dg.trash, waveSize(h.level, 'dungeon'), h.level)
     }
   }
 }
@@ -779,8 +883,13 @@ export function stepBattle(b: Battle, h: Hero): void {
 }
 
 /** 把戰鬥結算進角色；回傳升了幾級 */
-export function collect(h: Hero, b: Battle): { levels: number; loot: Item[]; newPet?: Pet } {
-  h.gold += b.gold
+export function collect(h: Hero, b: Battle): {
+  levels: number; loot: Item[]; newPet?: Pet; secrets: string[]; allyUps: string[]
+} {
+  h.tally ??= { deathStreak: 0, crits: 0, superKills: 0, cleanClears: 0, breaks: 0 }
+  h.tickets ??= { ally: 0, gear: 0 }
+  // 「蒐藏家」：把人形夥伴收齊之後金幣多拿一成五
+  h.gold += Math.round(b.gold * (hasSecret(h, 'collector') ? 1.15 : 1))
   h.kills += b.kills
   h.bag.push(...b.loot)
   h.potions.hp += b.potionDrops.hp
@@ -802,7 +911,27 @@ export function collect(h: Hero, b: Battle): { levels: number; loot: Item[]; new
   // 出戰的寵物跟著長經驗
   const active = h.pets.find((p) => p.id === h.activePet)
   if (active) growPet(active, b.xp)
-  if (b.result === 'lose') h.deaths++
+
+  // 上場的夥伴也各自長經驗。
+  // 給主角的七成 —— 一樣的量會讓夥伴永遠比主角高一階（他們不用分經驗給寵物），
+  // 太少又等於沒有養成。uid 是 `ally-<recruit.id>`，切掉前綴就對得回去。
+  const allyUps: string[] = []
+  for (const a of b.allies) {
+    const r = h.roster?.find((x) => `ally-${x.id}` === a.uid)
+    if (r && growRecruit(r, Math.round(b.xp * 0.7))) allyUps.push(a.name)
+  }
+
+  h.tickets.ally += b.tickets.ally
+  h.tickets.gear += b.tickets.gear
+  h.tally.crits += b.critHits
+  h.tally.superKills += b.superKills
+  if (b.result === 'lose') { h.deaths++; h.tally.deathStreak++ }
+  // 贏了就把連敗歸零。「連續」十次才算，不是「總共」十次 ——
+  // 總數的話玩久了一定會達成，就沒有「撐過低潮」的意思了
+  if (b.result === 'win') {
+    h.tally.deathStreak = 0
+    if (b.kind === 'dungeon' && !b.potionUsed) h.tally.cleanClears++
+  }
 
   let levels = 0
   h.xp += b.xp
@@ -814,5 +943,9 @@ export function collect(h: Hero, b: Battle): { levels: number; loot: Item[]; new
   const loot = b.loot
   b.xp = 0; b.gold = 0; b.kills = 0; b.loot = []
   b.potionDrops = { hp: 0, mp: 0 }
-  return { levels, loot, newPet: newPet ?? undefined }
+  b.critHits = 0; b.superKills = 0
+  b.tickets = { ally: 0, gear: 0 }
+  // 彩蛋條件都是累計值，戰鬥中途不可能達成，所以一場結算檢查一次就夠
+  const got = checkSecrets(h).map((x) => x.name)
+  return { levels, loot, newPet: newPet ?? undefined, secrets: got, allyUps }
 }

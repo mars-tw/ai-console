@@ -48,7 +48,12 @@ export function loadBattleArt(monsterIds: string[], bgId: string, allyKeys: stri
   for (const id of FX_IDS) load(`fx:${id}`, `/office/rpg/fx/fx-${id}.png`)
 
   for (const w of WEAPON_LINES) load(`wpn:${w}`, `/office/rpg/weapons/weapon-${w}.png`)
-  for (const k of allyKeys) load(`ally:${k}`, `/office/sprites/${k}.png`)
+  // 隊友有兩種來源：龍用辦公室那張動作總表切格，人形夥伴是一張獨立的站姿圖。
+  // 用 art 的前綴分辨（人形一律 ally-xxx），比多傳一個型別參數乾淨。
+  for (const k of allyKeys) {
+    if (k.startsWith('ally-')) load(`rec:${k}`, `/office/rpg/recruits/${k}.png`)
+    else load(`ally:${k}`, `/office/sprites/${k}.png`)
+  }
 }
 
 /**
@@ -112,6 +117,15 @@ export function drawPet(c: CanvasRenderingContext2D, art: string, x: number, foo
 export function drawAlly(
   c: CanvasRenderingContext2D, key: string, x: number, footY: number, stepping: boolean, scale = 1,
 ) {
+  // 人形夥伴：單張站姿圖，畫法跟主角一樣（腳底對齊）。
+  // 出手的動感由 attackCurve 的位移做，不另外出攻擊圖 —— 一整排隊友
+  // 每人各兩張圖成本太高，而位移本來就是打擊感的主要來源。
+  const rec = images.get(`rec:${key}`)
+  if (rec) {
+    c.drawImage(rec, Math.round(x - (rec.width * scale) / 2), Math.round(footY - rec.height * scale),
+      Math.round(rec.width * scale), Math.round(rec.height * scale))
+    return
+  }
   const sheet = images.get(`ally:${key}`)
   const frame = stepping ? F.sideStep : F.sideStand
   const w = CELL * scale
@@ -167,6 +181,7 @@ export function unitHeight(side: string, art: string, pose = 'hero-stand'): numb
   if (side === 'foe') return monImage(art)?.height ?? 44
   if (side === 'hero') return heroImage(pose)?.height ?? 56
   if (side === 'pet') return petImage(art)?.height ?? 26
+  if (art.startsWith('ally-')) return images.get(`rec:${art}`)?.height ?? 56
   return 44          // 龍隊友是 48 格切出來的，實際身體約 44
 }
 
