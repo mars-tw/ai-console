@@ -599,4 +599,6 @@ export const EN: Record<string, string> = {
   '收起來的原因：不是目前在用的工具、太久沒動過，或在原本的工具裡已經封存。檔案都還在，沒有刪除。': 'Hidden because: not one of the tools you currently use, untouched for too long, or archived in the original tool. Every file is still there — nothing was deleted.',
   '留著': 'Keep',
   '放回主清單。規則之後改了也還是會留著': 'Put back in the main list. Stays even if the rules change later',
+  '只顯示有中文的對話': 'Only conversations with Chinese titles',
+  '機器跑的 agent 迴圈標題都是英文的指令輸出，怎麼列規則都追不完；你自己開的對話都有中文': 'Machine agent loops title themselves with English command output — no rule list ever catches them all. Your own conversations all have Chinese in them',
 }

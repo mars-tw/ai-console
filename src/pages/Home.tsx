@@ -52,6 +52,9 @@ function readChatCache(id?: string): { role: string; text: string }[] {
   } catch { return [] }
 }
 
+/** 標題裡有沒有中文 */
+const HAS_CJK = /[\u4e00-\u9fff]/
+
 export default function Home() {
   useLang()   // 語言一換就整頁重繪
   const [index, setIndex] = useState<IndexData | null>(null)
@@ -61,6 +64,16 @@ export default function Home() {
   const [showDup, setShowDup] = useState(() => localStorage.getItem('ac_showDup') === '1')
   const [showOld, setShowOld] = useState(() => localStorage.getItem('ac_showOld') === '1')
   const [showDispatch, setShowDispatch] = useState(() => localStorage.getItem('ac_showDisp') === '1')
+  /**
+   * 只顯示標題有中文的對話。
+   *
+   * 剩下那批機器迴圈（Codex 的 agent loop）標題長得像
+   * row_kind,id,post_type… 或 == tables ==，怎麼列規則都追不完，
+   * 但它們有一個共同點：沒有中文。而使用者真正開的對話全部是中文的。
+   * 做成開關而不是寫進索引器 —— 那是使用習慣不是資料性質，
+   * 寫死的話哪天用英文開一個對話就會憑空消失而且找不到原因。
+   */
+  const [onlyCJK, setOnlyCJK] = useState(() => localStorage.getItem('ac_onlyCJK') !== '0')
   /** 打開垃圾桶：看被規則收起來的那些 */
   const [showTrash, setShowTrash] = useState(false)
   /**
@@ -113,6 +126,7 @@ export default function Home() {
   useEffect(() => { localStorage.setItem('ac_showOld', showOld ? '1' : '0') }, [showOld])
   useEffect(() => { localStorage.setItem('ac_showDisp', showDispatch ? '1' : '0') }, [showDispatch])
   useEffect(() => { localStorage.setItem('ac_kept', JSON.stringify([...kept])) }, [kept])
+  useEffect(() => { localStorage.setItem('ac_onlyCJK', onlyCJK ? '1' : '0') }, [onlyCJK])
 
   useEffect(() => {
     fetch('/api/health').then((r) => {
@@ -339,6 +353,7 @@ export default function Home() {
         if (!showDup && c.dup) return false
         if (!showOld && c.mtime < cutoff) return false
         if (!showDispatch && c.dispatch) return false
+        if (onlyCJK && !HAS_CJK.test(c.title)) return false
         return true
       }
       return c.title.toLowerCase().includes(q) || c.path.toLowerCase().includes(q) || c.projectDir.toLowerCase().includes(q)
@@ -367,7 +382,8 @@ export default function Home() {
         return { dir, line, convs }
       })
       .sort((a, b) => (b.convs[0]?.mtime ?? 0) - (a.convs[0]?.mtime ?? 0))
-  }, [index, indexNow, search, showSubagent, showDup, showOld, showDispatch, showTrash, kept, activeDays, deleted])
+  }, [index, indexNow, search, showSubagent, showDup, showOld, showDispatch, showTrash,
+      onlyCJK, kept, activeDays, deleted])
 
   const oldCount = useMemo(() => {
     if (!index) return 0
@@ -446,6 +462,13 @@ export default function Home() {
             <label className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-zinc-500">
               <input type="checkbox" checked={showOld} onChange={(e) => setShowOld(e.target.checked)} />
               {t('顯示一週未使用的舊對話（已收納 {n} 份）', { n: oldCount })}
+            </label>
+            <label
+              className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-zinc-500"
+              title={t('機器跑的 agent 迴圈標題都是英文的指令輸出，怎麼列規則都追不完；你自己開的對話都有中文')}
+            >
+              <input type="checkbox" checked={onlyCJK} onChange={(e) => setOnlyCJK(e.target.checked)} />
+              {t('只顯示有中文的對話')}
             </label>
             <label className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-zinc-500">
               <input type="checkbox" checked={showDispatch} onChange={(e) => setShowDispatch(e.target.checked)} />
