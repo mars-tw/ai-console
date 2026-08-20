@@ -346,10 +346,35 @@ def load_codex_threads():
         except sqlite3.Error:
             rows = ((r[0], r[1], r[2], 0) for r in
                     con.execute("SELECT rollout_path, title, cwd FROM threads"))
+        by_id = {}
         for rp, title, cwd, archived in rows:
             if rp:
-                info[Path(str(rp)).name] = {"title": title or "", "cwd": cwd or "",
-                                            "archived": bool(archived)}
+                name = Path(str(rp)).name
+                info[name] = {"title": title or "", "cwd": cwd or "",
+                              "archived": bool(archived), "in_app": False}
+        # thread id → rollout 檔名，等一下要拿桌面版目錄對回來
+        try:
+            for tid, rp in con.execute("SELECT id, rollout_path FROM threads"):
+                if rp:
+                    by_id[str(tid)] = Path(str(rp)).name
+        except sqlite3.Error:
+            pass
+        # 桌面版的側欄目錄：只有這裡面的才是使用者真的看得到的對話
+        cat_db = HOME / ".codex" / "sqlite" / "codex-dev.db"
+        if cat_db.exists():
+            try:
+                cat = sqlite3.connect(f"file:{cat_db}?mode=ro", uri=True)
+                for tid, disp in cat.execute(
+                        "SELECT thread_id, display_title FROM local_thread_catalog"):
+                    name = by_id.get(str(tid))
+                    if not name or name not in info:
+                        continue
+                    info[name]["in_app"] = True
+                    if disp:
+                        info[name]["title"] = disp
+                cat.close()
+            except sqlite3.Error:
+                pass
         try:
             for (cid,) in con.execute("SELECT child_thread_id FROM thread_spawn_edges"):
                 children.add(str(cid))
@@ -605,12 +630,17 @@ def main():
             # Codex：官方 threads DB 的標題/cwd + spawn 關係
             official_title = ""
             archived = False
+            # Codex 專用：桌面版的側欄目錄裡有沒有這一筆。
+            # 其他工具沒有這種目錄，所以預設 True（不因為這條被收起來）。
+            in_app = True
             if src["tool"] == "codex":
                 th = codex_threads.get(path.name)
                 if th:
                     official_title = th["title"]
                     cwd = cwd or th["cwd"]
                     archived = th.get("archived", False)
+                    # 桌面版側欄沒有列的，就不是使用者開的對話
+                    in_app = th.get("in_app", False)
                 if sid in codex_children:
                     is_subagent = True
             # Grok / Kimi：附屬檔的官方標題與 cwd
@@ -669,10 +699,11 @@ def main():
                 # 一則訊息都沒有的不是對話，是被誤判成對話的設定檔／schema。
                 # 實測 studio_plan.schema、AUTOPILOT_MANIFEST、studio-plan.example
                 # 都是這樣混進來的。一樣只收進垃圾桶，不刪檔。
-                "trashed": (not count) or bool(archived)
+                "trashed": (not count) or bool(archived) or (not in_app)
                            or bool(trash_reason(src["tool"], mtime, t0)),
                 "trashReason": ("no-messages" if not count else
                                 "archived" if archived else
+                                "not-in-app" if not in_app else
                                 trash_reason(src["tool"], mtime, t0)),
                 "dispatch": no_human_turn or is_dispatch(title, first_user_msg),
                 "resume": src["resume"](sid, cwd),
