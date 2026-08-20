@@ -61,6 +61,16 @@ export default function Home() {
   const [showDup, setShowDup] = useState(() => localStorage.getItem('ac_showDup') === '1')
   const [showOld, setShowOld] = useState(() => localStorage.getItem('ac_showOld') === '1')
   const [showDispatch, setShowDispatch] = useState(() => localStorage.getItem('ac_showDisp') === '1')
+  /** 打開垃圾桶：看被規則收起來的那些 */
+  const [showTrash, setShowTrash] = useState(false)
+  /**
+   * 手動留回來的對話 id。
+   * 垃圾桶是規則算出來的，不是逐筆存的狀態 —— 所以「還原」不能去改索引，
+   * 只能在這裡記一個豁免名單。規則之後改了，這些照樣留著。
+   */
+  const [kept, setKept] = useState<Set<string>>(
+    () => new Set(JSON.parse(localStorage.getItem('ac_kept') || '[]') as string[]),
+  )
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({})
   /**
    * 選取的對話只存 id，實體從索引推導。
@@ -102,6 +112,7 @@ export default function Home() {
   useEffect(() => { localStorage.setItem('ac_showDup', showDup ? '1' : '0') }, [showDup])
   useEffect(() => { localStorage.setItem('ac_showOld', showOld ? '1' : '0') }, [showOld])
   useEffect(() => { localStorage.setItem('ac_showDisp', showDispatch ? '1' : '0') }, [showDispatch])
+  useEffect(() => { localStorage.setItem('ac_kept', JSON.stringify([...kept])) }, [kept])
 
   useEffect(() => {
     fetch('/api/health').then((r) => {
@@ -122,7 +133,16 @@ export default function Home() {
   }
 
   const reloadIndex = () => {
-    fetch('/data/index.json?t=' + Date.now()).then((r) => r.json()).then((d) => setIndex(normalize(d))).catch(() => {})
+    fetch('/data/index.json', { cache: 'no-cache' })
+      .then((r) => {
+        if (r.status === 304) return null
+        if (!r.ok) return null
+        return r.json()
+      })
+      .then((d) => {
+        if (d) setIndex(normalize(d))
+      })
+      .catch(() => {})
   }
 
   // 每 60 秒輪詢索引與即時狀態（自動化每 15 分鐘會刷新磁碟上的資料）
@@ -268,12 +288,15 @@ export default function Home() {
 
 
   useEffect(() => {
-    fetch('/data/index.json')
+    fetch('/data/index.json', { cache: 'no-cache' })
       .then((r) => {
+        if (r.status === 304) return null
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         return r.json()
       })
-      .then((d) => setIndex(normalize(d)))
+      .then((d) => {
+        if (d) setIndex(normalize(d))
+      })
       .catch((e) => setError(String(e)))
   }, [])
 
@@ -306,6 +329,11 @@ export default function Home() {
       // 有搜尋字串時豁免所有隱藏過濾器。
       // 原本只有資料夾層級豁免，對話層級的「一週未使用」照樣擋 ——
       // 結果搜兩週前的對話永遠是空的，但東西明明還在。
+      // 垃圾桶是獨立的一個視圖，不是額外的過濾器 ——
+      // 打開時「只」看垃圾桶裡的，關著時完全不出現。
+      // 混在一起的話，看垃圾桶還要自己分辨哪些是垃圾桶裡的，等於沒有分。
+      const inTrash = !!c.trashed && !kept.has(c.id)
+      if (showTrash !== inTrash) return false
       if (!q) {
         if (!showSubagent && c.subagent) return false
         if (!showDup && c.dup) return false
@@ -339,7 +367,7 @@ export default function Home() {
         return { dir, line, convs }
       })
       .sort((a, b) => (b.convs[0]?.mtime ?? 0) - (a.convs[0]?.mtime ?? 0))
-  }, [index, indexNow, search, showSubagent, showDup, showOld, showDispatch, activeDays, deleted])
+  }, [index, indexNow, search, showSubagent, showDup, showOld, showDispatch, showTrash, kept, activeDays, deleted])
 
   const oldCount = useMemo(() => {
     if (!index) return 0
@@ -389,6 +417,24 @@ export default function Home() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
+            {(index.stats.trashed ?? 0) > 0 && (
+              <button
+                className={`mt-2 flex w-full items-center gap-2 rounded-md px-2 py-1 text-xs ${
+                  showTrash
+                    ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900'
+                    : 'text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                }`}
+                onClick={() => setShowTrash((v) => !v)}
+                title={t('這些對話只是收起來，檔案完全沒有動。點「留著」可以單筆放回主清單')}
+              >
+                🗑️ {showTrash ? t('回到主清單') : t('垃圾桶（{n} 份）', { n: index.stats.trashed ?? 0 })}
+              </button>
+            )}
+            {showTrash && (
+              <div className="mt-1 rounded bg-zinc-100 px-2 py-1 text-[10px] leading-relaxed text-zinc-500 dark:bg-zinc-900">
+                {t('收起來的原因：不是目前在用的工具、太久沒動過，或在原本的工具裡已經封存。檔案都還在，沒有刪除。')}
+              </div>
+            )}
             <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs text-zinc-500">
               <input type="checkbox" checked={showSubagent} onChange={(e) => setShowSubagent(e.target.checked)} />
               {t('顯示子代理對話（{n} 份）', { n: index.stats.subagent })}
@@ -504,6 +550,15 @@ export default function Home() {
                           {c.msgCount > 0 && ` · ${t('{n} 則', { n: c.msgCount })}`}
                         </span>
                       </button>
+                      {showTrash && (
+                        <button
+                          className="flex-none rounded px-1 text-[10px] text-emerald-600 hover:text-emerald-500"
+                          title={t('放回主清單。規則之後改了也還是會留著')}
+                          onClick={(e) => { e.stopPropagation(); setKept((k) => new Set(k).add(c.id)) }}
+                        >
+                          {t('留著')}
+                        </button>
+                      )}
                       {apiOk && (
                         <button
                           className="flex-none rounded px-1 text-xs text-zinc-300 opacity-0 hover:text-red-500 group-hover:opacity-100 dark:text-zinc-600"

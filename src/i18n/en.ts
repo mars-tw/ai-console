@@ -593,4 +593,10 @@ export const EN: Record<string, string> = {
   '目前沒有進行中的派工（最近 {n} 件都結束了）': 'Nothing in progress right now (the last {n} all finished)',
   '等你執行': 'Waiting for you',
   '沒有輸出': 'No output',
+  '垃圾桶（{n} 份）': 'Trash ({n})',
+  '回到主清單': 'Back to main list',
+  '這些對話只是收起來，檔案完全沒有動。點「留著」可以單筆放回主清單': 'These are only hidden — no file was touched. Use “Keep” to put one back in the main list',
+  '收起來的原因：不是目前在用的工具、太久沒動過，或在原本的工具裡已經封存。檔案都還在，沒有刪除。': 'Hidden because: not one of the tools you currently use, untouched for too long, or archived in the original tool. Every file is still there — nothing was deleted.',
+  '留著': 'Keep',
+  '放回主清單。規則之後改了也還是會留著': 'Put back in the main list. Stays even if the rules change later',
 }

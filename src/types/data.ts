@@ -36,6 +36,17 @@ export interface ConversationSummary {
   dispatch?: boolean
   resume: string
   hasMessages: boolean
+  /** 來源工具自己標記的封存（目前只有 Codex 有這個旗標） */
+  archived?: boolean
+  /**
+   * 控制台的垃圾桶：主畫面預設不顯示，但檔案完全沒動，隨時看得回來。
+   * 規則在 tools/indexer.py 的 trash_reason()：
+   *   archived        來源工具裡封存掉的
+   *   not-active-tool 不是目前在用的那幾個 CLI
+   *   stale           太久沒有動過
+   */
+  trashed?: boolean
+  trashReason?: 'archived' | 'not-active-tool' | 'stale' | ''
   dup?: boolean
   dupOf?: string
   dupOfTool?: string
@@ -48,7 +59,14 @@ export interface IndexData {
   tools: Record<string, ToolStatus>
   projectTitles: Record<string, string>
   conversations: ConversationSummary[]
-  stats: { total: number; subagent: number; duplicates?: number; dispatch?: number; unique?: number; elapsed_sec: number }
+  stats: {
+    total: number; subagent: number; duplicates?: number; dispatch?: number
+    unique?: number; elapsed_sec: number
+    /** 來源工具裡已封存的份數 */
+    archived?: number
+    /** 被垃圾桶規則收起來的份數 */
+    trashed?: number
+  }
 }
 
 /** /api/dispatches 回傳的派工紀錄 */

@@ -324,6 +324,30 @@ def session_id_from_name(name: str) -> str:
 UUID_RE = r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
 
 
+# ── 垃圾桶規則 ─────────────────────────────────────
+#
+# 「清理但不刪除」：符合下面任一條的對話會被標成 trashed，主畫面預設不顯示，
+# 但檔案完全不動，介面上打開垃圾桶就看得到，也可以單筆留回來。
+#
+# 兩條規則的理由不一樣：
+#   非現役工具 —— 使用者現在只用這幾個 CLI，其他工具的舊對話留在清單上只是雜訊
+#   太久沒動   —— 現役工具裡也會累積用完就不再回頭的對話
+# 兩條都可以用環境變數覆蓋，因為「現在在用哪幾個」會隨時間變。
+ACTIVE_TOOLS = {t.strip() for t in
+                os.environ.get("AI_CONSOLE_ACTIVE_TOOLS", "codex,claude,qwen,kimi").split(",")
+                if t.strip()}
+TRASH_AFTER_DAYS = int(os.environ.get("AI_CONSOLE_TRASH_DAYS", "30"))
+
+
+def trash_reason(tool: str, mtime: float, now: float) -> str:
+    """回傳進垃圾桶的理由；不該進就回空字串"""
+    if ACTIVE_TOOLS and tool not in ACTIVE_TOOLS:
+        return "not-active-tool"
+    if TRASH_AFTER_DAYS > 0 and (now - mtime) > TRASH_AFTER_DAYS * 86400:
+        return "stale"
+    return ""
+
+
 # 明顯不是對話的目錄名。工具會在自己的資料夾裡放快取、日誌、暫存，
 # 那些檔案的副檔名跟對話一樣，只能靠目錄名擋。
 NOISE_DIR_RE = re.compile(
@@ -567,6 +591,10 @@ def main():
                 "subagent": is_subagent,
                 # 在來源工具裡被封存的：控制台預設收進垃圾桶，但不刪檔
                 "archived": archived,
+                # 控制台自己的垃圾桶判定（規則見 trash_reason）。
+                # 來源工具已經封存的一律進垃圾桶，優先於其他規則。
+                "trashed": bool(archived) or bool(trash_reason(src["tool"], mtime, t0)),
+                "trashReason": "archived" if archived else trash_reason(src["tool"], mtime, t0),
                 "dispatch": no_human_turn or is_dispatch(title, first_user_msg),
                 "resume": src["resume"](sid, cwd),
                 "hasMessages": bool(msgs),
@@ -612,6 +640,7 @@ def main():
             "subagent": skipped_subagent,
             "duplicates": dup_count,
             "archived": sum(1 for c in conversations if c.get("archived")),
+            "trashed": sum(1 for c in conversations if c.get("trashed")),
             "dispatch": sum(1 for c in conversations if c.get("dispatch") and not c["subagent"] and not c.get("dup")),
             "unique": len(conversations) - dup_count,
             "elapsed_sec": round(time.time() - t0, 1),
