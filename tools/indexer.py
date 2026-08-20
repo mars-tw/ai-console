@@ -87,6 +87,10 @@ DISPATCH_PATTERNS = [
     r"^TASK_ID:", r"^ROLE:",
     r"^This session is being continued",
     r"^Create probe\.txt", r"^回覆兩個字",
+    # 派工的連線測試：說 OK / 回覆 OK / 回答 OK
+    r"^(說|回覆|回答|輸出)\s*(OK|ok|好)\b",
+    # 祈使句一開頭就是絕對路徑：在 C:\... 建立一個檔案
+    r"^在\s*[A-Za-z]:[\\/]",
     # 祈使句型的產圖／產檔工單（本專案自己派出去的那種）
     r"^請產出", r"^請為一個", r"^請依", r"^請用\s*image_gen",
     r"^重新產出", r"^用\s*image_gen", r"^你是遊戲美術",
@@ -242,6 +246,15 @@ def looks_like_paste(t: str) -> bool:
         return True
     # 一開頭就是時間戳或分隔標記
     if re.match(r"^(\d{4}-\d{2}-\d{2}[T\s]|={3,})", s):
+        return True
+    # 帶行號的 markdown 清單或表格列：1 - [x](y)、48- - foo
+    if re.match(r"^\d+\s*[-*|]\s", s):
+        return True
+    # 表格列：三個以上的直線分隔
+    if s.count(" | ") >= 3:
+        return True
+    # snake_case 的鍵值傾印：total_records: 14025 …
+    if re.match(r"^[a-z][a-z0-9_]*\s*:\s*\S", s) and not re.search(r"[。，、？！]", s[:80]):
         return True
     # 路徑密集而且整段沒有句讀 —— 人在講話一定會有標點
     if len(re.findall(r"[\\/][\w.-]+", s)) >= 3 and not re.search(r"[。，、？！?!,]", s):
