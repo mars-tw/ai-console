@@ -61,16 +61,37 @@ PROJECT_RULES, PROJECT_TITLES = _load_project_config()
 # 判定一律只看「開頭」與「標題長相」，因為工單的特徵都在第一句話。
 DISPATCH_PATTERNS = [
     # 明確的代理工單／協調協議
-    r"^You are (the|a) (sole|bounded|exact-scope|authorized|dispatch)",
-    r"^You are generating", r"^You are an? (agent|assistant|worker)",
-    r"^TASK_ID:\s*tsk_", r"^<codex_delegation", r"^<heartbeat",
+    # 「You are the/a/an …」開頭一律當工單：那是系統提示詞的標準寫法。
+    # 原本只列了幾個特定字（sole / bounded / exact-scope…），結果
+    # 「You are the preferred cloud…」「You are the canonical external…」全部漏掉
+    # —— 光是一個資料夾就有 96 筆這種對話混在主清單上。
+    r"^You are (the|a|an)\b",
+    r"^You are (currently|now|acting)\b",
+    # 中文版的同一件事。要求後面要接內容、而且不是問句，
+    # 才不會把使用者真的在問的「你是誰？」也算成工單。
+    r"^你是[^？?]{4,}",
+    # 治理工單：一開頭就限定可動的檔案範圍，那是機器對機器的講法。
+    # 實測有一個資料夾裡 78 筆都是這種，全部混在主清單上。
+    r"^Edit only\b", r"^Create exactly\b",
+    r"^(You )?[Oo]wn only\b", r"^Update only\b",
+    # 不加開頭錨點：工單路徑出現在前 200 字裡就夠明確了
+    r"work-orders/tsk_", r"governance/work-orders",
+    # 這個控制台自己派出去的工單。這兩個字串是 server/api.py 與
+    # server/rules.py 寫進去的，出現在開頭就一定是派工，不是人打的。
+    r"^Read the UTF-8 work order at",
+    r"^【執行前置",
+    # 限定工具／檔案／次數的祈使句 —— 人不會這樣跟 AI 講話。
+    r"^(Edit|Replace|Implement|Update|Create|Use|Read|Apply) (only|exactly|one|the entire|the exact)\b",
+    r"^(Bounded|Exact|Allowed tools|Say only)\b",
+    r"^You are generating\b", r"^You are an? (agent|assistant|worker)\b",
+    r"^TASK_ID:", r"^ROLE:",
     r"^This session is being continued",
     r"^Create probe\.txt", r"^回覆兩個字",
     # 祈使句型的產圖／產檔工單（本專案自己派出去的那種）
     r"^請產出", r"^請為一個", r"^請依", r"^請用\s*image_gen",
     r"^重新產出", r"^用\s*image_gen", r"^你是遊戲美術",
-    r"^Generate (an?|one|the)", r"^Create (an?|one|the)",
-    r"^Produce (an?|one|the)", r"^Render (an?|one|the)",
+    r"^Generate (an?|one|the)\b", r"^Create (an?|one|the)\b",
+    r"^Produce (an?|one|the)\b", r"^Render (an?|one|the)\b",
     # 一開頭就是絕對路徑或命令列
     r"^[A-Za-z]:\\", r"^/[a-z]+/", r"^(npm|npx|python|node|git|pip)\s",
 ]
@@ -78,6 +99,9 @@ DISPATCH_RE = re.compile("|".join(DISPATCH_PATTERNS), re.IGNORECASE)
 
 # 內容特徵：整段都是工單指示，通常會出現這些字眼
 ORDER_HINTS = ("不要問我問題", "不要停下來確認", "完成後只輸出", "只輸出一行",
+               # 限定範圍的講法。單獨一個可能是巧合，兩個以上就幾乎確定是機器工單
+               "exactly one", "no other tool", "Allowed tools",
+               "In cwd ", "Do not ", "work order",
                "Do not ask", "Do not publish", "Do not edit any", "存成 ", "--output")
 
 # 一望即知不是對話的標題
@@ -95,7 +119,9 @@ def is_dispatch(title: str, first_msg: str = "") -> bool:
     一模一樣。所以真正可靠的是第一則訊息的內容 —— 工單一定會有
     「不要問我問題」「完成後只輸出」「--output」這類機器對機器的指示。
     """
-    body = (first_msg or "").strip()
+    # UTF-8 BOM 會擋掉所有 ^ 開頭的比對。實測漏掉的那一批工單，
+    # 標題就是 BOM + "You are the preferred cloud…"
+    body = (first_msg or "").lstrip("\ufeff").strip()
     if body:
         head = body[:1500]
         hits = sum(1 for h in ORDER_HINTS if h in head)
@@ -109,7 +135,11 @@ def is_dispatch(title: str, first_msg: str = "") -> bool:
                 "--output" in head or "存成" in head or "image_gen" in head):
             return True
 
-    t = (title or "").strip()
+    t = (title or "").lstrip("\ufeff").strip()
+    # 標題本身就是貼上來的輸出 —— 表示掃過所有使用者訊息之後，
+    # 沒有任何一則像人在講話。那是 agent 迴圈，不是人開的對話。
+    if looks_like_paste(t):
+        return True
     if not t:
         return True
     low = t.lower()
@@ -188,10 +218,47 @@ def extract_text(node, depth=0):
     return ""
 
 
+def looks_like_paste(t: str) -> bool:
+    """這一則其實是貼上來的檔案內容或指令輸出，不是在講話
+
+    拿它當標題的話，清單上會出現一排看不懂的字（實測有八筆標題一模一樣）。
+
+    這裡刻意用結構判斷，不逐條列指令：前幾版是一種一種列（ls、PowerShell dir、
+    grep -n、時間戳…），每重建一次索引就冒出新的一種，永遠列不完。
+    """
+    s = (t or "")[:300].strip()
+    if not s:
+        return True
+    # 表格分隔線：ProcessName Id ... ----------- -- ------
+    if re.search(r"-{3,}", s):
+        return True
+    # 檔案清單：權限位元 / 相對路徑 / 絕對路徑開頭
+    if re.match(r"^(total \d+|[dlbcps-][rwxst-]{9}|\./|[A-Za-z]:[\\/])", s):
+        return True
+    # 帶行號的檔案內容或 grep 輸出
+    if re.match(r"^\d+:", s):
+        return True
+    if re.match(r"^1\s+\S", s) and re.search(r"\s2\s+\S", s) and re.search(r"\s3\s+\S", s):
+        return True
+    # 一開頭就是時間戳或分隔標記
+    if re.match(r"^(\d{4}-\d{2}-\d{2}[T\s]|={3,})", s):
+        return True
+    # 路徑密集而且整段沒有句讀 —— 人在講話一定會有標點
+    if len(re.findall(r"[\\/][\w.-]+", s)) >= 3 and not re.search(r"[。，、？！?!,]", s):
+        return True
+    # 整段只有大寫識別字與符號
+    if re.match(r"^[A-Z0-9_ =:/.\\-]+$", s):
+        return True
+    return False
+
+
 def parse_jsonl_messages(path: Path, full: bool, detect_spawn: bool = False):
     """回傳 (messages, first_user_text, last_ts, msg_count, is_subagent, cwd)"""
     msgs = []
     first_user = ""
+    # 第一則訊息可能是貼上來的檔案內容，那種拿來當標題看不懂 ——
+    # 標記起來，後面遇到看得懂的就換掉
+    first_user_is_paste = False
     last_ts = ""
     count = 0
     is_subagent = False
@@ -239,7 +306,7 @@ def parse_jsonl_messages(path: Path, full: bool, detect_spawn: bool = False):
                 if not body or not body.strip():
                     continue
                 count += 1
-                if role == "user" and not first_user:
+                if role == "user" and (not first_user or first_user_is_paste):
                     cand = re.sub(r"\s+", " ", body).strip()
                     if cand.startswith("<"):
                         continue
@@ -249,6 +316,7 @@ def parse_jsonl_messages(path: Path, full: bool, detect_spawn: bool = False):
                         cand = re.sub(r"\s+", " ", m.group(1)).strip()
                     if cand and not cand.startswith("<"):
                         first_user = cand[:80]
+                        first_user_is_paste = looks_like_paste(cand)
                 if full and len(msgs) < MAX_MSGS:
                     msgs.append({"role": role, "text": body[:MAX_TEXT], "ts": ts if isinstance(ts, str) else ""})
         if not full and count == 0:
@@ -558,6 +626,11 @@ def main():
             if src["tool"] == "grok" and not cwd:
                 proj_dir = decode_project_dir(path.parent.parent.name)
             proj_dir = proj_dir.replace("\\\\?\\", "").replace("//?/", "")
+            # 同一個目錄用不同分隔符寫出來會被當成兩個專案 ——
+            # 實測 C:/WINDOWS/system32 與 C:\\WINDOWS\\system32 各自佔一列。
+            # Windows 絕對路徑一律統一成反斜線，結尾的分隔符也去掉。
+            if re.match(r"^[A-Za-z]:[\\/]", proj_dir):
+                proj_dir = proj_dir.replace("/", "\\").rstrip("\\")
             title = official_title or first_user or path.stem[:60]
             if src["tool"] == "codex" and title.startswith("<codex_delegation"):
                 is_subagent = True
@@ -593,8 +666,14 @@ def main():
                 "archived": archived,
                 # 控制台自己的垃圾桶判定（規則見 trash_reason）。
                 # 來源工具已經封存的一律進垃圾桶，優先於其他規則。
-                "trashed": bool(archived) or bool(trash_reason(src["tool"], mtime, t0)),
-                "trashReason": "archived" if archived else trash_reason(src["tool"], mtime, t0),
+                # 一則訊息都沒有的不是對話，是被誤判成對話的設定檔／schema。
+                # 實測 studio_plan.schema、AUTOPILOT_MANIFEST、studio-plan.example
+                # 都是這樣混進來的。一樣只收進垃圾桶，不刪檔。
+                "trashed": (not count) or bool(archived)
+                           or bool(trash_reason(src["tool"], mtime, t0)),
+                "trashReason": ("no-messages" if not count else
+                                "archived" if archived else
+                                trash_reason(src["tool"], mtime, t0)),
                 "dispatch": no_human_turn or is_dispatch(title, first_user_msg),
                 "resume": src["resume"](sid, cwd),
                 "hasMessages": bool(msgs),

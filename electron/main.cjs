@@ -4,7 +4,7 @@
 //
 // 這裡刻意把每一步都寫進啟動日誌，因為打包後主程序的 console 看不到，
 // 出事時只會看到一個白視窗，很難查。日誌位置會顯示在錯誤畫面上。
-const { app, BrowserWindow } = require('electron')
+const { app, BrowserWindow, Menu, shell } = require('electron')
 const { spawn } = require('child_process')
 const path = require('path')
 const fs = require('fs')
@@ -96,8 +96,69 @@ function errorPage(reason) {
 
 let win = null
 
+/**
+ * 應用程式選單。
+ *
+ * 不設的話 Electron 會給一份預設選單，全部是英文（File / Edit / View…）——
+ * 整個介面都是繁體中文，只有按 Alt 叫出來的選單是英文，很突兀。
+ *
+ * 每一項都保留 role：role 決定實際行為（複製、貼上、縮放這些跟系統整合的動作），
+ * label 只換顯示文字。自己寫 click 去實作複製貼上會漏掉輸入法、選取範圍這些細節。
+ */
+function buildMenu() {
+  const template = [
+    {
+      label: '檔案',
+      submenu: [
+        { role: 'reload', label: '重新載入' },
+        { role: 'forceReload', label: '強制重新載入' },
+        { type: 'separator' },
+        { role: 'quit', label: '結束' },
+      ],
+    },
+    {
+      label: '編輯',
+      submenu: [
+        { role: 'undo', label: '復原' },
+        { role: 'redo', label: '重做' },
+        { type: 'separator' },
+        { role: 'cut', label: '剪下' },
+        { role: 'copy', label: '複製' },
+        { role: 'paste', label: '貼上' },
+        { role: 'selectAll', label: '全選' },
+      ],
+    },
+    {
+      label: '檢視',
+      submenu: [
+        { role: 'resetZoom', label: '實際大小' },
+        { role: 'zoomIn', label: '放大' },
+        { role: 'zoomOut', label: '縮小' },
+        { type: 'separator' },
+        { role: 'togglefullscreen', label: '全螢幕' },
+        { role: 'toggleDevTools', label: '開發人員工具' },
+      ],
+    },
+    {
+      label: '說明',
+      submenu: [
+        {
+          label: '開啟啟動日誌',
+          click: () => { shell.openPath(LOG) },
+        },
+        {
+          label: '專案首頁（GitHub）',
+          click: () => { shell.openExternal('https://github.com/mars-tw/ai-console') },
+        },
+      ],
+    },
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
 async function createWindow() {
   log(`--- 啟動 --- ${app.isPackaged ? '打包版' : '開發版'}  資源=${__dirname}`)
+  buildMenu()
   win = new BrowserWindow({
     width: 1280,
     height: 840,
