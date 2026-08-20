@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -46,6 +47,7 @@ LMS_BIN = Path.home() / ".lmstudio" / "bin" / "lms.exe"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import planner   # noqa: E402
 import rules     # noqa: E402
+import schedule  # noqa: E402
 
 PORT = 5177
 
@@ -470,6 +472,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/api/map":
             return self.do_map()
+        if self.path == "/api/dispatch/batch":
+            return self._json({"ok": True, **type(self).BATCH})
+        if self.path == "/api/schedules":
+            return self._json({"ok": True, "jobs": [
+                {**j, "desc": schedule.describe(j)} for j in schedule.load()]})
         if self.path == "/api/dispatches":
             return self.do_dispatches()
         if self.path == "/api/audit":
@@ -665,6 +672,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.do_conv_delete()
         if self.path == "/api/plan":
             return self.do_plan()
+        if self.path == "/api/schedule/save":
+            return self.do_schedule_save()
+        if self.path == "/api/schedule/delete":
+            return self.do_schedule_delete()
+        if self.path == "/api/schedule/run":
+            return self.do_schedule_run()
+        if self.path == "/api/dispatch/batch":
+            return self.do_dispatch_batch()
         if self.path == "/api/dispatch/followup":
             return self.do_followup()
         if self.path == "/api/dispatch":
@@ -1043,7 +1058,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error": str(e)}, 500)
 
     # 從 log 尾端認出「跑起來了但失敗」。這些都是實際踩過的訊息，不是猜的。
-    _FAIL_MARKS = ("usage limit", "rate limit", "quota exceeded", "error:",
+    # qwen 的說法是 quota exhausted / insufficient_quota，跟其他家都不一樣 ——
+    # 漏了它就會把「額度用光」誤判成「完成」（實測踩過）。
+    _FAIL_MARKS = ("usage limit", "rate limit", "quota exceeded", "quota exhausted",
+                   "insufficient_quota", "error:",
                    "traceback (most recent call last)", "is not recognized",
                    "command not found", "invalid_grant")
 
@@ -1106,6 +1124,112 @@ class Handler(BaseHTTPRequestHandler):
             "mode": "headless", "followupOf": d.get("id"),
         })
         return {"pid": proc.pid, "log": str(log_file)}
+
+    def _dispatch_now(self, task: str, tool: str) -> str:
+        """定時工作到期時走的路徑 —— 就是手動派工那一條，只是沒有人按按鈕。
+
+        直接呼叫 do_dispatch() 會需要偽造一個 request body，太繞；
+        這裡把同一段邏輯用 HTTP 打回自己，確保行為完全一致
+        （包含掛規範、寫 log、進派工登錄、自動路由）。
+        """
+        payload = json.dumps({"task": task, "tool": tool or "auto"},
+                             ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{PORT}/api/dispatch", data=payload,
+            headers={"Content-Type": "application/json; charset=utf-8",
+                     # 自己打自己，同源檢查要過
+                     "Origin": f"http://127.0.0.1:{PORT}"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            d = json.loads(r.read())
+        return d.get("note") or ("已派出" if d.get("ok") else str(d.get("error")))
+
+    def do_schedule_save(self):
+        body = self._body()
+        job = schedule.normalize(body)
+        if not job["task"]:
+            return self._json({"ok": False, "error": "需要工作內容"}, 400)
+        rows = [j for j in schedule.load() if j.get("id") != job["id"]]
+        rows.append(job)
+        schedule.save(rows)
+        return self._json({"ok": True, "job": {**job, "desc": schedule.describe(job)}})
+
+    def do_schedule_delete(self):
+        jid = str(self._body().get("id", ""))
+        rows = [j for j in schedule.load() if j.get("id") != jid]
+        schedule.save(rows)
+        return self._json({"ok": True})
+
+    def do_schedule_run(self):
+        """立刻跑一次。設定完馬上驗證得到，不用等到明天早上八點"""
+        jid = str(self._body().get("id", ""))
+        rows = schedule.load()
+        job = next((j for j in rows if j.get("id") == jid), None)
+        if not job:
+            return self._json({"ok": False, "error": "找不到這個定時工作"}, 404)
+        try:
+            note = self._dispatch_now(job.get("task", ""), job.get("tool", "auto"))
+        except Exception as e:
+            return self._json({"ok": False, "error": str(e)}, 500)
+        job["lastRun"] = time.time()
+        job["runs"] = int(job.get("runs") or 0) + 1
+        job["lastResult"] = note[:200]
+        schedule.save(rows)
+        return self._json({"ok": True, "note": note})
+
+    # 目前這一批的進度，給介面看的
+    BATCH = {"total": 0, "done": 0, "running": False, "current": "", "note": ""}
+
+    def do_dispatch_batch(self):
+        """一次收下整批工單，在背景一件一件跑
+
+        serial=True（預設）會等前一件的行程真的結束才派下一件。
+        這是唯一能避免多個 agent 同時改同一批檔案的做法 ——
+        前端 await 一個非阻塞的 Popen 是等不到的。
+        """
+        body = self._body()
+        steps = body.get("steps") or []
+        serial = bool(body.get("serial", True))
+        if not isinstance(steps, list) or not steps:
+            return self._json({"ok": False, "error": "需要 steps"}, 400)
+        if self.BATCH["running"]:
+            return self._json({"ok": False, "error": "上一批還在跑，等它結束或先取消"}, 409)
+
+        jobs = [{"tool": str(x.get("tool") or "auto"), "task": str(x.get("task") or "").strip()}
+                for x in steps if str(x.get("task") or "").strip()]
+        if not jobs:
+            return self._json({"ok": False, "error": "工單內容都是空的"}, 400)
+
+        cls = type(self)
+        cls.BATCH = {"total": len(jobs), "done": 0, "running": True,
+                     "current": jobs[0]["task"][:60], "note": ""}
+
+        def worker():
+            for i, j in enumerate(jobs):
+                cls.BATCH["current"] = j["task"][:60]
+                try:
+                    payload = json.dumps(j, ensure_ascii=False).encode("utf-8")
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{PORT}/api/dispatch", data=payload,
+                        headers={"Content-Type": "application/json; charset=utf-8",
+                                 "Origin": f"http://127.0.0.1:{PORT}"})
+                    with urllib.request.urlopen(req, timeout=60) as r:
+                        d = json.loads(r.read())
+                    pid = d.get("pid")
+                    if serial and pid:
+                        # 真的等它跑完。上限兩小時，免得一件卡死就整批不動。
+                        end = time.time() + 7200
+                        while time.time() < end and int(pid) in _alive_pids({int(pid)}):
+                            time.sleep(5)
+                except Exception as e:
+                    cls.BATCH["note"] = f"第 {i + 1} 件失敗：{e}"[:160]
+                cls.BATCH["done"] = i + 1
+            cls.BATCH["running"] = False
+            cls.BATCH["current"] = ""
+
+        threading.Thread(target=worker, daemon=True).start()
+        return self._json({"ok": True, "total": len(jobs), "serial": serial,
+                           "note": f"已收下 {len(jobs)} 件，"
+                                   + ("一件跑完才派下一件" if serial else "同時派出")})
 
     def do_followup(self):
         """對一件已派出的工作補一句話
@@ -1223,4 +1347,27 @@ if __name__ == "__main__":
               f"（可能有另一個實例正在啟動中，或該埠被其他程式佔用）", flush=True)
         sys.exit(1)
     print(f"AI 控制台 API 於 http://127.0.0.1:{PORT} （僅本機）", flush=True)
+
+    # 定時工作的背景排程。
+    #
+    # 到期時用 HTTP 打回自己的 /api/dispatch —— 這樣定時工作走的是跟手動派工
+    # 一模一樣的路徑（掛規範、寫 log、進派工登錄、自動路由），不會有兩套行為。
+    # 用 daemon 執行緒，關掉伺服器就跟著結束，不需要另外處理收尾。
+    def _fire(job: dict) -> str:
+        payload = json.dumps({"task": job.get("task", ""),
+                              "tool": job.get("tool") or "auto"},
+                             ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{PORT}/api/dispatch", data=payload,
+            headers={"Content-Type": "application/json; charset=utf-8",
+                     "Origin": f"http://127.0.0.1:{PORT}"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            d = json.loads(r.read())
+        return d.get("note") or ("已派出" if d.get("ok") else str(d.get("error")))
+
+    sched = schedule.Scheduler(_fire)
+    sched.start()
+    jobs = [j for j in schedule.load() if j.get("enabled")]
+    print(f"定時工作：{len(jobs)} 件啟用中", flush=True)
+
     srv.serve_forever()

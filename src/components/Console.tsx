@@ -39,6 +39,51 @@ function elapsed(stamp: string): string {
   return `${Math.floor(s / 3600)} 小時 ${Math.floor((s % 3600) / 60)} 分`
 }
 
+/**
+ * 可以派工的執行者。
+ * 之前這份清單寫死在下拉選單裡，而且漏了 gemini（ANTIGRAVITY）——
+ * 後端明明支援，拆解器也會派給它，選單卻選不到，顯示會變空白。
+ */
+const TOOLS = ['auto', 'claude', 'codex', 'gemini', 'qwen', 'grok', 'kimi', 'cursor', 'local'] as const
+
+interface SchedJob {
+  id: string
+  name: string
+  task: string
+  tool: string
+  kind: 'interval' | 'daily' | 'weekly'
+  enabled: boolean
+  everyMinutes: number
+  hour: number
+  minute: number
+  weekday: number
+  nextRun: number
+  lastRun: number
+  lastResult: string
+  runs: number
+  desc?: string
+}
+
+const NEW_JOB: SchedJob = {
+  id: '', name: '', task: '', tool: 'auto', kind: 'daily', enabled: true,
+  everyMinutes: 60, hour: 9, minute: 0, weekday: 0,
+  nextRun: 0, lastRun: 0, lastResult: '', runs: 0,
+}
+
+const WEEKDAYS = ['週一', '週二', '週三', '週四', '週五', '週六', '週日']
+
+/** 下一次什麼時候跑。看得到時間才知道設定有沒有生效 */
+function whenNext(ts: number): string {
+  if (!ts) return ''
+  const d = new Date(ts * 1000)
+  const mins = Math.round((d.getTime() - Date.now()) / 60000)
+  const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  if (mins < 1) return '即將執行'
+  if (mins < 60) return `${mins} 分鐘後（${clock}）`
+  if (mins < 60 * 24) return `${Math.round(mins / 60)} 小時後（${clock}）`
+  return `${Math.round(mins / 1440)} 天後（${clock}）`
+}
+
 export default function Console() {
   useLang()
   const [input, setInput] = useState('')
@@ -61,8 +106,15 @@ export default function Console() {
   const [replyTo, setReplyTo] = useState<string | null>(null)
   const [replyText, setReplyText] = useState('')
   const [replyBusy, setReplyBusy] = useState(false)
+  /** 一件跑完才派下一件。預設開著 —— 多個 agent 同時改同一批檔案會互相蓋掉 */
+  const [serial, setSerial] = useState(() => localStorage.getItem('ac_serial') !== '0')
+  const [batch, setBatch] = useState<{ total: number; done: number; running: boolean; current: string } | null>(null)
+  const [jobs, setJobs] = useState<SchedJob[]>([])
+  const [showSched, setShowSched] = useState(false)
+  const [draft, setDraft] = useState<SchedJob | null>(null)
   const [history, setHistory] = useState<string[]>([])
   // 展開中的派工與它的產出。派出去卻看不到結果，等於白派。
+  useEffect(() => { localStorage.setItem('ac_serial', serial ? '1' : '0') }, [serial])
   const [openLog, setOpenLog] = useState<string | null>(null)
   const [logText, setLogText] = useState<Record<string, string>>({})
   const boxRef = useRef<HTMLTextAreaElement>(null)
@@ -77,6 +129,11 @@ export default function Console() {
     const pull = () => {
       fetch('/api/dispatches').then((r) => (r.ok ? r.json() : null))
         .then((d) => d?.dispatches && setDispatches(d.dispatches))
+        .catch(() => {})
+      fetch('/api/dispatch/batch').then((r) => (r.ok ? r.json() : null))
+        .then((d) => d && setBatch(d)).catch(() => {})
+      fetch('/api/schedules').then((r) => (r.ok ? r.json() : null))
+        .then((d) => d?.jobs && setJobs(d.jobs))
         .catch(() => {})
     }
     pull()
@@ -116,24 +173,30 @@ export default function Console() {
     setPlanning(false)
   }
 
-  /** 逐件派出。序列而非並行 —— 同時開四個 agent 搶同一批檔案是災難 */
+  /**
+   * 把整批交給伺服器排隊，不要在前端跑迴圈。
+   *
+   * 原本這裡是 for + await fetch('/api/dispatch')，註解還寫著
+   * 「序列而非並行 —— 同時開四個 agent 搶同一批檔案是災難」。
+   * 但那個 await 只等到 HTTP 回應，而伺服器是 Popen 之後立刻回傳 ——
+   * 迴圈一秒內就把四件全派出去了，正好造成它自己警告的那件事。
+   * 而且迴圈跑在元件裡，切到別的分頁就 unmount，佇列直接消失。
+   *
+   * 現在整批丟給伺服器，它會等前一件的行程真的結束才派下一件，
+   * 跟前端在不在完全無關。
+   */
   const runAll = async (list: Step[]) => {
-    for (let i = 0; i < list.length; i++) {
-      setSteps((s) => s.map((x, j) => (j === i ? { ...x, state: 'sending' } : x)))
-      try {
-        const r = await fetch('/api/dispatch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ task: list[i].task, tool: list[i].tool }),
-        })
-        const d = await r.json()
-        setSteps((s) => s.map((x, j) => (j === i
-          ? { ...x, state: d.ok ? 'sent' : 'failed', note: d.note || d.error || '', log: d.log }
-          : x)))
-      } catch {
-        setSteps((s) => s.map((x, j) => (j === i
-          ? { ...x, state: 'failed', note: t('控制 API 無回應') } : x)))
-      }
+    setSteps((s) => s.map((x) => ({ ...x, state: 'sending' })))
+    try {
+      const d = await fetch('/api/dispatch/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ steps: list.map((x) => ({ tool: x.tool, task: x.task })), serial }),
+      }).then((r) => r.json())
+      setSteps((s) => s.map((x) => ({ ...x, state: d.ok ? 'sent' : 'failed', note: d.note || d.error || '' })))
+      setNote(d.ok ? (d.note || '') : `⚠️ ${d.error}`)
+    } catch {
+      setSteps((s) => s.map((x) => ({ ...x, state: 'failed', note: t('控制 API 無回應') })))
     }
   }
 
@@ -167,6 +230,37 @@ export default function Console() {
       setNote(t('⚠️ 控制 API 無回應'))
     }
     setReplyBusy(false)
+  }
+
+  const saveJob = async (j: SchedJob) => {
+    const r = await fetch('/api/schedule/save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(j),
+    }).then((x) => x.json()).catch(() => ({ ok: false, error: t('控制 API 無回應') }))
+    setNote(r.ok ? t('已存好，到時間就會自己跑') : `⚠️ ${r.error}`)
+    if (r.ok) setDraft(null)
+    pullSched()
+  }
+
+  const deleteJob = async (id: string) => {
+    if (!confirm(t('刪掉這個定時工作？已經派出去的不受影響。'))) return
+    await fetch('/api/schedule/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }),
+    }).catch(() => {})
+    pullSched()
+  }
+
+  /** 立刻跑一次。設定完馬上驗證得到，不用等到明天早上 */
+  const runJobNow = async (id: string) => {
+    const r = await fetch('/api/schedule/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }),
+    }).then((x) => x.json()).catch(() => ({ ok: false, error: t('控制 API 無回應') }))
+    setNote(r.ok ? (r.note || t('已派出')) : `⚠️ ${r.error}`)
+    pullSched()
+  }
+
+  const pullSched = () => {
+    fetch('/api/schedules').then((r) => (r.ok ? r.json() : null))
+      .then((d) => d?.jobs && setJobs(d.jobs)).catch(() => {})
   }
 
   const loadLog = async (id: string) => {
@@ -205,6 +299,13 @@ export default function Console() {
           <label className="ml-auto flex items-center gap-1 text-[11px] text-mute2">
             <input type="checkbox" checked={autoRun} onChange={(e) => setAutoRun(e.target.checked)} />
             {t('省略確認，拆完直接派')}
+          </label>
+          <label
+            className="flex cursor-pointer items-center gap-1.5 text-[11px] text-mute2"
+            title={t('一件跑完才派下一件。關掉會同時派出 —— 多個 AI 改同一批檔案會互相蓋掉')}
+          >
+            <input type="checkbox" checked={serial} onChange={(e) => setSerial(e.target.checked)} />
+            {t('一件一件跑')}
           </label>
         </div>
         <textarea
@@ -279,7 +380,7 @@ export default function Console() {
                     disabled={s.state !== 'idle'}
                     onChange={(e) => editStep(i, { tool: e.target.value })}
                   >
-                    {['claude', 'codex', 'qwen', 'grok', 'local'].map((tl) => (
+                    {TOOLS.map((tl) => (
                       <option key={tl} value={tl}>{tl}</option>
                     ))}
                   </select>
@@ -310,6 +411,155 @@ export default function Console() {
           </div>
         </div>
       )}
+
+      {batch?.running && (
+        <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] dark:border-amber-700/60 dark:bg-amber-950/40">
+          <div className="flex items-center gap-2">
+            <span className="inline-block h-2 w-2 flex-none animate-pulse rounded-full bg-amber-400" />
+            <span className="text-amber-700 dark:text-amber-200">
+              {t('派工佇列：第 {a} / {b} 件', { a: batch.done + 1, b: batch.total })}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-mute2">{batch.current}</span>
+          </div>
+          <div className="mt-1 h-1 overflow-hidden rounded bg-elev">
+            <div className="h-full bg-amber-400" style={{ width: `${Math.round((batch.done / Math.max(1, batch.total)) * 100)}%` }} />
+          </div>
+        </div>
+      )}
+
+      {/* ── 定時工作 ── */}
+      <div className="rounded border border-line bg-panel p-3">
+        <div className="mb-2 flex items-center gap-2">
+          <button
+            className="text-xs font-medium tracking-widest text-mute"
+            onClick={() => setShowSched((v) => !v)}
+          >
+            {showSched ? '▾' : '▸'} {t('⏰ 定時工作')}
+          </button>
+          {jobs.filter((j) => j.enabled).length > 0 && (
+            <span className="rounded bg-emerald-100 px-1.5 text-[10px] text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+              {t('{n} 件啟用中', { n: jobs.filter((j) => j.enabled).length })}
+            </span>
+          )}
+          {showSched && (
+            <button
+              className="ml-auto rounded border border-line2 px-2 py-0.5 text-[11px] text-mute hover:bg-elev"
+              onClick={() => setDraft({ ...NEW_JOB })}
+            >
+              {t('＋ 新增')}
+            </button>
+          )}
+        </div>
+
+        {showSched && jobs.length === 0 && !draft && (
+          <div className="text-[11px] text-mute3">
+            {t('還沒有定時工作。設定一次之後它會自己跑，不用你在場。')}
+          </div>
+        )}
+
+        {showSched && jobs.map((j) => (
+          <div key={j.id} className="flex items-center gap-2 border-t border-line py-1.5 text-[11px] first:border-t-0">
+            <input
+              type="checkbox"
+              checked={j.enabled}
+              title={t('暫停 / 啟用')}
+              onChange={(e) => void saveJob({ ...j, enabled: e.target.checked })}
+            />
+            <span className="w-28 flex-none truncate font-medium text-ink3">{j.name}</span>
+            <span className="w-20 flex-none text-mute2">{j.desc}</span>
+            <span className="w-16 flex-none text-mute3">{j.tool}</span>
+            <span className="min-w-0 flex-1 truncate text-mute3" title={j.task}>{j.task}</span>
+            <span className="flex-none text-mute2">
+              {j.enabled ? whenNext(j.nextRun) : t('已暫停')}
+            </span>
+            <button className="flex-none text-mute2 hover:text-ink3" title={t('立刻跑一次')} onClick={() => void runJobNow(j.id)}>▶</button>
+            <button className="flex-none text-mute2 hover:text-ink3" title={t('編輯')} onClick={() => setDraft(j)}>✎</button>
+            <button className="flex-none text-mute3 hover:text-red-500" title={t('刪除')} onClick={() => void deleteJob(j.id)}>✕</button>
+          </div>
+        ))}
+
+        {showSched && draft && (
+          <div className="mt-2 rounded border border-line2 bg-app p-2">
+            <input
+              className="mb-1 w-full rounded border border-line2 bg-panel px-2 py-1 text-[11px] outline-none focus:border-line3"
+              placeholder={t('名稱（例如：每天早上整理進度）')}
+              value={draft.name}
+              onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+            />
+            <textarea
+              className="mb-1 w-full resize-none rounded border border-line2 bg-panel px-2 py-1 text-[11px] outline-none focus:border-line3"
+              rows={2}
+              placeholder={t('要做的事。可以直接指名，例如「用 codex 檢查最近的改動」')}
+              value={draft.task}
+              onChange={(e) => setDraft({ ...draft, task: e.target.value })}
+            />
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+              <select
+                className="rounded border border-line2 bg-panel px-1 py-0.5"
+                value={draft.tool}
+                onChange={(e) => setDraft({ ...draft, tool: e.target.value })}
+              >
+                {TOOLS.map((tl) => <option key={tl} value={tl}>{tl}</option>)}
+              </select>
+              <select
+                className="rounded border border-line2 bg-panel px-1 py-0.5"
+                value={draft.kind}
+                onChange={(e) => setDraft({ ...draft, kind: e.target.value as SchedJob['kind'] })}
+              >
+                <option value="interval">{t('每隔一段時間')}</option>
+                <option value="daily">{t('每天')}</option>
+                <option value="weekly">{t('每週')}</option>
+              </select>
+              {draft.kind === 'interval' ? (
+                <>
+                  <input
+                    type="number" min={1} max={1440}
+                    className="w-16 rounded border border-line2 bg-panel px-1 py-0.5"
+                    value={draft.everyMinutes}
+                    onChange={(e) => setDraft({ ...draft, everyMinutes: +e.target.value || 60 })}
+                  />
+                  <span className="text-mute2">{t('分鐘')}</span>
+                </>
+              ) : (
+                <>
+                  {draft.kind === 'weekly' && (
+                    <select
+                      className="rounded border border-line2 bg-panel px-1 py-0.5"
+                      value={draft.weekday}
+                      onChange={(e) => setDraft({ ...draft, weekday: +e.target.value })}
+                    >
+                      {WEEKDAYS.map((w, i) => <option key={w} value={i}>{t(w)}</option>)}
+                    </select>
+                  )}
+                  <input
+                    type="number" min={0} max={23}
+                    className="w-12 rounded border border-line2 bg-panel px-1 py-0.5"
+                    value={draft.hour}
+                    onChange={(e) => setDraft({ ...draft, hour: Math.min(23, Math.max(0, +e.target.value || 0)) })}
+                  />
+                  <span className="text-mute2">:</span>
+                  <input
+                    type="number" min={0} max={59}
+                    className="w-12 rounded border border-line2 bg-panel px-1 py-0.5"
+                    value={draft.minute}
+                    onChange={(e) => setDraft({ ...draft, minute: Math.min(59, Math.max(0, +e.target.value || 0)) })}
+                  />
+                </>
+              )}
+              <button
+                className="ml-auto rounded bg-ink px-2 py-0.5 text-invink disabled:opacity-50"
+                disabled={!draft.task.trim()}
+                onClick={() => void saveJob(draft)}
+              >
+                {t('存起來')}
+              </button>
+              <button className="rounded border border-line2 px-2 py-0.5 text-mute" onClick={() => setDraft(null)}>
+                {t('取消')}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* ── 執行追蹤 ── */}
       <div className="rounded border border-line bg-panel p-3">
