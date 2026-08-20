@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import BattleScene from '@/components/BattleScene'
 import { itemLabel, t, useLang } from '@/i18n'
+import { useReadable } from '@/theme'
 import { DUNGEONS, RARITY_ORDER, SKILLS_OF_LINE, SKILL_BY_ID, ZONES } from '@/rpg/data'
 import {
   activeLoadout, attrLeft, autoEquipBest, collect, computeStats, isUpgrade,
@@ -38,7 +39,7 @@ const LINE_COLOR: Record<Line, string> = {
 function Bar({ v, max, color, h = 6 }: { v: number; max: number; color: string; h?: number }) {
   const pct = max > 0 ? Math.max(0, Math.min(100, (v / max) * 100)) : 0
   return (
-    <div className="w-full overflow-hidden rounded-sm bg-zinc-950" style={{ height: h }}>
+    <div className="w-full overflow-hidden rounded-sm bg-app" style={{ height: h }}>
       <div style={{ width: `${pct}%`, height: '100%', background: color, transition: 'width .25s' }} />
     </div>
   )
@@ -86,19 +87,20 @@ function ItemIcon({ it, size = 22 }: { it: Item; size?: number }) {
 }
 
 function ItemLine({ it, dim }: { it: Item; dim?: boolean }) {
+  const tone = useReadable()
   return (
     <div className={dim ? 'opacity-60' : ''}>
-      <span style={{ color: RARITY_COLOR[it.rarity] }}>
-        {it.unique && <span className="mr-0.5 text-amber-300">★</span>}
+      <span style={{ color: tone(RARITY_COLOR[it.rarity]) }}>
+        {it.unique && <span className="mr-0.5 text-amber-700 dark:text-amber-300">★</span>}
         {itemLabel(it.name)}
-        {!!it.plus && <span className="ml-0.5 text-amber-300">+{it.plus}</span>}
+        {!!it.plus && <span className="ml-0.5 text-amber-700 dark:text-amber-300">+{it.plus}</span>}
       </span>
-      <span className="ml-1 text-zinc-500">
+      <span className="ml-1 text-mute2">
         ({t(RARITY_NAME[it.rarity])} · iLv{it.ilvl}
         {it.atk ? ` · ${t('攻')}${it.atk}` : ''}{it.def ? ` · ${t('防')}${it.def}` : ''})
       </span>
       {it.affixes.length > 0 && (
-        <span className="ml-1 text-emerald-400/80">
+        <span className="ml-1 text-emerald-700 dark:text-emerald-400/80">
           {it.affixes.map((a) => `${t(AFFIX_NAME[a.key])}+${AFFIX_PCT.includes(a.key) ? `${(a.value * 100).toFixed(1)}%` : a.value}`).join(' ')}
         </span>
       )}
@@ -125,6 +127,8 @@ function PetIcon({ art }: { art: string }) {
 
 export default function Adventure({ tools }: Props) {
   useLang()   // 語言一換就重繪
+  // 資料驅動的色票是照深底挑的，亮色主題下要壓暗才讀得清楚
+  const tone = useReadable()
   const [hero, setHero] = useState<Hero>(() => loadHero())
   const [battle, setBattle] = useState<Battle | null>(null)
   const [auto, setAuto] = useState(true)
@@ -579,65 +583,65 @@ export default function Adventure({ tools }: Props) {
   const allSides: Combatant[] = battle ? [battle.hero, ...battle.allies] : []
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto bg-zinc-950 p-3 text-zinc-200">
+    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto bg-app p-3 text-ink2">
       {notice && (
-        <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-sm text-amber-200">{notice}</div>
+        <div className="rounded border border-amber-300 dark:border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-sm text-amber-700 dark:text-amber-200">{notice}</div>
       )}
 
       <div className="flex flex-wrap gap-3">
         {/* ── 角色 ── */}
-        <div className="min-w-64 flex-1 rounded border border-zinc-800 bg-zinc-900 p-3">
+        <div className="min-w-64 flex-1 rounded border border-line bg-panel p-3">
           <div className="mb-2 flex items-baseline gap-2">
             <span className="text-sm font-bold">{t(hero.name)}</span>
-            <span className="text-xs text-zinc-400">Lv.{hero.level}</span>
-            <span className="ml-auto text-xs text-amber-300">🪙 {hero.gold}</span>
+            <span className="text-xs text-mute">Lv.{hero.level}</span>
+            <span className="ml-auto text-xs text-amber-700 dark:text-amber-300">🪙 {hero.gold}</span>
           </div>
           {/* 外觀只影響用哪組圖，不動任何數值，所以隨時可以換 */}
           <div className="mb-2 flex items-center gap-1 text-[10px]">
-            <span className="text-zinc-500">{t('外觀')}</span>
+            <span className="text-mute2">{t('外觀')}</span>
             {([['hero', t('男')], ['heroine', t('女')]] as const).map(([look, label]) => (
               <button
                 key={look}
                 className={`rounded px-2 py-0.5 ${hero.look === look
-                  ? 'bg-zinc-100 text-zinc-900' : 'border border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}
+                  ? 'bg-ink text-invink' : 'border border-line2 text-mute hover:bg-elev'}`}
                 onClick={() => update((h) => { h.look = look })}
               >
                 {label}
               </button>
             ))}
           </div>
-          <div className="mb-1 text-[10px] text-zinc-500">{t('經驗')} {hero.xp} / {xpNeed}</div>
+          <div className="mb-1 text-[10px] text-mute2">{t('經驗')} {hero.xp} / {xpNeed}</div>
           <Bar v={hero.xp} max={xpNeed} color="#a78bfa" />
-          <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs text-zinc-400">
-            <div>{t('生命')} <span className="text-zinc-200">{stats.hpMax}</span></div>
-            <div>{t('魔力')} <span className="text-zinc-200">{stats.mpMax}</span></div>
-            <div>{t('攻擊')} <span className="text-zinc-200">{stats.atk}</span></div>
-            <div>{t('防禦')} <span className="text-zinc-200">{stats.def}</span></div>
-            <div>{t('暴擊')} <span className="text-zinc-200">{(stats.crit * 100).toFixed(1)}%</span></div>
-            <div>{t('急速')} <span className="text-zinc-200">{(stats.haste * 100).toFixed(1)}%</span></div>
+          <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs text-mute">
+            <div>{t('生命')} <span className="text-ink2">{stats.hpMax}</span></div>
+            <div>{t('魔力')} <span className="text-ink2">{stats.mpMax}</span></div>
+            <div>{t('攻擊')} <span className="text-ink2">{stats.atk}</span></div>
+            <div>{t('防禦')} <span className="text-ink2">{stats.def}</span></div>
+            <div>{t('暴擊')} <span className="text-ink2">{(stats.crit * 100).toFixed(1)}%</span></div>
+            <div>{t('急速')} <span className="text-ink2">{(stats.haste * 100).toFixed(1)}%</span></div>
           </div>
-          <div className="mt-2 border-t border-zinc-800 pt-2">
-            <div className="mb-1 text-[10px] text-zinc-500">{t('屬性點：{n}（這一套）', { n: attrPts })}</div>
+          <div className="mt-2 border-t border-line pt-2">
+            <div className="mb-1 text-[10px] text-mute2">{t('屬性點：{n}（這一套）', { n: attrPts })}</div>
             <div className="flex flex-wrap gap-1.5">
               {ATTRS.map((a) => (
                 <button
                   key={a}
-                  className="rounded border border-zinc-700 px-1.5 py-0.5 text-xs hover:bg-zinc-800 disabled:opacity-40"
+                  className="rounded border border-line2 px-1.5 py-0.5 text-xs hover:bg-elev disabled:opacity-60 dark:disabled:opacity-40"
                   disabled={attrPts <= 0}
                   onClick={() => addAttr(a)}
                 >
-                  {t(ATTR_NAME[a])} {stats.attrs[a]} <span className="text-emerald-400">+</span>
+                  {t(ATTR_NAME[a])} {stats.attrs[a]} <span className="text-emerald-700 dark:text-emerald-400">+</span>
                 </button>
               ))}
             </div>
           </div>
-          <div className="mt-2 border-t border-zinc-800 pt-2">
-            <div className="mb-1 text-[10px] text-zinc-500">{t('套裝（裝備 + 技能 + 屬性整組切換）')}</div>
+          <div className="mt-2 border-t border-line pt-2">
+            <div className="mb-1 text-[10px] text-mute2">{t('套裝（裝備 + 技能 + 屬性整組切換）')}</div>
             <div className="flex gap-1.5">
               {hero.loadouts.map((l, i) => (
                 <button
                   key={i}
-                  className={`flex-1 rounded px-2 py-1 text-xs ${i === hero.active ? 'bg-zinc-100 text-zinc-900' : 'border border-zinc-700 text-zinc-300 hover:bg-zinc-800'}`}
+                  className={`flex-1 rounded px-2 py-1 text-xs ${i === hero.active ? 'bg-ink text-invink' : 'border border-line2 text-ink3 hover:bg-elev'}`}
                   onClick={() => update((h) => { h.active = i })}
                 >
                   {t(l.name)}
@@ -645,29 +649,29 @@ export default function Adventure({ tools }: Props) {
               ))}
             </div>
           </div>
-          <div className="mt-2 flex items-center justify-between text-[10px] text-zinc-600">
+          <div className="mt-2 flex items-center justify-between text-[10px] text-mute3">
             <span>{t('擊殺')} {hero.kills} · {t('陣亡')} {hero.deaths}</span>
-            <button className="hover:text-zinc-300" onClick={() => { if (confirm(t('重置角色與存檔？'))) { setHero(resetHero()); setBattle(null) } }}>{t('重置')}</button>
+            <button className="hover:text-ink3" onClick={() => { if (confirm(t('重置角色與存檔？'))) { setHero(resetHero()); setBattle(null) } }}>{t('重置')}</button>
           </div>
         </div>
 
         {/* ── 戰鬥 ── */}
-        <div className="min-w-80 flex-[2] rounded border border-zinc-800 bg-zinc-900 p-3">
+        <div className="min-w-80 flex-[2] rounded border border-line bg-panel p-3">
           <div className="mb-2 flex flex-wrap items-center gap-2">
-            <span className="text-xs font-medium tracking-widest text-zinc-400">{t('⚔️ 戰鬥')}</span>
+            <span className="text-xs font-medium tracking-widest text-mute">{t('⚔️ 戰鬥')}</span>
             <button
-              className={`rounded px-2 py-0.5 text-xs ${auto ? 'bg-emerald-600 text-white' : 'border border-zinc-700 text-zinc-400'}`}
+              className={`rounded px-2 py-0.5 text-xs ${auto ? 'bg-emerald-600 text-white' : 'border border-line2 text-mute'}`}
               onClick={() => setAuto((v) => !v)}
             >
               {auto ? t('沉浸自動') : t('手動操作')}
             </button>
             {battle && !battle.over && (
-              <button className="rounded border border-zinc-700 px-2 py-0.5 text-xs text-zinc-400 hover:bg-zinc-800" onClick={() => setBattle(null)}>
+              <button className="rounded border border-line2 px-2 py-0.5 text-xs text-mute hover:bg-elev" onClick={() => setBattle(null)}>
                 {t('撤退')}
               </button>
             )}
             {battle && (
-              <span className="ml-auto text-[10px] text-zinc-500">
+              <span className="ml-auto text-[10px] text-mute2">
                 {battle.kind === 'dungeon'
                   ? t('第 {room}/{rooms} 間', { room: battle.room, rooms: battle.rooms })
                   : t('野外')} · {t('回合')} {battle.tick}
@@ -676,7 +680,7 @@ export default function Adventure({ tools }: Props) {
           </div>
 
           {!battle && (
-            <div className="py-6 text-center text-xs text-zinc-500">{t('選一個地方出發，或先去配點與換裝')}</div>
+            <div className="py-6 text-center text-xs text-mute2">{t('選一個地方出發，或先去配點與換裝')}</div>
           )}
 
           {battle && (
@@ -688,9 +692,9 @@ export default function Adventure({ tools }: Props) {
               <div className="mb-2 flex flex-wrap gap-x-4 gap-y-0.5 text-[11px]">
                 {allSides.map((c) => (
                   <span key={c.uid} className="flex items-center gap-1">
-                    <span style={{ color: c.color }}>{t(c.name)}</span>
-                    <span className="text-zinc-500">{c.hp}/{c.hpMax}</span>
-                    {c.mpMax > 0 && <span className="text-sky-400/80">MP {c.mp}</span>}
+                    <span style={{ color: tone(c.color) }}>{t(c.name)}</span>
+                    <span className="text-mute2">{c.hp}/{c.hpMax}</span>
+                    {c.mpMax > 0 && <span className="text-sky-700 dark:text-sky-400/80">MP {c.mp}</span>}
                   </span>
                 ))}
               </div>
@@ -705,15 +709,15 @@ export default function Adventure({ tools }: Props) {
                       onClick={() => focusOn(f.uid)}
                       title={t('點選集火。再點一次取消')}
                       className={`rounded border px-2 py-1 text-[11px] ${
-                        focused ? 'border-amber-400 bg-amber-400/15 text-amber-200'
-                          : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
+                        focused ? 'border-amber-400 bg-amber-100 dark:bg-amber-400/15 text-amber-700 dark:text-amber-200'
+                          : 'border-line2 text-mute hover:bg-elev'
                       }`}
                     >
                       {focused && '🎯 '}
-                      {f.elite && <span className="text-amber-300">★</span>}
+                      {f.elite && <span className="text-amber-700 dark:text-amber-300">★</span>}
                       {t(f.name)}
-                      <span className="ml-1 text-zinc-500">{f.hp}/{f.hpMax}</span>
-                      {charging && <span className="ml-1 animate-pulse text-red-400">{t('蓄力中！')}</span>}
+                      <span className="ml-1 text-mute2">{f.hp}/{f.hpMax}</span>
+                      {charging && <span className="ml-1 animate-pulse text-red-700 dark:text-red-400">{t('蓄力中！')}</span>}
                     </button>
                   )
                 })}
@@ -723,14 +727,14 @@ export default function Adventure({ tools }: Props) {
               {!auto && (
                 <div className="mb-1 text-[11px]">
                   {battle.phase === 'input'
-                    ? <span className="text-emerald-400">{t('▶ 輪到你了，選一個行動')}</span>
-                    : <span className="text-zinc-500">{t('結算中…')}</span>}
+                    ? <span className="text-emerald-700 dark:text-emerald-400">{t('▶ 輪到你了，選一個行動')}</span>
+                    : <span className="text-mute2">{t('結算中…')}</span>}
                 </div>
               )}
               <div className="mb-2 flex flex-wrap items-center gap-1.5" role="group" aria-label={t('戰鬥指令')}>
                 {!auto && (
                   <button
-                    className="rounded border border-zinc-500 px-2 py-1 text-xs disabled:opacity-40"
+                    className="rounded border border-line4 px-2 py-1 text-xs disabled:opacity-60 dark:disabled:opacity-40"
                     title={t('快捷鍵：空白或 0')}
                     aria-keyshortcuts="0 Space"
                     disabled={battle.over || battle.phase !== 'input'}
@@ -748,23 +752,23 @@ export default function Adventure({ tools }: Props) {
                       key={id}
                       title={`${t(sk.desc)}${sk.mpCost ? `  ·  MP ${sk.mpCost}` : ''}${auto ? '' : t('  ·  快捷鍵 {k}', { k: i + 1 })}`}
                       aria-keyshortcuts={auto ? undefined : String(i + 1)}
-                      className="rounded border px-2 py-1 text-xs disabled:opacity-40"
-                      style={{ borderColor: LINE_COLOR[sk.line] }}
+                      className="rounded border px-2 py-1 text-xs disabled:opacity-60 dark:disabled:opacity-40"
+                      style={{ borderColor: tone(LINE_COLOR[sk.line]) }}
                       disabled={cd > 0 || noMp || battle.over || (!auto && battle.phase !== 'input')}
                       onClick={() => castSkill(id)}
                     >
                       {t(sk.name)}
-                      {cd > 0 && <span className="ml-0.5 text-zinc-500">{cd}</span>}
+                      {cd > 0 && <span className="ml-0.5 text-mute2">{cd}</span>}
                       {cd === 0 && noMp && <span className="ml-0.5 text-sky-500/70">MP</span>}
                     </button>
                   )
                 })}
 
-                <span className="mx-1 h-4 w-px bg-zinc-700" />
+                <span className="mx-1 h-4 w-px bg-elev2" />
 
                 <button
-                  className={`rounded border px-2 py-1 text-xs disabled:opacity-40 ${
-                    battle.guarding ? 'border-sky-400 bg-sky-400/15 text-sky-200' : 'border-zinc-600 text-zinc-300'
+                  className={`rounded border px-2 py-1 text-xs disabled:opacity-60 dark:disabled:opacity-40 ${
+                    battle.guarding ? 'border-sky-400 bg-sky-100 dark:bg-sky-400/15 text-sky-700 dark:text-sky-200' : 'border-line3 text-ink3'
                   }`}
                   title={t('擋下下一次攻擊的大半傷害。王蓄力時特別有用') + (auto ? '' : t('  ·  快捷鍵 G'))}
                   aria-keyshortcuts={auto ? undefined : 'g'}
@@ -775,7 +779,7 @@ export default function Adventure({ tools }: Props) {
                 </button>
 
                 <button
-                  className="rounded border border-rose-700/70 px-2 py-1 text-xs text-rose-200 disabled:opacity-40"
+                  className="rounded border border-rose-300 dark:border-rose-700/70 px-2 py-1 text-xs text-rose-700 dark:text-rose-200 disabled:opacity-60 dark:disabled:opacity-40"
                   title={auto ? undefined : t('快捷鍵 H')}
                   aria-keyshortcuts={auto ? undefined : 'h'}
                   disabled={battle.over || hero.potions.hp <= 0 || battle.hero.hp >= battle.hero.hpMax}
@@ -784,7 +788,7 @@ export default function Adventure({ tools }: Props) {
                   🧪 {t('生命藥水')} ×{hero.potions.hp}
                 </button>
                 <button
-                  className="rounded border border-sky-700/70 px-2 py-1 text-xs text-sky-200 disabled:opacity-40"
+                  className="rounded border border-sky-300 dark:border-sky-700/70 px-2 py-1 text-xs text-sky-700 dark:text-sky-200 disabled:opacity-60 dark:disabled:opacity-40"
                   title={auto ? undefined : t('快捷鍵 M')}
                   aria-keyshortcuts={auto ? undefined : 'm'}
                   disabled={battle.over || hero.potions.mp <= 0 || battle.hero.mp >= battle.hero.mpMax}
@@ -795,31 +799,31 @@ export default function Adventure({ tools }: Props) {
               </div>
 
               {!auto && (
-                <div className="mb-2 text-[10px] text-zinc-600">
+                <div className="mb-2 text-[10px] text-mute3">
                   {t('鍵盤：1–9 技能 · 0/空白 普攻 · G 格擋 · H/M 藥水 · Tab 換目標')}
                 </div>
               )}
               <div
-                className="max-h-40 overflow-y-auto rounded bg-zinc-950 p-2 font-mono text-[11px] leading-5"
+                className="max-h-40 overflow-y-auto rounded bg-app p-2 font-mono text-[11px] leading-5"
                 role="log"
                 aria-live="polite"
                 aria-label={t('戰鬥紀錄')}
               >
                 {[...battle.log].reverse().map((l, i) => (
                   <div key={i} className={
-                    l.kind === 'crit' ? 'text-amber-300'
-                      : l.kind === 'loot' ? 'text-emerald-400'
-                      : l.kind === 'heal' ? 'text-sky-300'
-                      : l.kind === 'death' ? 'text-red-400'
-                      : l.kind === 'info' ? 'text-zinc-400'
-                      : 'text-zinc-300'
+                    l.kind === 'crit' ? 'text-amber-700 dark:text-amber-300'
+                      : l.kind === 'loot' ? 'text-emerald-700 dark:text-emerald-400'
+                      : l.kind === 'heal' ? 'text-sky-700 dark:text-sky-300'
+                      : l.kind === 'death' ? 'text-red-700 dark:text-red-400'
+                      : l.kind === 'info' ? 'text-mute'
+                      : 'text-ink3'
                   }>{l.text}</div>
                 ))}
               </div>
               {battle.over && (
-                <div className="mt-2 text-center text-xs text-zinc-400">
+                <div className="mt-2 text-center text-xs text-mute">
                   {battle.result === 'win' ? t('🏆 通關！') : t('💀 全滅')}
-                  <button className="ml-2 rounded border border-zinc-700 px-2 py-0.5 hover:bg-zinc-800" onClick={() => setBattle(null)}>{t('返回')}</button>
+                  <button className="ml-2 rounded border border-line2 px-2 py-0.5 hover:bg-elev" onClick={() => setBattle(null)}>{t('返回')}</button>
                 </div>
               )}
             </>
@@ -827,17 +831,17 @@ export default function Adventure({ tools }: Props) {
         </div>
 
         {/* ── 隊伍 ── */}
-        <div className="min-w-56 flex-1 rounded border border-zinc-800 bg-zinc-900 p-3">
+        <div className="min-w-56 flex-1 rounded border border-line bg-panel p-3">
           <div className="mb-2 flex items-center gap-2">
-            <span className="text-xs font-medium tracking-widest text-zinc-400">{t('🤝 AI 夥伴')}</span>
+            <span className="text-xs font-medium tracking-widest text-mute">{t('🤝 AI 夥伴')}</span>
             <button
-              className="ml-auto rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+              className="ml-auto rounded border border-line2 px-2 py-0.5 text-[10px] text-mute hover:bg-elev"
               onClick={() => setParty(autoParty(4))}
             >
               {t('自動組隊')}
             </button>
             {party.length > 0 && (
-              <button className="rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800" onClick={() => setParty([])}>
+              <button className="rounded border border-line2 px-2 py-0.5 text-[10px] text-mute hover:bg-elev" onClick={() => setParty([])}>
                 {t('解散')}
               </button>
             )}
@@ -855,31 +859,31 @@ export default function Adventure({ tools }: Props) {
                   key={r.id}
                   title={`${t(k.desc)} · ${t(ALLY_CAT_NAME[k.cat])} · ${t(ALLY_ROLE_NAME[k.role])}`
                     + ` · Lv.${r.level} ${r.xp}/${recruitXpForLevel(r.level)}`}
-                  className={`flex items-center gap-1.5 rounded border px-2 py-1 text-left text-xs ${joined ? 'border-emerald-600 bg-emerald-950/40' : 'border-zinc-800 hover:bg-zinc-800'}`}
+                  className={`flex items-center gap-1.5 rounded border px-2 py-1 text-left text-xs ${joined ? 'border-emerald-300 dark:border-emerald-600 bg-emerald-50 dark:bg-emerald-950/40' : 'border-line hover:bg-elev'}`}
                   onClick={() => setParty((p) => (joined ? p.filter((x) => x !== r.id) : [...p, r.id]))}
                 >
-                  <span className="h-2 w-2 flex-none rounded-full" style={{ background: k.color }} />
-                  <span className="flex-none font-medium" style={{ color: k.cat === 'human' ? RARITY_COLOR[k.rarity] : undefined }}>{t(k.name)}</span>
-                  <span className="flex-none rounded px-1 text-[9px]" style={{ color: ALLY_ROLE_COLOR[k.role], border: `1px solid ${ALLY_ROLE_COLOR[k.role]}55` }}>
+                  <span className="h-2 w-2 flex-none rounded-full" style={{ background: tone(k.color) }} />
+                  <span className="flex-none font-medium" style={{ color: k.cat === 'human' ? tone(RARITY_COLOR[k.rarity]) : undefined }}>{t(k.name)}</span>
+                  <span className="flex-none rounded px-1 text-[9px]" style={{ color: tone(ALLY_ROLE_COLOR[k.role]), border: `1px solid ${tone(ALLY_ROLE_COLOR[k.role])}55` }}>
                     {t(ALLY_ROLE_NAME[k.role])}
                   </span>
-                  <span className="flex-none text-[10px]" style={{ color: LINE_COLOR[k.line] }}>{t(LINE_NAME[k.line])}</span>
-                  <span className="flex-none text-[10px] text-zinc-400">Lv.{r.level}</span>
-                  <span className="ml-auto truncate text-[10px] text-zinc-500">{tail}</span>
+                  <span className="flex-none text-[10px]" style={{ color: tone(LINE_COLOR[k.line]) }}>{t(LINE_NAME[k.line])}</span>
+                  <span className="flex-none text-[10px] text-mute">Lv.{r.level}</span>
+                  <span className="ml-auto truncate text-[10px] text-mute2">{tail}</span>
                 </button>
               )
             })}
           </div>
-          <div className="mt-2 text-[10px] text-zinc-600">{t('隊伍 {n} 人（含你）', { n: party.length + 1 })}</div>
+          <div className="mt-2 text-[10px] text-mute3">{t('隊伍 {n} 人（含你）', { n: party.length + 1 })}</div>
 
           {/* ── 寵物 ── */}
-          <div className="mt-3 border-t border-zinc-800 pt-2">
+          <div className="mt-3 border-t border-line pt-2">
             <div className="mb-1 flex items-center gap-2">
-              <span className="text-xs font-medium tracking-widest text-zinc-400">{t('🐾 寵物')}</span>
-              <span className="text-[10px] text-zinc-600">{t('打王有機會遇到')}</span>
+              <span className="text-xs font-medium tracking-widest text-mute">{t('🐾 寵物')}</span>
+              <span className="text-[10px] text-mute3">{t('打王有機會遇到')}</span>
             </div>
             {hero.pets.length === 0 && (
-              <div className="text-[11px] text-zinc-600">{t('還沒有寵物。去打地城的王試試')}</div>
+              <div className="text-[11px] text-mute3">{t('還沒有寵物。去打地城的王試試')}</div>
             )}
             <div className="flex flex-col gap-1">
               {hero.pets.map((p) => {
@@ -890,14 +894,14 @@ export default function Adventure({ tools }: Props) {
                     title={t(p.desc)}
                     onClick={() => update((h) => { h.activePet = h.activePet === p.id ? undefined : p.id })}
                     className={`flex items-center gap-2 rounded border px-2 py-1 text-left text-[11px] ${
-                      on ? 'border-pink-400/70 bg-pink-400/10' : 'border-zinc-800 hover:bg-zinc-800'
+                      on ? 'border-pink-400/70 bg-pink-100 dark:bg-pink-400/10' : 'border-line hover:bg-elev'
                     }`}
                   >
                     <PetIcon art={p.art} />
-                    <span className={on ? 'text-pink-200' : 'text-zinc-300'}>{t(p.name)}</span>
-                    <span className="text-zinc-500">Lv.{p.level}</span>
-                    <span className="text-zinc-600">{p.xp}/{petXpForLevel(p.level)}</span>
-                    {on && <span className="ml-auto text-pink-300">{t('出戰中')}</span>}
+                    <span className={on ? 'text-pink-700 dark:text-pink-200' : 'text-ink3'}>{t(p.name)}</span>
+                    <span className="text-mute2">Lv.{p.level}</span>
+                    <span className="text-mute3">{p.xp}/{petXpForLevel(p.level)}</span>
+                    {on && <span className="ml-auto text-pink-700 dark:text-pink-300">{t('出戰中')}</span>}
                   </button>
                 )
               })}
@@ -907,26 +911,26 @@ export default function Adventure({ tools }: Props) {
       </div>
 
       {/* ── 出發地點 ── */}
-      <div className="rounded border border-zinc-800 bg-zinc-900 p-3">
-        <div className="mb-2 text-xs font-medium tracking-widest text-zinc-400">{t('🗺️ 出發')}</div>
+      <div className="rounded border border-line bg-panel p-3">
+        <div className="mb-2 text-xs font-medium tracking-widest text-mute">{t('🗺️ 出發')}</div>
         <div className="flex flex-wrap gap-2">
           {ZONES.map((z) => (
             <button
               key={z.id}
               title={t(z.desc)}
-              className="rounded border border-zinc-700 px-2.5 py-1 text-xs hover:bg-zinc-800 disabled:opacity-40"
+              className="rounded border border-line2 px-2.5 py-1 text-xs hover:bg-elev disabled:opacity-60 dark:disabled:opacity-40"
               disabled={hero.level < z.minLevel}
               onClick={() => enterZone(z.id)}
             >
-              {t(z.name)} <span className="text-zinc-500">Lv.{z.minLevel}+</span>
+              {t(z.name)} <span className="text-mute2">Lv.{z.minLevel}+</span>
             </button>
           ))}
-          <span className="mx-1 w-px bg-zinc-700" />
+          <span className="mx-1 w-px bg-elev2" />
           {DUNGEONS.map((d) => (
             <button
               key={d.id}
               title={`${t(d.desc)}${t('（需要 {n} 人）', { n: d.partySize })}`}
-              className="rounded border border-amber-700/60 px-2.5 py-1 text-xs text-amber-200 hover:bg-amber-950/40 disabled:opacity-40"
+              className="rounded border border-amber-300 dark:border-amber-700/60 px-2.5 py-1 text-xs text-amber-700 dark:text-amber-200 hover:bg-amber-950/40 disabled:opacity-60 dark:disabled:opacity-40"
               onClick={() => enterDungeon(d.id)}
             >
               🏰 {t(d.name)} <span className="text-amber-500/70">Lv.{d.minLevel}+ · {t('{n}人', { n: d.partySize })}</span>
@@ -936,7 +940,7 @@ export default function Adventure({ tools }: Props) {
       </div>
 
       {/* ── 技能 / 裝備 / 背包 ── */}
-      <div className="rounded border border-zinc-800 bg-zinc-900 p-3">
+      <div className="rounded border border-line bg-panel p-3">
         <div className="mb-2 flex gap-2">
           {([
             ['skills', t('技能（{n} 點）', { n: skillPts })],
@@ -948,7 +952,7 @@ export default function Adventure({ tools }: Props) {
           ] as const).map(([k, label]) => (
             <button
               key={k}
-              className={`rounded px-2.5 py-1 text-xs ${tab === k ? 'bg-zinc-100 text-zinc-900' : 'border border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}
+              className={`rounded px-2.5 py-1 text-xs ${tab === k ? 'bg-ink text-invink' : 'border border-line2 text-mute hover:bg-elev'}`}
               onClick={() => setTab(k)}
             >{label}</button>
           ))}
@@ -958,8 +962,8 @@ export default function Adventure({ tools }: Props) {
           <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
             {LINES.map((line) => (
               <div key={line}>
-                <div className="mb-1 text-xs font-bold" style={{ color: LINE_COLOR[line] }}>
-                  {t(LINE_NAME[line])} <span className="text-zinc-500">{t('已投 {n} 點', { n: linePoints(lo, line) })}</span>
+                <div className="mb-1 text-xs font-bold" style={{ color: tone(LINE_COLOR[line]) }}>
+                  {t(LINE_NAME[line])} <span className="text-mute2">{t('已投 {n} 點', { n: linePoints(lo, line) })}</span>
                 </div>
                 <div className="flex flex-col gap-1">
                   {SKILLS_OF_LINE(line).map((sk) => {
@@ -969,13 +973,13 @@ export default function Adventure({ tools }: Props) {
                       <button
                         key={sk.id}
                         title={`${t(sk.desc)}${open ? '' : t('（需要 {line} 投入 {n} 點）', { line: t(LINE_NAME[line]), n: sk.req })}`}
-                        className="flex items-center gap-1.5 rounded border border-zinc-800 px-2 py-1 text-left text-xs hover:bg-zinc-800 disabled:opacity-40"
+                        className="flex items-center gap-1.5 rounded border border-line px-2 py-1 text-left text-xs hover:bg-elev disabled:opacity-60 dark:disabled:opacity-40"
                         disabled={!open || skillPts <= 0 || lv >= sk.maxLv}
                         onClick={() => addSkill(sk.id)}
                       >
-                        <span className={open ? '' : 'text-zinc-600'}>{t(sk.name)}</span>
-                        <span className="ml-auto text-zinc-500">{lv}/{sk.maxLv}</span>
-                        {open && skillPts > 0 && lv < sk.maxLv && <span className="text-emerald-400">+</span>}
+                        <span className={open ? '' : 'text-mute3'}>{t(sk.name)}</span>
+                        <span className="ml-auto text-mute2">{lv}/{sk.maxLv}</span>
+                        {open && skillPts > 0 && lv < sk.maxLv && <span className="text-emerald-700 dark:text-emerald-400">+</span>}
                       </button>
                     )
                   })}
@@ -990,13 +994,13 @@ export default function Adventure({ tools }: Props) {
             {SLOTS.map((s) => {
               const it = itemById(hero, lo.equipped[s])
               return (
-                <div key={s} className="flex items-center gap-2 rounded border border-zinc-800 px-2 py-1 text-xs">
-                  {it ? <ItemIcon it={it} /> : <span className="inline-block h-[22px] w-[22px] flex-none rounded-sm bg-zinc-950" />}
-                  <span className="w-12 flex-none text-zinc-500">{t(SLOT_NAME[s])}</span>
+                <div key={s} className="flex items-center gap-2 rounded border border-line px-2 py-1 text-xs">
+                  {it ? <ItemIcon it={it} /> : <span className="inline-block h-[22px] w-[22px] flex-none rounded-sm bg-app" />}
+                  <span className="w-12 flex-none text-mute2">{t(SLOT_NAME[s])}</span>
                   <div className="min-w-0 flex-1 truncate">
-                    {it ? <ItemLine it={it} /> : <span className="text-zinc-600">{t('（空）')}</span>}
+                    {it ? <ItemLine it={it} /> : <span className="text-mute3">{t('（空）')}</span>}
                   </div>
-                  {it && <button className="flex-none text-zinc-500 hover:text-zinc-200" onClick={() => unequip(s)}>{t('卸下')}</button>}
+                  {it && <button className="flex-none text-mute2 hover:text-ink2" onClick={() => unequip(s)}>{t('卸下')}</button>}
                 </div>
               )
             })}
@@ -1006,34 +1010,34 @@ export default function Adventure({ tools }: Props) {
         {tab === 'bag' && (
           <>
             {/* 篩選列 */}
-            <div className="mb-2 flex flex-wrap items-center gap-2 border-b border-zinc-800 pb-2 text-xs">
+            <div className="mb-2 flex flex-wrap items-center gap-2 border-b border-line pb-2 text-xs">
               <select
-                className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5"
+                className="rounded border border-line2 bg-panel px-1.5 py-0.5"
                 value={fSlot} onChange={(e) => setFSlot(e.target.value as Slot | 'all')}
               >
                 <option value="all">{t('全部部位')}</option>
                 {SLOTS.map((s2) => <option key={s2} value={s2}>{t(SLOT_NAME[s2])}</option>)}
               </select>
               <select
-                className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5"
+                className="rounded border border-line2 bg-panel px-1.5 py-0.5"
                 value={fRarity} onChange={(e) => setFRarity(e.target.value as Rarity | 'all')}
               >
                 <option value="all">{t('全部品質')}</option>
                 {RARITY_ORDER.map((r) => <option key={r} value={r}>{t(RARITY_NAME[r])}</option>)}
               </select>
               <select
-                className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5"
+                className="rounded border border-line2 bg-panel px-1.5 py-0.5"
                 value={fSort} onChange={(e) => setFSort(e.target.value as 'score' | 'ilvl' | 'rarity')}
               >
                 <option value="score">{t('依分數')}</option>
                 <option value="ilvl">{t('依等級')}</option>
                 <option value="rarity">{t('依品質')}</option>
               </select>
-              <label className="flex items-center gap-1 text-zinc-400">
+              <label className="flex items-center gap-1 text-mute">
                 <input type="checkbox" checked={fUpgrade} onChange={(e) => setFUpgrade(e.target.checked)} />
                 {t('只看可升級')}
               </label>
-              <span className="text-zinc-600">{bagView.length} / {hero.bag.length}</span>
+              <span className="text-mute3">{bagView.length} / {hero.bag.length}</span>
               <button
                 className="ml-auto rounded bg-emerald-700 px-2 py-0.5 text-white hover:bg-emerald-600"
                 onClick={equipBest}
@@ -1041,7 +1045,7 @@ export default function Adventure({ tools }: Props) {
                 {t('⚡ 一鍵擇優裝備')}
               </button>
               <button
-                className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-400 hover:bg-zinc-800"
+                className="rounded border border-line2 px-2 py-0.5 text-mute hover:bg-elev"
                 title={t('每個部位保留最好的三件與裝備中的，其餘賣掉')}
                 onClick={sellJunk}
               >
@@ -1050,22 +1054,22 @@ export default function Adventure({ tools }: Props) {
             </div>
 
             <div className="flex max-h-72 flex-col gap-1 overflow-y-auto">
-              {hero.bag.length === 0 && <div className="text-xs text-zinc-500">{t('背包空空的，去打點怪吧')}</div>}
+              {hero.bag.length === 0 && <div className="text-xs text-mute2">{t('背包空空的，去打點怪吧')}</div>}
               {hero.bag.length > 0 && bagView.length === 0 && (
-                <div className="text-xs text-zinc-500">{t('沒有符合篩選條件的裝備')}</div>
+                <div className="text-xs text-mute2">{t('沒有符合篩選條件的裝備')}</div>
               )}
               {bagView.map((it) => {
                 const equipped = Object.values(lo.equipped).includes(it.id)
                 const better = !equipped && isUpgrade(hero, it)
                 return (
-                  <div key={it.id} className="flex items-center gap-2 rounded border border-zinc-800 px-2 py-1 text-xs">
+                  <div key={it.id} className="flex items-center gap-2 rounded border border-line px-2 py-1 text-xs">
                     <ItemIcon it={it} />
-                    <span className="w-12 flex-none text-zinc-500">{t(SLOT_NAME[it.slot])}</span>
+                    <span className="w-12 flex-none text-mute2">{t(SLOT_NAME[it.slot])}</span>
                     <div className="min-w-0 flex-1 truncate"><ItemLine it={it} dim={equipped} /></div>
-                    {better && <span className="flex-none text-emerald-400" title={t('比目前裝著的好')}>▲</span>}
-                    <span className="flex-none text-zinc-600">{itemScore(it)}</span>
+                    {better && <span className="flex-none text-emerald-700 dark:text-emerald-400" title={t('比目前裝著的好')}>▲</span>}
+                    <span className="flex-none text-mute3">{itemScore(it)}</span>
                     <button
-                      className="flex-none text-amber-400/90 hover:text-amber-300 disabled:opacity-30"
+                      className="flex-none text-amber-700 dark:text-amber-400/90 hover:text-amber-300 disabled:opacity-50 dark:disabled:opacity-30"
                       disabled={(it.plus ?? 0) >= MAX_PLUS}
                       title={t('強化到 +{p}：成功 {s}%，碎裂 {d}%，費用 {g} 金', {
                         p: (it.plus ?? 0) + 1,
@@ -1077,14 +1081,14 @@ export default function Adventure({ tools }: Props) {
                     >⚒</button>
                     {!!(hero.tickets?.protect ?? 0) && odds(it.plus ?? 0, hero).destroy > 0 && (
                       <button
-                        className="flex-none text-sky-400/90 hover:text-sky-300"
+                        className="flex-none text-sky-700 dark:text-sky-400/90 hover:text-sky-300"
                         title={t('用一張保護符強化：失敗也不會碎（剩 {n} 張）', { n: hero.tickets?.protect ?? 0 })}
                         onClick={() => doEnhance(it, true)}
                       >🛡️</button>
                     )}
-                    {!equipped && <button className="flex-none text-emerald-400 hover:text-emerald-300" onClick={() => equip(it)}>{t('裝備')}</button>}
-                    {!equipped && <button className="flex-none text-zinc-500 hover:text-red-400" onClick={() => sell(it)}>{t('賣')}</button>}
-                    {equipped && <span className="flex-none text-zinc-600">{t('使用中')}</span>}
+                    {!equipped && <button className="flex-none text-emerald-700 dark:text-emerald-400 hover:text-emerald-300" onClick={() => equip(it)}>{t('裝備')}</button>}
+                    {!equipped && <button className="flex-none text-mute2 hover:text-red-400" onClick={() => sell(it)}>{t('賣')}</button>}
+                    {equipped && <span className="flex-none text-mute3">{t('使用中')}</span>}
                   </div>
                 )
               })}
@@ -1094,7 +1098,7 @@ export default function Adventure({ tools }: Props) {
 
         {tab === 'shop' && (
           <>
-            <div className="mb-2 text-[11px] text-zinc-500">
+            <div className="mb-2 text-[11px] text-mute2">
               {t('身上有 {n} 金。價格會隨等級走，所以任何時候都買得起一點東西。', { n: hero.gold })}
             </div>
             <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
@@ -1109,16 +1113,16 @@ export default function Adventure({ tools }: Props) {
                     disabled={!!why}
                     title={t(e.desc)}
                     className={`flex flex-col gap-0.5 rounded border px-2.5 py-2 text-left ${
-                      why ? 'border-zinc-800 opacity-40'
-                        : poor ? 'border-zinc-800 hover:bg-zinc-800'
-                          : 'border-amber-700/50 hover:bg-amber-950/30'}`}
+                      why ? 'border-line opacity-40'
+                        : poor ? 'border-line hover:bg-elev'
+                          : 'border-amber-300 dark:border-amber-700/50 hover:bg-amber-950/30'}`}
                   >
                     <div className="flex items-center gap-1.5 text-xs">
                       <span>{e.icon}</span>
-                      <span className="font-medium text-zinc-200">{t(e.name)}</span>
-                      <span className={`ml-auto ${poor ? 'text-zinc-600' : 'text-amber-300'}`}>🪙 {price}</span>
+                      <span className="font-medium text-ink2">{t(e.name)}</span>
+                      <span className={`ml-auto ${poor ? 'text-mute3' : 'text-amber-700 dark:text-amber-300'}`}>🪙 {price}</span>
                     </div>
-                    <div className="text-[10px] leading-snug text-zinc-500">{why ? t(why) : t(e.desc)}</div>
+                    <div className="text-[10px] leading-snug text-mute2">{why ? t(why) : t(e.desc)}</div>
                   </button>
                 )
               })}
@@ -1128,7 +1132,7 @@ export default function Adventure({ tools }: Props) {
 
         {tab === 'gacha' && (
           <>
-            <div className="mb-2 text-[11px] text-zinc-500">
+            <div className="mb-2 text-[11px] text-mute2">
               {t('券打王與超級菁英會掉，也能在商店買。有券優先用券，沒券才扣金幣。十連付九抽的錢，最後一抽保底稀有。')}
             </div>
             <div className="grid gap-2 md:grid-cols-2">
@@ -1138,21 +1142,21 @@ export default function Adventure({ tools }: Props) {
                 ['gear', t('⚔️ 裝備召喚'), hero.tickets?.gear ?? 0, GEAR_PULL_GOLD, rollGear,
                   t('抽裝備。有低機率直接掉獨一無二的彩蛋裝備')],
               ] as const).map(([key, title, tickets, price, fn, desc]) => (
-                <div key={key} className="rounded border border-zinc-800 bg-zinc-950/50 p-3">
+                <div key={key} className="rounded border border-line bg-app/50 p-3">
                   <div className="mb-1 flex items-center gap-2 text-xs">
-                    <span className="font-medium text-zinc-200">{title}</span>
-                    <span className="ml-auto text-zinc-500">{t('券 {n} 張', { n: tickets })}</span>
+                    <span className="font-medium text-ink2">{title}</span>
+                    <span className="ml-auto text-mute2">{t('券 {n} 張', { n: tickets })}</span>
                   </div>
-                  <div className="mb-2 text-[10px] leading-snug text-zinc-500">{desc}</div>
+                  <div className="mb-2 text-[10px] leading-snug text-mute2">{desc}</div>
                   <div className="flex gap-2">
                     <button
-                      className="flex-1 rounded border border-amber-700/60 px-2 py-1 text-xs text-amber-200 hover:bg-amber-950/40"
+                      className="flex-1 rounded border border-amber-300 dark:border-amber-700/60 px-2 py-1 text-xs text-amber-700 dark:text-amber-200 hover:bg-amber-950/40"
                       onClick={() => fn(1)}
                     >
                       {tickets >= 1 ? t('單抽（用券）') : t('單抽 🪙{n}', { n: price })}
                     </button>
                     <button
-                      className="flex-1 rounded border border-amber-700/60 px-2 py-1 text-xs text-amber-200 hover:bg-amber-950/40"
+                      className="flex-1 rounded border border-amber-300 dark:border-amber-700/60 px-2 py-1 text-xs text-amber-700 dark:text-amber-200 hover:bg-amber-950/40"
                       onClick={() => fn(TEN)}
                     >
                       {tickets >= TEN ? t('十連（用券）') : t('十連 🪙{n}', { n: tenCost(price) })}
@@ -1162,13 +1166,13 @@ export default function Adventure({ tools }: Props) {
               ))}
             </div>
             {pulls.length > 0 && (
-              <div className="mt-3 border-t border-zinc-800 pt-2">
-                <div className="mb-1 text-[10px] tracking-widest text-zinc-500">{t('抽卡結果')}</div>
+              <div className="mt-3 border-t border-line pt-2">
+                <div className="mb-1 text-[10px] tracking-widest text-mute2">{t('抽卡結果')}</div>
                 <div className="grid gap-1 md:grid-cols-2 lg:grid-cols-5">
                   {pulls.map((r, i) => (
-                    <div key={i} className="rounded border border-zinc-800 px-2 py-1 text-[11px]">
-                      <div className="truncate" style={{ color: r.color }}>{r.label}</div>
-                      <div className="truncate text-[10px] text-zinc-500">{r.note}</div>
+                    <div key={i} className="rounded border border-line px-2 py-1 text-[11px]">
+                      <div className="truncate" style={{ color: tone(r.color) }}>{r.label}</div>
+                      <div className="truncate text-[10px] text-mute2">{r.note}</div>
                     </div>
                   ))}
                 </div>
@@ -1179,7 +1183,7 @@ export default function Adventure({ tools }: Props) {
 
         {tab === 'secret' && (
           <>
-            <div className="mb-2 text-[11px] text-zinc-500">
+            <div className="mb-2 text-[11px] text-mute2">
               {t('藏起來的常駐技能。條件都做得到，但不會不小心達成 —— 沒解鎖時只給線索，自己去湊。')}
             </div>
             <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
@@ -1188,22 +1192,22 @@ export default function Adventure({ tools }: Props) {
                 return (
                   <div
                     key={sc.id}
-                    className={`rounded border px-2.5 py-2 ${got ? 'border-violet-500/60 bg-violet-950/25' : 'border-zinc-800'}`}
+                    className={`rounded border px-2.5 py-2 ${got ? 'border-violet-300 dark:border-violet-500/60 bg-violet-50 dark:bg-violet-950/25' : 'border-line'}`}
                   >
                     <div className="flex items-center gap-1.5 text-xs">
                       <span>{got ? '🔮' : '🔒'}</span>
-                      <span className={got ? 'font-medium text-violet-200' : 'text-zinc-500'}>
+                      <span className={got ? 'font-medium text-violet-700 dark:text-violet-200' : 'text-mute2'}>
                         {got ? t(sc.name) : t('？？？')}
                       </span>
                     </div>
-                    <div className="mt-0.5 text-[10px] leading-snug text-zinc-500">
+                    <div className="mt-0.5 text-[10px] leading-snug text-mute2">
                       {got ? t(sc.desc) : t(sc.hint)}
                     </div>
                   </div>
                 )
               })}
             </div>
-            <div className="mt-2 text-[10px] text-zinc-600">
+            <div className="mt-2 text-[10px] text-mute3">
               {t('目前：連續陣亡 {a} · 暴擊 {b} · 超級菁英 {c} · 無藥水通關 {d} · 強化碎裂 {e}', {
                 a: hero.tally?.deathStreak ?? 0, b: hero.tally?.crits ?? 0,
                 c: hero.tally?.superKills ?? 0, d: hero.tally?.cleanClears ?? 0,

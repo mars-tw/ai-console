@@ -37,27 +37,27 @@ export default class ErrorBoundary extends Component<Props, State> {
     const { error, stack } = this.state
     if (!error) return this.props.children
     return (
-      <div className="flex min-h-screen items-center justify-center bg-zinc-950 p-6 text-zinc-200">
-        <div className="w-full max-w-2xl rounded border border-red-900/60 bg-zinc-900 p-5">
-          <div className="mb-2 text-sm font-medium text-red-300">
+      <div className="flex min-h-screen items-center justify-center bg-app p-6 text-ink2">
+        <div className="w-full max-w-2xl rounded border border-red-300 dark:border-red-900/60 bg-panel p-5">
+          <div className="mb-2 text-sm font-medium text-red-700 dark:text-red-300">
             {t('這個畫面出錯了')}
           </div>
-          <p className="mb-3 text-xs leading-relaxed text-zinc-400">
+          <p className="mb-3 text-xs leading-relaxed text-mute">
             {t('資料還在，沒有東西被刪掉。重新整理通常就好；如果每次都出錯，把下面這段訊息記下來。')}
           </p>
-          <pre className="max-h-56 overflow-auto rounded bg-zinc-950 p-3 text-[11px] leading-relaxed text-zinc-400">
+          <pre className="max-h-56 overflow-auto rounded bg-app p-3 text-[11px] leading-relaxed text-mute">
             {error.message}
             {stack && `\n${stack.trim().split('\n').slice(0, 8).join('\n')}`}
           </pre>
           <div className="mt-3 flex gap-2">
             <button
-              className="rounded bg-zinc-100 px-3 py-1 text-xs text-zinc-900 hover:bg-white"
+              className="rounded bg-ink px-3 py-1 text-xs text-invink hover:bg-white"
               onClick={() => location.reload()}
             >
               {t('重新整理')}
             </button>
             <button
-              className="rounded border border-zinc-700 px-3 py-1 text-xs text-zinc-400 hover:bg-zinc-800"
+              className="rounded border border-line2 px-3 py-1 text-xs text-mute hover:bg-elev"
               onClick={() => this.setState({ error: null, stack: '' })}
             >
               {t('試著繼續')}

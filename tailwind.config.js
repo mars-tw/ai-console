@@ -5,6 +5,25 @@ module.exports = {
   theme: {
     extend: {
       colors: {
+        // 語意色。三個原本寫死深色的分頁（主控台/辦公室/冒險）改用這一組，
+        // 換主題只要動 index.css 的變數，元件不用再碰。
+        // 不用「亮色時把 zinc 反過來」是因為對話頁本來就寫好了 dark: 配對，
+        // 而且它有深底反白的按鈕用裸的 zinc，反過來會壞。
+        app: "rgb(var(--c-app) / <alpha-value>)",
+        panel: "rgb(var(--c-panel) / <alpha-value>)",
+        elev: "rgb(var(--c-elev) / <alpha-value>)",
+        elev2: "rgb(var(--c-elev2) / <alpha-value>)",
+        line: "rgb(var(--c-line) / <alpha-value>)",
+        line2: "rgb(var(--c-line2) / <alpha-value>)",
+        line3: "rgb(var(--c-line3) / <alpha-value>)",
+        line4: "rgb(var(--c-line4) / <alpha-value>)",
+        ink: "rgb(var(--c-ink) / <alpha-value>)",
+        ink2: "rgb(var(--c-ink2) / <alpha-value>)",
+        ink3: "rgb(var(--c-ink3) / <alpha-value>)",
+        mute: "rgb(var(--c-mute) / <alpha-value>)",
+        mute2: "rgb(var(--c-mute2) / <alpha-value>)",
+        mute3: "rgb(var(--c-mute3) / <alpha-value>)",
+        invink: "rgb(var(--c-invink) / <alpha-value>)",
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",

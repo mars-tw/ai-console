@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import PixelOffice from '@/components/PixelOffice'
 import { SKINS } from '@/pixel/sprites'
 import { t, useLang } from '@/i18n'
+import { useReadable } from '@/theme'
 import { isLive, look, stateOf } from '@/lib/dispatchState'
 import type { ConversationSummary, DispatchRecord, HubProject, ToolStatus } from '@/types/data'
 
@@ -34,7 +35,7 @@ function DragonFace({ agent, size = 32 }: { agent: string; size?: number }) {
   const zoom = 2.4                       // 放大倍率，讓圓框內主要是頭部
   return (
     <div
-      className="flex-none overflow-hidden rounded-full border border-white/40 bg-zinc-800/80"
+      className="flex-none overflow-hidden rounded-full border border-white/40 bg-elev/80"
       style={{
         width: size, height: size,
         backgroundImage: `url(/office/sprites/${agent}.png)`,
@@ -89,7 +90,8 @@ interface AuditReport {
 }
 
 export default function Office({ tools, projects, conversations, onDispatch, busyId }: Props) {
-  useLang()   // 語言一換就重繪
+  useLang()
+  const tone = useReadable()   // 語言一換就重繪
   const [chatWith, setChatWith] = useState<string | null>(null)
   const [agentMsgs, setAgentMsgs] = useState<Record<string, ChatMsg[]>>({})
   const [agentInput, setAgentInput] = useState('')
@@ -203,34 +205,34 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   ]
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-zinc-950">
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-app">
       {/* ── 像素辦公室 ── */}
       <PixelOffice tools={tools} dispatches={dispatches} onPick={setChatWith} />
 
       {/* 狀態圖例 */}
-      <div className="flex flex-none flex-wrap items-center gap-x-4 gap-y-1 border-t border-zinc-800 bg-zinc-950 px-4 py-2 text-xs text-zinc-400">
+      <div className="flex flex-none flex-wrap items-center gap-x-4 gap-y-1 border-t border-line bg-app px-4 py-2 text-xs text-mute">
         {legend.map(([col, label, hint]) => (
           <span key={label} className="flex items-center gap-1.5" title={hint}>
-            <span className="inline-block h-2 w-2 rounded-full" style={{ background: col }} />
+            <span className="inline-block h-2 w-2 rounded-full" style={{ background: tone(col) }} />
             {label}
           </span>
         ))}
-        <span className="ml-auto text-zinc-600">{t('點角色開對話')}</span>
+        <span className="ml-auto text-mute3">{t('點角色開對話')}</span>
       </div>
 
       {/* ── 中控 + 任務排程 ── */}
-      <div className="flex flex-none flex-wrap gap-3 border-t border-zinc-800 bg-zinc-900 px-4 py-3">
+      <div className="flex flex-none flex-wrap gap-3 border-t border-line bg-panel px-4 py-3">
         {/* 中控對話框 */}
-        <div className="min-w-72 flex-1 rounded border border-zinc-700 bg-zinc-800 p-3">
-          <div className="mb-2 text-xs font-medium tracking-widest text-zinc-400">{t('🎛️ 中控指揮台')}</div>
-          <div className="mb-2 max-h-36 overflow-y-auto rounded bg-zinc-950 p-2 font-mono text-xs leading-5 text-zinc-300">
-            {cmdLog.length === 0 && <span className="text-zinc-600">{t('下指令給全體或指定夥伴，例如「整理今天的工作進度」…')}</span>}
+        <div className="min-w-72 flex-1 rounded border border-line2 bg-elev p-3">
+          <div className="mb-2 text-xs font-medium tracking-widest text-mute">{t('🎛️ 中控指揮台')}</div>
+          <div className="mb-2 max-h-36 overflow-y-auto rounded bg-app p-2 font-mono text-xs leading-5 text-ink3">
+            {cmdLog.length === 0 && <span className="text-mute3">{t('下指令給全體或指定夥伴，例如「整理今天的工作進度」…')}</span>}
             {cmdLog.map((l, i) => <div key={i} className="whitespace-pre-wrap break-all">{l}</div>)}
-            {cmdBusy && <div className="text-zinc-500">{t('派工中…')}</div>}
+            {cmdBusy && <div className="text-mute2">{t('派工中…')}</div>}
           </div>
           <div className="flex gap-2">
             <select
-              className="rounded border border-zinc-600 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-200"
+              className="rounded border border-line3 bg-panel px-2 py-1.5 text-xs text-ink2"
               value={cmdTool}
               onChange={(e) => setCmdTool(e.target.value)}
             >
@@ -242,14 +244,14 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
               <option value="local">{t('地端（LM Studio）')}</option>
             </select>
             <input
-              className="min-w-0 flex-1 rounded border border-zinc-600 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 outline-none focus:border-zinc-400"
+              className="min-w-0 flex-1 rounded border border-line3 bg-panel px-3 py-1.5 text-sm text-ink outline-none focus:border-line4"
               placeholder={t('輸入指令，Enter 派出…')}
               value={cmdInput}
               onChange={(e) => setCmdInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') sendCommand() }}
             />
             <button
-              className="rounded bg-amber-500 px-4 py-1.5 text-sm font-medium text-zinc-900 hover:bg-amber-400 disabled:opacity-40"
+              className="rounded bg-amber-500 px-4 py-1.5 text-sm font-medium text-invink hover:bg-amber-400 disabled:opacity-60 dark:disabled:opacity-40"
               disabled={cmdBusy}
               onClick={sendCommand}
             >
@@ -263,10 +265,10 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
               {liveDispatches.map((d) => {
                 const lk = look(stateOf(d))
                 return (
-                  <div key={d.id} className="flex items-center gap-2 rounded bg-zinc-950 px-2 py-1 text-xs" title={d.result || ''}>
+                  <div key={d.id} className="flex items-center gap-2 rounded bg-app px-2 py-1 text-xs" title={d.result || ''}>
                     <span className={`inline-block h-2 w-2 flex-none rounded-full ${lk.dot}`} />
-                    <span className="flex-none font-medium text-zinc-300">{d.tool}</span>
-                    <span className="min-w-0 flex-1 truncate text-zinc-500">{d.task}</span>
+                    <span className="flex-none font-medium text-ink3">{d.tool}</span>
+                    <span className="min-w-0 flex-1 truncate text-mute2">{d.task}</span>
                     <span className={`flex-none ${lk.tone}`}>{lk.label}</span>
                   </div>
                 )
@@ -274,44 +276,44 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
             </div>
           )}
           {dispatches.length > 0 && liveDispatches.length === 0 && (
-            <div className="mt-2 text-[11px] text-zinc-600">
+            <div className="mt-2 text-[11px] text-mute3">
               {t('目前沒有進行中的派工（最近 {n} 件都結束了）', { n: dispatches.length })}
             </div>
           )}
           {/* 稽核列 */}
-          <div className="mt-2 flex items-center gap-2 border-t border-zinc-700 pt-2 text-xs">
+          <div className="mt-2 flex items-center gap-2 border-t border-line2 pt-2 text-xs">
             <button
-              className="rounded border border-zinc-600 px-2 py-1 text-zinc-300 hover:bg-zinc-700 disabled:opacity-40"
+              className="rounded border border-line3 px-2 py-1 text-ink3 hover:bg-elev2 disabled:opacity-60 dark:disabled:opacity-40"
               disabled={auditBusy}
               onClick={runAudit}
             >
               {auditBusy ? t('稽核中…') : t('🔍 執行稽核')}
             </button>
             {audit && (
-              <span className="text-zinc-400">
+              <span className="text-mute">
                 {t('站點')} ✅{audit.summary.sites_ok} / ⚠️{audit.summary.sites_partial} / ❌{audit.summary.sites_empty}
                 ・{t('文章')} {audit.summary.articles}/{audit.summary.expected_articles}
                 ・{t('{n} 字', { n: audit.summary.words.toLocaleString() })}
                 ・{t('派工 log {n} 份有錯', { n: audit.dispatch_logs.filter((l) => l.errors.length > 0).length })}
-                <span className="text-zinc-600">（{audit.generated_at.slice(5, 16)}）</span>
+                <span className="text-mute3">（{audit.generated_at.slice(5, 16)}）</span>
               </span>
             )}
           </div>
         </div>
-        <div className="min-w-72 flex-1 rounded border border-zinc-700 bg-zinc-800 p-3">
-          <div className="mb-2 text-xs font-medium tracking-widest text-zinc-400">{t('📋 任務排程區')}</div>
-          {queue.length === 0 && <div className="text-xs text-zinc-500">{t('目前沒有進行中的工作 🎉')}</div>}
+        <div className="min-w-72 flex-1 rounded border border-line2 bg-elev p-3">
+          <div className="mb-2 text-xs font-medium tracking-widest text-mute">{t('📋 任務排程區')}</div>
+          {queue.length === 0 && <div className="text-xs text-mute2">{t('目前沒有進行中的工作 🎉')}</div>}
           <div className="flex max-h-44 flex-col gap-1.5 overflow-y-auto">
             {queue.map((p) => {
               const conv = findConvFor(p.project_id)
               return (
-                <div key={p.project_id} className="flex items-center gap-2 rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs">
-                  <span className="font-medium text-zinc-100">{p.title}</span>
-                  {p.needs_handoff && <span className="rounded bg-amber-400/20 px-1 py-0.5 text-amber-300">{t('待接力')}</span>}
-                  <span className="min-w-0 flex-1 truncate text-zinc-400" title={p.next_step}>{p.next_step || t('（無下一步）')}</span>
+                <div key={p.project_id} className="flex items-center gap-2 rounded border border-line2 bg-panel px-2.5 py-1.5 text-xs">
+                  <span className="font-medium text-ink">{p.title}</span>
+                  {p.needs_handoff && <span className="rounded bg-amber-100 dark:bg-amber-400/20 px-1 py-0.5 text-amber-700 dark:text-amber-300">{t('待接力')}</span>}
+                  <span className="min-w-0 flex-1 truncate text-mute" title={p.next_step}>{p.next_step || t('（無下一步）')}</span>
                   {conv && (
                     <button
-                      className="flex-none rounded border border-zinc-600 px-2 py-0.5 text-zinc-200 hover:bg-zinc-700 disabled:opacity-40"
+                      className="flex-none rounded border border-line3 px-2 py-0.5 text-ink2 hover:bg-elev2 disabled:opacity-60 dark:disabled:opacity-40"
                       disabled={busyId === conv.id}
                       onClick={() => onDispatch(conv)}
                     >
@@ -326,15 +328,15 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
       </div>
 
       {/* ── 對接總覽（帳號/瀏覽器/技能/全域設定） ── */}
-      <div className="flex-none border-t border-zinc-800 bg-zinc-900 px-4 py-3">
-        <button className="mb-2 flex items-center gap-2 text-xs font-medium tracking-widest text-zinc-400 hover:text-zinc-200" onClick={() => setShowMap((v) => !v)}>
+      <div className="flex-none border-t border-line bg-panel px-4 py-3">
+        <button className="mb-2 flex items-center gap-2 text-xs font-medium tracking-widest text-mute hover:text-ink2" onClick={() => setShowMap((v) => !v)}>
           {showMap ? '▾' : '▸'} {t('🗺️ 對接總覽（哪個工具用哪個帳號、哪個瀏覽器、哪些技能）')}
         </button>
         {showMap && toolMap && (
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
-                <tr className="text-left text-zinc-500">
+                <tr className="text-left text-mute2">
                   <th className="pb-1 pr-3">工具</th>
                   <th className="pb-1 pr-3">帳號</th>
                   <th className="pb-1 pr-3">方案</th>
@@ -348,20 +350,20 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
                   const m = toolMap[key]
                   if (!m) return null
                   return (
-                    <tr key={key} className="border-t border-zinc-800 text-zinc-300">
-                      <td className="py-1.5 pr-3 font-medium" style={{ color: ch.color }}>{ch.name}</td>
+                    <tr key={key} className="border-t border-line text-ink3">
+                      <td className="py-1.5 pr-3 font-medium" style={{ color: tone(ch.color) }}>{ch.name}</td>
                       <td className="py-1.5 pr-3">{m.account?.account || '—'}</td>
                       <td className="py-1.5 pr-3">{[m.account?.plan, m.account?.until ? `至 ${m.account.until}` : ''].filter(Boolean).join(' ') || '—'}</td>
                       <td className="py-1.5 pr-3">{m.browser || '—'}</td>
                       <td className="py-1.5 pr-3" title={(m.skills || []).join('、')}>{m.skills?.length ?? 0} 個</td>
-                      <td className="py-1.5 text-zinc-500">{(m.settings || []).join('、') || '—'}</td>
+                      <td className="py-1.5 text-mute2">{(m.settings || []).join('、') || '—'}</td>
                     </tr>
                   )
                 })}
               </tbody>
             </table>
             {toolMap._governance && (
-              <div className="mt-2 text-xs text-zinc-500">
+              <div className="mt-2 text-xs text-mute2">
                 全域治理技能（.agents，跨工具共享）：{toolMap._governance.skills.join('、') || '無'}
               </div>
             )}
@@ -371,7 +373,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
 
       {/* ── 角色對話框（浮動） ── */}
       {chatWith && (
-        <div className="fixed bottom-4 right-4 z-50 flex h-96 w-80 flex-col rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl">
+        <div className="fixed bottom-4 right-4 z-50 flex h-96 w-80 flex-col rounded-lg border border-line2 bg-panel shadow-2xl">
           <div className="flex flex-none items-center gap-2 rounded-t-lg px-3 py-2" style={{ background: CHARS[chatWith].color }}>
             <DragonFace agent={chatWith} size={32} />
             <span className="text-sm font-bold text-white">{CHARS[chatWith].name}</span>
@@ -380,26 +382,26 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto p-3">
             {(agentMsgs[chatWith] || []).length === 0 && (
-              <p className="text-xs text-zinc-500">跟 {CHARS[chatWith].name} 聊聊，或叫他去工作。</p>
+              <p className="text-xs text-mute2">跟 {CHARS[chatWith].name} 聊聊，或叫他去工作。</p>
             )}
             <div className="flex flex-col gap-2">
               {(agentMsgs[chatWith] || []).map((m, i) => (
-                <div key={i} className={`rounded-lg px-3 py-2 text-sm ${m.role === 'user' ? 'ml-8 bg-zinc-700 text-zinc-100' : 'mr-8 bg-zinc-800 text-zinc-200 border border-zinc-700'}`}>
+                <div key={i} className={`rounded-lg px-3 py-2 text-sm ${m.role === 'user' ? 'ml-8 bg-elev2 text-ink' : 'mr-8 bg-elev text-ink2 border border-line2'}`}>
                   {m.text}
                 </div>
               ))}
-              {chatBusy && <div className="text-xs text-zinc-500">{CHARS[chatWith].name} 思考中…</div>}
+              {chatBusy && <div className="text-xs text-mute2">{CHARS[chatWith].name} 思考中…</div>}
             </div>
           </div>
-          <div className="flex flex-none gap-2 border-t border-zinc-700 p-2">
+          <div className="flex flex-none gap-2 border-t border-line2 p-2">
             <input
-              className="min-w-0 flex-1 rounded border border-zinc-600 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 outline-none"
+              className="min-w-0 flex-1 rounded border border-line3 bg-app px-2 py-1.5 text-sm text-ink outline-none"
               placeholder="說點什麼…"
               value={agentInput}
               onChange={(e) => setAgentInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') sendAgentChat() }}
             />
-            <button className="rounded bg-zinc-100 px-3 text-sm text-zinc-900 hover:bg-white disabled:opacity-40" disabled={chatBusy} onClick={sendAgentChat}>
+            <button className="rounded bg-ink px-3 text-sm text-invink hover:bg-white disabled:opacity-60 dark:disabled:opacity-40" disabled={chatBusy} onClick={sendAgentChat}>
               送出
             </button>
           </div>

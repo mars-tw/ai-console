@@ -348,7 +348,7 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
         `${t(battle.hero.name)} ${battle.hero.hp}/${battle.hero.hpMax}`,
         ...battle.foes.filter((f) => f.hp > 0).map((f) => `${t(f.name)} ${f.hp}/${f.hpMax}`),
       ].join('，')}
-      className="block w-full rounded border border-zinc-800"
+      className="block w-full rounded border border-line"
       style={{ imageRendering: 'pixelated', background: '#0d1220' }}
     />
   )

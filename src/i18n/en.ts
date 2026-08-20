@@ -610,4 +610,7 @@ export const EN: Record<string, string> = {
   '例如：路徑錯了，改用 tools/ 底下那份': 'e.g. wrong path — use the one under tools/',
   '（還沒有輸出）': '(no output yet)',
   '已排隊 {n} 句，這一輪結束後送出': '{n} note(s) queued — will send when this run finishes',
+  '跟隨系統': 'Follow system',
+  '黑色': 'Dark',
+  '亮色': 'Light',
 }

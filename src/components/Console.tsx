@@ -196,20 +196,20 @@ export default function Console() {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto bg-zinc-950 p-3 text-zinc-200">
+    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto bg-app p-3 text-ink2">
       {/* ── 輸入 ── */}
-      <div className="rounded border border-zinc-800 bg-zinc-900 p-3">
+      <div className="rounded border border-line bg-panel p-3">
         <div className="mb-2 flex items-center gap-2">
-          <span className="text-xs font-medium tracking-widest text-zinc-400">{t('🎙️ 主控台')}</span>
-          <span className="text-[11px] text-zinc-600">{t('說一句話，自動決定誰做、怎麼做')}</span>
-          <label className="ml-auto flex items-center gap-1 text-[11px] text-zinc-500">
+          <span className="text-xs font-medium tracking-widest text-mute">{t('🎙️ 主控台')}</span>
+          <span className="text-[11px] text-mute3">{t('說一句話，自動決定誰做、怎麼做')}</span>
+          <label className="ml-auto flex items-center gap-1 text-[11px] text-mute2">
             <input type="checkbox" checked={autoRun} onChange={(e) => setAutoRun(e.target.checked)} />
             {t('省略確認，拆完直接派')}
           </label>
         </div>
         <textarea
           ref={boxRef}
-          className="min-h-16 w-full resize-y rounded border border-zinc-700 bg-transparent px-3 py-2 text-sm outline-none focus:border-zinc-500"
+          className="min-h-16 w-full resize-y rounded border border-line2 bg-transparent px-3 py-2 text-sm outline-none focus:border-line4"
           placeholder={t('例如：把 tools 底下的腳本都加上使用說明，然後跑一次測試')}
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -219,21 +219,21 @@ export default function Console() {
         />
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <button
-            className="rounded bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-900 disabled:opacity-40"
+            className="rounded bg-ink px-3 py-1 text-xs font-medium text-invink disabled:opacity-60 dark:disabled:opacity-40"
             disabled={!input.trim() || planning}
             onClick={makePlan}
           >
             {planning ? t('拆解中…') : t('分析並排程')}
           </button>
-          <span className="text-[11px] text-zinc-600">Ctrl + Enter</span>
-          {note && <span className="text-[11px] text-amber-400/90">{note}</span>}
+          <span className="text-[11px] text-mute3">Ctrl + Enter</span>
+          {note && <span className="text-[11px] text-amber-700 dark:text-amber-400/90">{note}</span>}
         </div>
         {history.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1">
             {history.map((h) => (
               <button
                 key={h}
-                className="max-w-64 truncate rounded bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-400 hover:text-zinc-200"
+                className="max-w-64 truncate rounded bg-elev px-2 py-0.5 text-[11px] text-mute hover:text-ink2"
                 onClick={() => setInput(h)}
               >
                 {h}
@@ -245,22 +245,22 @@ export default function Console() {
 
       {/* ── 計畫 ── */}
       {steps.length > 0 && (
-        <div className="rounded border border-zinc-800 bg-zinc-900 p-3">
+        <div className="rounded border border-line bg-panel p-3">
           <div className="mb-2 flex items-center gap-2">
-            <span className="text-xs font-medium tracking-widest text-zinc-400">
+            <span className="text-xs font-medium tracking-widest text-mute">
               {t('📋 派工計畫（{n} 件）', { n: steps.length })}
             </span>
             <div className="ml-auto flex items-center gap-1.5">
               {failed && !running && (
                 <button
-                  className="rounded border border-amber-600 px-2 py-1 text-xs text-amber-300"
+                  className="rounded border border-amber-300 dark:border-amber-600 px-2 py-1 text-xs text-amber-700 dark:text-amber-300"
                   onClick={retryFailed}
                 >
                   {t('↻ 只重派失敗的')}
                 </button>
               )}
               <button
-                className="rounded bg-emerald-600 px-3 py-1 text-xs font-medium text-white disabled:opacity-40"
+                className="rounded bg-emerald-600 px-3 py-1 text-xs font-medium text-white disabled:opacity-60 dark:disabled:opacity-40"
                 disabled={!pending || running}
                 onClick={() => runAll(steps)}
               >
@@ -270,10 +270,10 @@ export default function Console() {
           </div>
           <div className="flex flex-col gap-2">
             {steps.map((s, i) => (
-              <div key={i} className="rounded border border-zinc-800 p-2">
+              <div key={i} className="rounded border border-line p-2">
                 <div className="mb-1 flex items-center gap-2">
                   <select
-                    className="rounded border border-zinc-700 bg-transparent px-1.5 py-0.5 text-[11px]"
+                    className="rounded border border-line2 bg-transparent px-1.5 py-0.5 text-[11px]"
                     style={{ color: TOOL_COLOR[s.tool] ?? undefined }}
                     value={s.tool}
                     disabled={s.state !== 'idle'}
@@ -283,15 +283,15 @@ export default function Console() {
                       <option key={tl} value={tl}>{tl}</option>
                     ))}
                   </select>
-                  {s.why && <span className="truncate text-[11px] text-zinc-600">{s.why}</span>}
+                  {s.why && <span className="truncate text-[11px] text-mute3">{s.why}</span>}
                   <span className="ml-auto text-[11px]">
-                    {s.state === 'sent' && <span className="text-emerald-400">{t('已派出')}</span>}
-                    {s.state === 'sending' && <span className="text-amber-400">{t('派工中…')}</span>}
-                    {s.state === 'failed' && <span className="text-red-400">{s.note || t('失敗')}</span>}
+                    {s.state === 'sent' && <span className="text-emerald-700 dark:text-emerald-400">{t('已派出')}</span>}
+                    {s.state === 'sending' && <span className="text-amber-700 dark:text-amber-400">{t('派工中…')}</span>}
+                    {s.state === 'failed' && <span className="text-red-700 dark:text-red-400">{s.note || t('失敗')}</span>}
                   </span>
                   {s.state === 'idle' && (
                     <button
-                      className="text-[11px] text-zinc-600 hover:text-red-400"
+                      className="text-[11px] text-mute3 hover:text-red-400"
                       onClick={() => setSteps((x) => x.filter((_, j) => j !== i))}
                     >
                       {t('移除')}
@@ -299,7 +299,7 @@ export default function Console() {
                   )}
                 </div>
                 <textarea
-                  className="w-full resize-y rounded bg-zinc-950 px-2 py-1 text-xs leading-5 text-zinc-300 outline-none disabled:opacity-60"
+                  className="w-full resize-y rounded bg-app px-2 py-1 text-xs leading-5 text-ink3 outline-none disabled:opacity-60"
                   rows={Math.min(6, Math.ceil(s.task.length / 60) + 1)}
                   value={s.task}
                   disabled={s.state !== 'idle'}
@@ -312,17 +312,17 @@ export default function Console() {
       )}
 
       {/* ── 執行追蹤 ── */}
-      <div className="rounded border border-zinc-800 bg-zinc-900 p-3">
+      <div className="rounded border border-line bg-panel p-3">
         <div className="mb-2 flex items-center gap-2">
-          <span className="text-xs font-medium tracking-widest text-zinc-400">{t('🛰️ 派工')}</span>
+          <span className="text-xs font-medium tracking-widest text-mute">{t('🛰️ 派工')}</span>
           {live.length > 0 && (
-            <span className="rounded bg-amber-400/15 px-1.5 text-[10px] text-amber-300">
+            <span className="rounded bg-amber-100 dark:bg-amber-400/15 px-1.5 text-[10px] text-amber-700 dark:text-amber-300">
               {t('{n} 件進行中', { n: live.length })}
             </span>
           )}
           {done.length > 0 && (
             <button
-              className="ml-auto text-[10px] text-zinc-500 hover:text-zinc-300"
+              className="ml-auto text-[10px] text-mute2 hover:text-ink3"
               onClick={() => setShowDone((v) => !v)}
             >
               {showDone ? t('收起已結束（{n}）', { n: done.length }) : t('看已結束（{n}）', { n: done.length })}
@@ -330,42 +330,42 @@ export default function Console() {
           )}
         </div>
         {dispatches.length === 0 && (
-          <div className="text-xs text-zinc-600">{t('目前沒有派工')}</div>
+          <div className="text-xs text-mute3">{t('目前沒有派工')}</div>
         )}
         {dispatches.length > 0 && live.length === 0 && !showDone && (
-          <div className="text-xs text-zinc-600">{t('沒有進行中的派工')}</div>
+          <div className="text-xs text-mute3">{t('沒有進行中的派工')}</div>
         )}
         <div className="flex flex-col gap-1">
           {(showDone ? [...live, ...done] : live).slice(0, 12).map((d) => (
             <div key={d.id}>
               <button
                 onClick={() => loadLog(d.id)}
-                className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-[11px] hover:bg-zinc-800"
+                className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-[11px] hover:bg-elev"
                 title={t('點一下看這次派工的產出')}
               >
-                <span className="w-3 flex-none text-zinc-600">{openLog === d.id ? '▾' : '▸'}</span>
+                <span className="w-3 flex-none text-mute3">{openLog === d.id ? '▾' : '▸'}</span>
                 <span className="w-14 flex-none font-medium" style={{ color: TOOL_COLOR[d.tool] ?? undefined }}>
                   {d.tool}
                 </span>
-                <span className="min-w-0 flex-1 truncate text-zinc-400" title={d.task}>{d.task}</span>
+                <span className="min-w-0 flex-1 truncate text-mute" title={d.task}>{d.task}</span>
                 <span className={`flex-none ${look(stateOf(d)).tone}`}>
                   {look(stateOf(d)).label}
                 </span>
               </button>
               {stateOf(d) === 'running' && (
-                <div className="ml-6 flex items-center gap-2 text-[10px] text-zinc-600">
+                <div className="ml-6 flex items-center gap-2 text-[10px] text-mute3">
                   <span className="inline-block h-1.5 w-1.5 flex-none animate-pulse rounded-full bg-amber-400" />
                   <span className="min-w-0 flex-1 truncate font-mono">{d.tail || t('（還沒有輸出）')}</span>
                   <span className="flex-none">{elapsed(d.started)}</span>
                 </div>
               )}
               {!!d.pending?.length && (
-                <div className="ml-6 text-[10px] text-sky-400/80">
+                <div className="ml-6 text-[10px] text-sky-700 dark:text-sky-400/80">
                   {t('已排隊 {n} 句，這一輪結束後送出', { n: d.pending.length })}
                 </div>
               )}
               <button
-                className="ml-6 text-[10px] text-zinc-500 hover:text-zinc-300"
+                className="ml-6 text-[10px] text-mute2 hover:text-ink3"
                 title={t('工作跑歪了可以在這裡補一句。還在跑的話會排隊，結束後自動送出')}
                 onClick={() => { setReplyTo(replyTo === d.id ? null : d.id); setReplyText('') }}
               >
@@ -375,14 +375,14 @@ export default function Console() {
                 <div className="ml-6 mt-1 flex gap-1">
                   <input
                     autoFocus
-                    className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px] outline-none focus:border-zinc-500"
+                    className="min-w-0 flex-1 rounded border border-line2 bg-app px-2 py-1 text-[11px] outline-none focus:border-line4"
                     placeholder={t('例如：路徑錯了，改用 tools/ 底下那份')}
                     value={replyText}
                     onChange={(e) => setReplyText(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter') void sendFollowup(d.id) }}
                   />
                   <button
-                    className="flex-none rounded bg-zinc-100 px-2 py-1 text-[11px] text-zinc-900 hover:bg-white disabled:opacity-40"
+                    className="flex-none rounded bg-ink px-2 py-1 text-[11px] text-invink hover:bg-white disabled:opacity-60 dark:disabled:opacity-40"
                     disabled={replyBusy || !replyText.trim()}
                     onClick={() => void sendFollowup(d.id)}
                   >
@@ -391,7 +391,7 @@ export default function Console() {
                 </div>
               )}
               {openLog === d.id && (
-                <pre className="mx-4 my-1 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 font-mono text-[11px] leading-5 text-zinc-300">
+                <pre className="mx-4 my-1 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-app p-2 font-mono text-[11px] leading-5 text-ink3">
                   {logText[d.id] ?? t('讀取中…')}
                 </pre>
               )}
