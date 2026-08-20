@@ -565,4 +565,22 @@ export const EN: Record<string, string> = {
   '夥伴招募令': 'Recruit ticket',
   '抽一次人形夥伴。打王與超級菁英也會掉': 'One humanoid companion pull. Bosses and super elites drop these too',
   '招募令 +1（目前 {n} 張）': 'Recruit ticket +1 (you now have {n})',
+  '這個畫面出錯了': 'Something broke on this screen',
+  '資料還在，沒有東西被刪掉。重新整理通常就好；如果每次都出錯，把下面這段訊息記下來。': 'Your data is intact — nothing was deleted. A refresh usually fixes it. If it keeps happening, note the message below.',
+  '重新整理': 'Refresh',
+  '試著繼續': 'Try to continue',
+
+  // ── 補漏 ─────────────────────────────────────────
+  'ai-hub 每 15 分鐘自動掃描': 'ai-hub auto-scans every 15 minutes',
+  '即時狀態 · ': 'Live status · ',
+  '控制 API 無回應': 'Control API did not respond',
+  '戰鬥指令': 'Battle commands',
+  '戰鬥紀錄': 'Battle log',
+  '戰鬥畫面': 'Battle view',
+  '快捷鍵：空白或 0': 'Shortcut: Space or 0',
+  '  ·  快捷鍵 {k}': '  ·  key {k}',
+  '  ·  快捷鍵 G': '  ·  key G',
+  '快捷鍵 H': 'Key H',
+  '快捷鍵 M': 'Key M',
+  '鍵盤：1–9 技能 · 0/空白 普攻 · G 格擋 · H/M 藥水 · Tab 換目標': 'Keys: 1–9 skills · 0/Space attack · G guard · H/M potions · Tab switch target',
 }

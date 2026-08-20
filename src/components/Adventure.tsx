@@ -349,6 +349,54 @@ export default function Adventure({ tools }: Props) {
   const doGuard = () => act((b) => guard(b))
   const focusOn = (uid: string) => act((b) => setFocus(b, uid))
 
+  /**
+   * 鍵盤操作。
+   *
+   * 回合制的節奏是「看一下場面 → 決定這回合做什麼」，一直把手移到滑鼠去點
+   * 會把那個節奏切碎。數字鍵對應技能列的順序（跟畫面上由左到右一致），
+   * 這樣不用記快捷鍵表，看畫面就知道按幾。
+   *
+   * 只在手動模式、輪到你下令時生效 —— 沉浸自動模式下按鍵沒有意義，
+   * 而且會讓人以為指令被吃掉了。輸入框有焦點時一律不攔。
+   */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = document.activeElement
+      if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return
+      if (e.ctrlKey || e.altKey || e.metaKey) return
+      const b = battleRef.current
+      if (!b || b.over || autoRef.current || b.phase !== 'input') return
+
+      const k = e.key.toLowerCase()
+      // 數字鍵：0 是普攻，1..9 依序對應技能列
+      if (/^[0-9]$/.test(k)) {
+        const idx = Number(k)
+        if (idx === 0) { e.preventDefault(); castSkill(null); return }
+        const id = b.hero.skills[idx - 1]
+        if (id) { e.preventDefault(); castSkill(id) }
+        return
+      }
+      if (k === ' ') { e.preventDefault(); castSkill(null); return }
+      if (k === 'g') { e.preventDefault(); doGuard(); return }
+      if (k === 'h') { e.preventDefault(); drink('hp'); return }
+      if (k === 'm') { e.preventDefault(); drink('mp'); return }
+      // Tab 換集火目標：只在活著的敵人之間循環
+      if (k === 'tab') {
+        const alive = b.foes.filter((f) => f.hp > 0)
+        if (!alive.length) return
+        e.preventDefault()
+        const cur = alive.findIndex((f) => f.uid === b.focus)
+        focusOn(alive[(cur + 1) % alive.length].uid)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // 這幾個 handler 每次 render 都會重建，但它們讀的是 battleRef / autoRef，
+    // 不是 render 當下的複本 —— 掛一次就永遠是對的。放進相依陣列只會讓
+    // 監聽器每一幀拆掉重綁，按鍵反而可能掉。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // ── 配點 ──
   const addAttr = (a: typeof ATTRS[number]) => update((h) => {
     if (attrLeft(h) <= 0) return
@@ -679,24 +727,27 @@ export default function Adventure({ tools }: Props) {
                     : <span className="text-zinc-500">{t('結算中…')}</span>}
                 </div>
               )}
-              <div className="mb-2 flex flex-wrap items-center gap-1.5">
+              <div className="mb-2 flex flex-wrap items-center gap-1.5" role="group" aria-label={t('戰鬥指令')}>
                 {!auto && (
                   <button
                     className="rounded border border-zinc-500 px-2 py-1 text-xs disabled:opacity-40"
+                    title={t('快捷鍵：空白或 0')}
+                    aria-keyshortcuts="0 Space"
                     disabled={battle.over || battle.phase !== 'input'}
                     onClick={() => castSkill(null)}
                   >
                     ⚔ {t('普攻')}
                   </button>
                 )}
-                {battle.hero.skills.map((id) => {
+                {battle.hero.skills.map((id, i) => {
                   const sk = SKILL_BY_ID[id]
                   const cd = battle.hero.cds[id] ?? 0
                   const noMp = sk.mpCost > battle.hero.mp
                   return (
                     <button
                       key={id}
-                      title={`${t(sk.desc)}${sk.mpCost ? `  ·  MP ${sk.mpCost}` : ''}`}
+                      title={`${t(sk.desc)}${sk.mpCost ? `  ·  MP ${sk.mpCost}` : ''}${auto ? '' : t('  ·  快捷鍵 {k}', { k: i + 1 })}`}
+                      aria-keyshortcuts={auto ? undefined : String(i + 1)}
                       className="rounded border px-2 py-1 text-xs disabled:opacity-40"
                       style={{ borderColor: LINE_COLOR[sk.line] }}
                       disabled={cd > 0 || noMp || battle.over || (!auto && battle.phase !== 'input')}
@@ -715,7 +766,8 @@ export default function Adventure({ tools }: Props) {
                   className={`rounded border px-2 py-1 text-xs disabled:opacity-40 ${
                     battle.guarding ? 'border-sky-400 bg-sky-400/15 text-sky-200' : 'border-zinc-600 text-zinc-300'
                   }`}
-                  title={t('擋下下一次攻擊的大半傷害。王蓄力時特別有用')}
+                  title={t('擋下下一次攻擊的大半傷害。王蓄力時特別有用') + (auto ? '' : t('  ·  快捷鍵 G'))}
+                  aria-keyshortcuts={auto ? undefined : 'g'}
                   disabled={battle.over || battle.guarding}
                   onClick={doGuard}
                 >
@@ -724,6 +776,8 @@ export default function Adventure({ tools }: Props) {
 
                 <button
                   className="rounded border border-rose-700/70 px-2 py-1 text-xs text-rose-200 disabled:opacity-40"
+                  title={auto ? undefined : t('快捷鍵 H')}
+                  aria-keyshortcuts={auto ? undefined : 'h'}
                   disabled={battle.over || hero.potions.hp <= 0 || battle.hero.hp >= battle.hero.hpMax}
                   onClick={() => drink('hp')}
                 >
@@ -731,6 +785,8 @@ export default function Adventure({ tools }: Props) {
                 </button>
                 <button
                   className="rounded border border-sky-700/70 px-2 py-1 text-xs text-sky-200 disabled:opacity-40"
+                  title={auto ? undefined : t('快捷鍵 M')}
+                  aria-keyshortcuts={auto ? undefined : 'm'}
                   disabled={battle.over || hero.potions.mp <= 0 || battle.hero.mp >= battle.hero.mpMax}
                   onClick={() => drink('mp')}
                 >
@@ -738,7 +794,17 @@ export default function Adventure({ tools }: Props) {
                 </button>
               </div>
 
-              <div className="max-h-40 overflow-y-auto rounded bg-zinc-950 p-2 font-mono text-[11px] leading-5">
+              {!auto && (
+                <div className="mb-2 text-[10px] text-zinc-600">
+                  {t('鍵盤：1–9 技能 · 0/空白 普攻 · G 格擋 · H/M 藥水 · Tab 換目標')}
+                </div>
+              )}
+              <div
+                className="max-h-40 overflow-y-auto rounded bg-zinc-950 p-2 font-mono text-[11px] leading-5"
+                role="log"
+                aria-live="polite"
+                aria-label={t('戰鬥紀錄')}
+              >
                 {[...battle.log].reverse().map((l, i) => (
                   <div key={i} className={
                     l.kind === 'crit' ? 'text-amber-300'

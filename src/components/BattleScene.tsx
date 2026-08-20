@@ -15,6 +15,7 @@ import {
   FX_LIFE, attackCurve, attackPose, deathTransform, drawCritFlash, drawHealMotes,
   drawSlash, drawSparks, idleBob, shake,
 } from '@/rpg/battleFx'
+import { t } from '@/i18n'
 import type { Battle } from '@/rpg/engine'
 import type { Combatant, FxEvent } from '@/rpg/types'
 
@@ -341,6 +342,12 @@ export default function BattleScene({ battle, tick }: { battle: Battle; tick: nu
   return (
     <canvas
       ref={ref}
+      role="img"
+      aria-label={[
+        t('戰鬥畫面'),
+        `${t(battle.hero.name)} ${battle.hero.hp}/${battle.hero.hpMax}`,
+        ...battle.foes.filter((f) => f.hp > 0).map((f) => `${t(f.name)} ${f.hp}/${f.hpMax}`),
+      ].join('，')}
       className="block w-full rounded border border-zinc-800"
       style={{ imageRendering: 'pixelated', background: '#0d1220' }}
     />

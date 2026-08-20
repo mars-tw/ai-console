@@ -56,6 +56,37 @@ interface Props {
   busyId: string
 }
 
+/**
+ * /api/map 與 /api/audit 的回應形狀。
+ *
+ * 只宣告畫面真的會讀的欄位 —— 後端多回什麼不影響，但少回或改名時
+ * 編譯會當場抱怨。原本這兩個都是 any，欄位改名不會有任何警告，
+ * 要等使用者看到欄位變成「—」才會發現。
+ */
+interface ToolMapEntry {
+  account?: { account?: string; plan?: string; until?: string }
+  browser?: string
+  skills?: string[]
+  settings?: string[]
+}
+type ToolMap = Record<string, ToolMapEntry | undefined> & {
+  /** 跨工具共享的治理技能（.agents） */
+  _governance?: { skills: string[] }
+}
+
+interface AuditReport {
+  generated_at: string
+  summary: {
+    sites_ok: number
+    sites_partial: number
+    sites_empty: number
+    articles: number
+    expected_articles: number
+    words: number
+  }
+  dispatch_logs: { errors: string[] }[]
+}
+
 export default function Office({ tools, projects, conversations, onDispatch, busyId }: Props) {
   useLang()   // 語言一換就重繪
   const [chatWith, setChatWith] = useState<string | null>(null)
@@ -68,10 +99,10 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   const [cmdInput, setCmdInput] = useState('')
   const [cmdBusy, setCmdBusy] = useState(false)
   const [cmdLog, setCmdLog] = useState<string[]>([])
-  const [toolMap, setToolMap] = useState<Record<string, any> | null>(null)
+  const [toolMap, setToolMap] = useState<ToolMap | null>(null)
   const [showMap, setShowMap] = useState(false)
   const [dispatches, setDispatches] = useState<DispatchRecord[]>([])
-  const [audit, setAudit] = useState<any>(null)
+  const [audit, setAudit] = useState<AuditReport | null>(null)
   const [auditBusy, setAuditBusy] = useState(false)
 
   const refreshDispatches = () => {
@@ -247,7 +278,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
                 {t('站點')} ✅{audit.summary.sites_ok} / ⚠️{audit.summary.sites_partial} / ❌{audit.summary.sites_empty}
                 ・{t('文章')} {audit.summary.articles}/{audit.summary.expected_articles}
                 ・{t('{n} 字', { n: audit.summary.words.toLocaleString() })}
-                ・{t('派工 log {n} 份有錯', { n: audit.dispatch_logs.filter((l: any) => l.errors.length > 0).length })}
+                ・{t('派工 log {n} 份有錯', { n: audit.dispatch_logs.filter((l) => l.errors.length > 0).length })}
                 <span className="text-zinc-600">（{audit.generated_at.slice(5, 16)}）</span>
               </span>
             )}
