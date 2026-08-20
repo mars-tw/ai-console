@@ -240,7 +240,11 @@ export class World {
         break
       }
       default: {
-        // 外出：在門口一帶散開站著，不要疊成一團
+        // 查不到狀態：在房間下半部的空地站成一排，面向鏡頭，不要疊成一團。
+        //
+        // 靠「站著完全不動」跟其他人區分 —— idle 的會到處走去倒水看書，
+        // working 的坐在工位上，這一群一直立正就看得出來不在狀態內。
+        // 不用淡化或去彩度：那會讓人以為是圖沒載好。
         const i = this.agents.filter((o) => o.mode === 'away').indexOf(a)
         a.act = { kind: 'idlestand', target: { x: 18 + i * 3, y: 22, face: 'down' }, until: now + 20 }
       }
