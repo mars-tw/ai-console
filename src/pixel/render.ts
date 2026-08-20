@@ -4,7 +4,7 @@
 
 import { PROPS, drawDecals, drawProp, drawShell, hasArt, hasProp, sortYOf } from './props'
 import { BOARD, DESKS, screenRect } from './room'
-import { CELL, FOOT_Y, SKINS, drawAgent } from './sprites'
+import { FOOT_Y, SKINS, drawAgent } from './sprites'
 import { BASE_H, BASE_W, C, TILE } from './theme'
 import type { Agent, World } from './world'
 
@@ -91,14 +91,21 @@ export class OfficeRenderer {
     b.beginPath()
     b.ellipse(a.x, a.y - 1, 9, 3.5, 0, 0, Math.PI * 2)
     b.fill()
-    drawAgent(b, a.key, frame, a.x, a.y + bob, flip, a.mode === 'away' ? 0.35 : 1)
     if (a.mode === 'away') {
-      // 外出：疊一層灰
+      // 外出：整隻抽成灰階。
+      //
+      // 原本是在牠身上疊一塊 saturation 混色的方塊，但混色作用的對象是
+      // 「方塊底下的所有東西」—— 地板、地毯、家具一起被抽掉彩度，
+      // 畫面上就多出一個硬邊灰方塊（拍宣傳截圖時特別明顯）。
+      // filter 只影響接下來畫的這一次 drawImage，不會波及背景。
       b.save()
-      b.globalCompositeOperation = 'saturation'
-      b.fillStyle = '#808080'
-      b.fillRect(a.x - CELL / 2, a.y - FOOT_Y, CELL, CELL)
+      // 抽到全灰又只剩半透明的話，看起來會像石雕而不是「那隻龍出去了」。
+      // 留一點原色、透明度也拉高，才認得出是誰。
+      b.filter = 'grayscale(0.85)'
+      drawAgent(b, a.key, frame, a.x, a.y + bob, flip, 0.8)
       b.restore()
+    } else {
+      drawAgent(b, a.key, frame, a.x, a.y + bob, flip, 1)
     }
     if (o.hover === a.key) {
       b.strokeStyle = SKINS[a.key]?.color ?? '#fff'

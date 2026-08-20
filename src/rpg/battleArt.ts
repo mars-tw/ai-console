@@ -98,11 +98,10 @@ export function drawSkillFx(
 /** 畫寵物。比主角矮一截，站在隊伍的最外側 */
 export function drawPet(c: CanvasRenderingContext2D, art: string, x: number, footY: number) {
   const img = petImage(art)
-  if (!img) {
-    c.fillStyle = '#f472b6'
-    c.fillRect(Math.round(x - 8), Math.round(footY - 20), 16, 20)
-    return
-  }
+  // 素材還沒載完、或舊存檔指到已經移除的寵物時，就什麼都不畫。
+  // 原本會補一塊粉紅方塊當佔位 —— 那在開發時有用，但玩家看到的是
+  // 隊伍裡多了一個突兀的色塊，比暫時少一隻寵物難看得多。
+  if (!img) return
   c.drawImage(img, Math.round(x - img.width / 2), Math.round(footY - img.height))
 }
 
