@@ -89,6 +89,13 @@ export interface DispatchRecord {
   state?: 'running' | 'waiting' | 'done' | 'failed' | 'silent'
   result?: string
   reply?: string
+  /** 執行中的最後一行輸出。看得到它在變，才知道還活著 */
+  tail?: string
+  logSize?: number
+  /** 這是哪一件的接續 */
+  followupOf?: string
+  /** 排隊中、等這一輪結束才送出的補充 */
+  pending?: string[]
 }
 
 export interface Message {

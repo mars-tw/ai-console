@@ -90,6 +90,10 @@ _BIN_CANDIDATES = {
 _NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 
 
+# CLI 的輸出帶 ANSI 色碼，要顯示在網頁上之前得先清掉
+_ANSI_RE = re.compile(chr(92) + 'x1b' + chr(92) + '[[0-9;?]*[ -/]*[@-~]')
+
+
 def _run(argv, **kw):
     """跑一個子行程，不要在畫面上閃視窗"""
     return subprocess.run(argv, **_NO_WINDOW, **kw)
@@ -598,8 +602,30 @@ class Handler(BaseHTTPRequestHandler):
             if body.get("dryRun"):
                 return self._json({"ok": True, "cmd": full, "cwd": cwd, "dryRun": True})
             try:
-                # 開一個新的終端機視窗執行（不阻塞、獨立於本伺服器）
-                subprocess.Popen(["cmd", "/c", "start", f'AI:{conv["toolLabel"]}', "cmd", "/k", full],
+                # 指令寫成一個 .cmd 再叫終端執行它，不要整串當參數傳。
+                #
+                # 原本是 Popen(["cmd","/c","start",title,"cmd","/k", full])，full 裡面
+                # 有巢狀引號（cd /d "路徑" && "執行檔" --resume xxx）。Python 的
+                # list2cmdline 會把內層引號跳脫成 \"，但 cmd.exe 不認反斜線跳脫 ——
+                # 整條指令被拆壞，使用者看到的是
+                # 「檔案名稱、目錄名稱或磁碟區標籤語法錯誤」。
+                # 寫成檔案就沒有任何要跳脫的東西；chcp 65001 放在 cd 之前，
+                # 中文路徑那一行才讀得對（實測 C:\\Users\\User\\Documents\\燒雞 可以進去）。
+                launch_dir = Path.home() / ".ai-console" / "launch"
+                launch_dir.mkdir(parents=True, exist_ok=True)
+                crlf = "\r\n"
+                bat = launch_dir / f"resume-{time.strftime('%Y%m%d-%H%M%S')}-{conv['tool']}.cmd"
+                bat.write_text("@echo off" + crlf + "chcp 65001 >nul" + crlf
+                               + f'cd /d "{cwd}"' + crlf + cmd + crlf, encoding="utf-8")
+                # 只留最近 40 份，不要無限長
+                old = sorted(launch_dir.glob("resume-*.cmd"))[:-40]
+                for f in old:
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
+                subprocess.Popen(["cmd", "/c", "start", f'AI:{conv["toolLabel"]}',
+                                  "cmd", "/k", str(bat)],
                                  cwd=cwd if Path(cwd).exists() else str(Path.home()))
                 return self._json({"ok": True, "cmd": full, "cwd": cwd})
             except Exception as e:
@@ -639,6 +665,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.do_conv_delete()
         if self.path == "/api/plan":
             return self.do_plan()
+        if self.path == "/api/dispatch/followup":
+            return self.do_followup()
         if self.path == "/api/dispatch":
             return self.do_dispatch()
 
@@ -749,6 +777,16 @@ class Handler(BaseHTTPRequestHandler):
         #   --print-timeout：預設只有 5 分鐘，真實工單常常不夠。
         "gemini": lambda task: [BIN["gemini"], "--dangerously-skip-permissions",
                                 "--print-timeout", "30m", "-p", task],
+    }
+    # 續談：對同一段對話再補一句。四個無人值守的工具都有這個能力，
+    # 所以「工作中介入告知」不用改成互動模式也做得到。
+    FOLLOWUP_TOOLS = {
+        "claude": lambda p: [BIN["claude"], "--continue", "-p", p],
+        "codex": lambda p: [BIN["codex"], "exec", "resume", "--last",
+                            "--skip-git-repo-check", p],
+        "qwen": lambda p: ["cmd", "/c", BIN["qwen"], "-c", "-p", p],
+        "gemini": lambda p: [BIN["gemini"], "--dangerously-skip-permissions",
+                             "--print-timeout", "30m", "-c", "-p", p],
     }
     CLOUD_CHAIN = ["claude", "codex", "gemini", "grok", "qwen"]  # 自動路由順序（地端由 LM Studio 兜底）
     DISPATCHES = []  # 派工登錄：{id, tool, task, started, pid, log, mode, reply}
@@ -979,7 +1017,13 @@ class Handler(BaseHTTPRequestHandler):
                           f"The file is the full instruction; do not ask for more input.")
             except OSError:
                 prompt = task
-            argv = ["cmd", "/c", "start", f"AI:{tool}", "cmd", "/k", f'"{exe}" "{prompt}"']
+            # 跟 /api/launch 一樣：指令寫成 .cmd 再執行，不要整串當參數傳。
+            # 巢狀引號經過 list2cmdline 會被跳脫成 \"，cmd.exe 不認，指令就壞了。
+            crlf = "\r\n"
+            bat = log_dir / f"{stamp}_{tool}_run.cmd"
+            bat.write_text("@echo off" + crlf + "chcp 65001 >nul" + crlf
+                           + f'"{exe}" "{prompt}"' + crlf, encoding="utf-8")
+            argv = ["cmd", "/c", "start", f"AI:{tool}", "cmd", "/k", str(bat)]
             subprocess.Popen(argv, cwd=str(Path.home()))
             log_file.write_text(f"[{stamp}] {tool} 開啟可見終端\n指令：{task}", encoding="utf-8")
             # 記下這份「回音」有多大：之後只要檔案沒有長大，就表示那個視窗裡
@@ -1035,6 +1079,84 @@ class Handler(BaseHTTPRequestHandler):
             return "done"
         return "failed" if any(m in tail for m in self._FAIL_MARKS) else "done"
 
+    def _send_followup(self, d: dict, text: str) -> dict:
+        """實際送出續談。回傳要寫回登錄的欄位"""
+        tool = d.get("tool", "")
+        make = self.FOLLOWUP_TOOLS.get(tool)
+        if not make:
+            return {"error": f"{tool} 沒有續談模式"}
+        # 續談不重掛執行前置：那段規範上一輪已經給過了，再貼一次只是雜訊。
+        # 但控制標記還是要中和，不然補的這句話可以偽裝成系統指示。
+        safe = rules._neutralize(text)
+        log_dir = Path.home() / "ai-hub" / "dispatch-log"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        log_file = log_dir / f"{stamp}_{tool}_followup.log"
+        try:
+            lf = open(log_file, "w", encoding="utf-8")
+            proc = subprocess.Popen(
+                make(safe), cwd=str(Path.home()), stdout=lf,
+                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW)
+        except Exception as e:
+            return {"error": str(e)}
+        self.DISPATCHES.append({
+            "id": stamp, "tool": tool, "task": f"（接續）{text[:110]}",
+            "started": stamp, "pid": proc.pid, "log": str(log_file),
+            "mode": "headless", "followupOf": d.get("id"),
+        })
+        return {"pid": proc.pid, "log": str(log_file)}
+
+    def do_followup(self):
+        """對一件已派出的工作補一句話
+
+        上一輪還在跑就先掛著 —— 兩個行程同時續談同一段對話會互相蓋掉。
+        """
+        if not self.DISPATCHES:
+            self._load_registry()
+        body = self._body()
+        did = str(body.get("id", "")).strip()
+        text = str(body.get("text", "")).strip()
+        if not did or not text:
+            return self._json({"ok": False, "error": "需要 id 與 text"}, 400)
+        target = next((x for x in self.DISPATCHES if x.get("id") == did), None)
+        if not target:
+            return self._json({"ok": False, "error": "找不到這件派工"}, 404)
+        if target.get("tool") not in self.FOLLOWUP_TOOLS:
+            return self._json({"ok": False,
+                               "error": f"{target.get('tool')} 沒有續談模式，只能重新派一件"}, 400)
+
+        pid = target.get("pid")
+        alive = bool(pid) and int(pid) in _alive_pids({int(pid)})
+        if alive:
+            pend = list(target.get("pending") or [])
+            pend.append(text)
+            target["pending"] = pend
+            self._save_registry()
+            return self._json({"ok": True, "queued": True,
+                               "note": f"這一輪還在跑，已排隊（第 {len(pend)} 句），結束後自動送出"})
+        r = self._send_followup(target, text)
+        if r.get("error"):
+            return self._json({"ok": False, "error": r["error"]}, 500)
+        self._save_registry()
+        return self._json({"ok": True, "queued": False, "note": f"已送出給 {target['tool']}"})
+
+    def _flush_pending(self, rows: list) -> None:
+        """跑完的那些，把排隊中的續談送出去"""
+        changed = False
+        for d in rows:
+            if d.get("alive") or not d.get("pending"):
+                continue
+            src = next((x for x in self.DISPATCHES if x.get("id") == d.get("id")), None)
+            if not src:
+                continue
+            text = "\n".join(src.get("pending") or [])
+            src["pending"] = []
+            changed = True
+            self._send_followup(src, text)
+        if changed:
+            self._save_registry()
+
     def do_dispatches(self):
         """派工追蹤：列出登錄的派工，判斷真正的狀態，附 log 尾端預覽"""
         if not self.DISPATCHES:
@@ -1049,9 +1171,24 @@ class Handler(BaseHTTPRequestHandler):
             d["alive"] = bool(d.get("pid")) and int(d["pid"]) in alive_pids
             d["state"] = self._dispatch_state(d, d["alive"])
             log = Path(d.get("log", ""))
-            if log.exists() and not d["alive"]:
-                d["result"] = log.read_text(encoding="utf-8", errors="ignore")[-400:]
+            if log.exists():
+                text = log.read_text(encoding="utf-8", errors="ignore")
+                if not d["alive"]:
+                    d["result"] = text[-400:]
+                # 執行中的最後一行輸出。使用者最常問的是「到底有沒有在動」——
+                # 只有一個「執行中」的字樣看不出差別，看到 log 一直在變才知道還活著。
+                # CLI 的輸出帶 ANSI 色碼，直接顯示會變成一串 ESC[1m[31m
+                lines = [_ANSI_RE.sub("", ln).strip() for ln in text.splitlines()]
+                lines = [ln for ln in lines if ln]
+                d["tail"] = lines[-1][:140] if lines else ""
+                try:
+                    d["logSize"] = log.stat().st_size
+                except OSError:
+                    d["logSize"] = 0
             out.append(d)
+        # 排隊中的續談：上一輪一結束就送出去。放在輪詢裡而不是另開執行緒，
+        # 是因為主控台本來就每 8 秒問一次，不需要再多一個背景迴圈。
+        self._flush_pending(out)
         return self._json({"ok": True, "dispatches": out})
 
 

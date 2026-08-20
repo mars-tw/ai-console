@@ -601,4 +601,13 @@ export const EN: Record<string, string> = {
   '放回主清單。規則之後改了也還是會留著': 'Put back in the main list. Stays even if the rules change later',
   '只顯示有中文的對話': 'Only conversations with Chinese titles',
   '機器跑的 agent 迴圈標題都是英文的指令輸出，怎麼列規則都追不完；你自己開的對話都有中文': 'Machine agent loops title themselves with English command output — no rule list ever catches them all. Your own conversations all have Chinese in them',
+  '💬 補一句': '💬 Add a note',
+  '送出': 'Send',
+  '送出中…': 'Sending…',
+  '已送出': 'Sent',
+  '送出失敗': 'Could not send',
+  '工作跑歪了可以在這裡補一句。還在跑的話會排隊，結束後自動送出': 'If the job goes off track, add a note here. While it is still running the note queues and sends when it finishes',
+  '例如：路徑錯了，改用 tools/ 底下那份': 'e.g. wrong path — use the one under tools/',
+  '（還沒有輸出）': '(no output yet)',
+  '已排隊 {n} 句，這一輪結束後送出': '{n} note(s) queued — will send when this run finishes',
 }

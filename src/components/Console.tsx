@@ -27,6 +27,18 @@ const TOOL_COLOR: Record<string, string> = {
   grok: '#1D9BF0', local: '#71717a', kimi: '#2563EB',
 }
 
+/** 從派工的時間戳（YYYYMMDD-HHMMSS）算已經跑多久 */
+function elapsed(stamp: string): string {
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(stamp || '')
+  if (!m) return ''
+  const [, y, mo, d, h, mi, se] = m
+  const t0 = new Date(+y, +mo - 1, +d, +h, +mi, +se).getTime()
+  const s = Math.max(0, Math.round((Date.now() - t0) / 1000))
+  if (s < 60) return `${s} 秒`
+  if (s < 3600) return `${Math.floor(s / 60)} 分 ${s % 60} 秒`
+  return `${Math.floor(s / 3600)} 小時 ${Math.floor((s % 3600) / 60)} 分`
+}
+
 export default function Console() {
   useLang()
   const [input, setInput] = useState('')
@@ -45,6 +57,10 @@ export default function Console() {
   const [autoRun, setAutoRun] = useState(false)
   const [dispatches, setDispatches] = useState<DispatchRecord[]>([])
   const [showDone, setShowDone] = useState(false)
+  /** 正在對哪一件補話，以及打到一半的內容 */
+  const [replyTo, setReplyTo] = useState<string | null>(null)
+  const [replyText, setReplyText] = useState('')
+  const [replyBusy, setReplyBusy] = useState(false)
   const [history, setHistory] = useState<string[]>([])
   // 展開中的派工與它的產出。派出去卻看不到結果，等於白派。
   const [openLog, setOpenLog] = useState<string | null>(null)
@@ -122,6 +138,37 @@ export default function Console() {
   }
 
   /** 讀某次派工的產出 */
+  /**
+   * 對一件派工補一句話。
+   *
+   * 無頭執行是一次性的，沒辦法對跑到一半的行程插話 —— 但四個工具都支援
+   * 續談上一輪，所以這裡是「用續談旗標再派一次」。還在跑的話伺服器會先排隊，
+   * 等它結束再送，不然兩個行程會搶同一段對話。
+   */
+  const sendFollowup = async (id: string) => {
+    const text = replyText.trim()
+    if (!text) return
+    setReplyBusy(true)
+    try {
+      const r = await fetch('/api/dispatch/followup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, text }),
+      }).then((x) => x.json())
+      setNote(r.ok ? (r.note || t('已送出')) : `⚠️ ${r.error || t('送出失敗')}`)
+      if (r.ok) {
+        setReplyText('')
+        setReplyTo(null)
+        // 立刻拉一次，不要等下一個輪詢週期 —— 送出後畫面沒反應會以為沒送出去
+        fetch('/api/dispatches').then((x) => (x.ok ? x.json() : null))
+          .then((x) => x?.dispatches && setDispatches(x.dispatches)).catch(() => {})
+      }
+    } catch {
+      setNote(t('⚠️ 控制 API 無回應'))
+    }
+    setReplyBusy(false)
+  }
+
   const loadLog = async (id: string) => {
     if (openLog === id) { setOpenLog(null); return }
     setOpenLog(id)
@@ -305,6 +352,44 @@ export default function Console() {
                   {look(stateOf(d)).label}
                 </span>
               </button>
+              {stateOf(d) === 'running' && (
+                <div className="ml-6 flex items-center gap-2 text-[10px] text-zinc-600">
+                  <span className="inline-block h-1.5 w-1.5 flex-none animate-pulse rounded-full bg-amber-400" />
+                  <span className="min-w-0 flex-1 truncate font-mono">{d.tail || t('（還沒有輸出）')}</span>
+                  <span className="flex-none">{elapsed(d.started)}</span>
+                </div>
+              )}
+              {!!d.pending?.length && (
+                <div className="ml-6 text-[10px] text-sky-400/80">
+                  {t('已排隊 {n} 句，這一輪結束後送出', { n: d.pending.length })}
+                </div>
+              )}
+              <button
+                className="ml-6 text-[10px] text-zinc-500 hover:text-zinc-300"
+                title={t('工作跑歪了可以在這裡補一句。還在跑的話會排隊，結束後自動送出')}
+                onClick={() => { setReplyTo(replyTo === d.id ? null : d.id); setReplyText('') }}
+              >
+                {replyTo === d.id ? t('取消') : t('💬 補一句')}
+              </button>
+              {replyTo === d.id && (
+                <div className="ml-6 mt-1 flex gap-1">
+                  <input
+                    autoFocus
+                    className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px] outline-none focus:border-zinc-500"
+                    placeholder={t('例如：路徑錯了，改用 tools/ 底下那份')}
+                    value={replyText}
+                    onChange={(e) => setReplyText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') void sendFollowup(d.id) }}
+                  />
+                  <button
+                    className="flex-none rounded bg-zinc-100 px-2 py-1 text-[11px] text-zinc-900 hover:bg-white disabled:opacity-40"
+                    disabled={replyBusy || !replyText.trim()}
+                    onClick={() => void sendFollowup(d.id)}
+                  >
+                    {replyBusy ? t('送出中…') : t('送出')}
+                  </button>
+                </div>
+              )}
               {openLog === d.id && (
                 <pre className="mx-4 my-1 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 font-mono text-[11px] leading-5 text-zinc-300">
                   {logText[d.id] ?? t('讀取中…')}

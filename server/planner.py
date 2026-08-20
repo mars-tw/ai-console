@@ -26,8 +26,48 @@ DEFAULT_SKILLS: dict[str, str] = {
     "codex": "規格明確的程式任務、批次修改、測試與驗證。適合可以一次講清楚的工單。",
     "qwen": "分類、摘要、翻譯、格式轉換、初步整理。便宜、適合量大又不難的工作。",
     "grok": "生圖、找資料、需要即時網路資訊的查詢。無無頭模式，會開終端。",
+    "gemini": "ANTIGRAVITY（agy）。走獨立額度池，雲端其他家限流時特別有用；支援無人值守，能讀檔改檔。",
+    "kimi": "中文長文、資料整理、跨檔案閱讀。",
+    "cursor": "在編輯器裡的改動，適合需要看著結果調整的工作。",
     "local": "地端模型兜底。不需要檔案存取的純問答、改寫、腦力激盪。雲端全限流時用。",
 }
+
+# 使用者指名執行者時的別名。這個訊號優先於模型的判斷 ——
+# 明明講了「用 codex」還派給別人，是最讓人不信任這個介面的行為。
+TOOL_ALIASES: dict[str, tuple[str, ...]] = {
+    "claude": ("claude", "克勞德"),
+    "codex": ("codex",),
+    "qwen": ("qwen", "千問", "通義"),
+    "grok": ("grok",),
+    "kimi": ("kimi",),
+    "cursor": ("cursor",),
+    "gemini": ("gemini", "antigravity", "agy", "反重力"),
+    "local": ("地端", "本機模型", "lm studio", "lmstudio"),
+}
+
+# 指名的講法：用 X / 叫 X / 請 X / 派 X / 交給 X / 讓 X / use X …
+_NAMED_BEFORE = re.compile(r"(用|叫|請|派|交給|讓|指定|by|use|ask)\s*$")
+
+
+def named_tool(text: str, allowed: set[str] | None = None) -> str:
+    """使用者有沒有在句子裡指名要誰做
+
+    只認「動詞 + 工具名」或句首指名。不然「幫我修 codex 的設定檔」
+    這種把工具名當受詞的句子會被誤判成指名。
+    """
+    low = (text or "").lower()
+    best = ""
+    best_pos = len(low) + 1
+    for tool, names in TOOL_ALIASES.items():
+        if allowed is not None and tool not in allowed:
+            continue
+        for n in names:
+            i = low.find(n)
+            if i < 0:
+                continue
+            if (i <= 2 or _NAMED_BEFORE.search(low[max(0, i - 6):i])) and i < best_pos:
+                best, best_pos = tool, i
+    return best
 
 PROMPT = """你是一個派工調度員。把使用者的需求拆成可以直接交給 AI 執行的工作，並指定每件由誰做。
 
@@ -130,7 +170,14 @@ def plan(instruction: str, model: str, skills: dict[str, str] | None = None,
     allowed &= set(sk) or allowed
     fallback = "claude" if "claude" in allowed else (sorted(allowed)[0] if allowed else "local")
 
-    single = [{"tool": fallback, "task": instruction, "why": "拆解失敗，整件交給預設工具"}]
+    # 使用者指名了誰，就照他講的。這比任何自動判斷都優先 ——
+    # 明明講了「用 codex」卻派給別人，會讓人完全不敢再用這個介面。
+    want = named_tool(instruction, allowed)
+    if want:
+        return {"ok": True, "model": "", "note": f"你指名了 {want}，直接交給它",
+                "steps": [{"tool": want, "task": instruction, "why": "你指名的執行者"}]}
+
+    single = [{"tool": fallback, "task": instruction, "why": "沒有拆解，整件交給預設工具"}]
     if not model:
         return {"ok": False, "steps": single, "model": "", "note": "地端沒有可用模型，無法拆解"}
 
@@ -165,4 +212,11 @@ def plan(instruction: str, model: str, skills: dict[str, str] | None = None,
     if not steps:
         return {"ok": False, "steps": single, "model": model,
                 "note": "模型沒有回出可用的 JSON，改成整件派工"}
+    # 拆完之後每一句自己也可能帶著指名（「用 codex 改 X」被拆成一件）。
+    # 模型常常忽略它，這裡再蓋回去一次。
+    for st in steps:
+        w = named_tool(st.get("task", ""), allowed)
+        if w and w != st["tool"]:
+            st["tool"] = w
+            st["why"] = "工作內容裡指名了執行者"
     return {"ok": True, "steps": steps, "model": model, "note": ""}
