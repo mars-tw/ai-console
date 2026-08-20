@@ -846,6 +846,14 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(result)
 
     def do_dispatch(self):
+        # 先把磁碟上的登錄讀進來再 append。
+        #
+        # DISPATCHES 是類別屬性，伺服器重啟後是空的，而 _load_registry() 原本
+        # 只在 GET /api/dispatches 時才呼叫。所以「重啟 → 直接派一件工」的順序下，
+        # append 到空清單再 _save_registry()，整份歷史就被那一筆蓋掉了。
+        # 實測踩到：重啟 API 後派一件測試工，早上六筆派工紀錄全部消失。
+        if not self.DISPATCHES:
+            self._load_registry()
         body = self._body()
         task = str(body.get("task", "")).strip()
         tool = str(body.get("tool", "auto")).strip()

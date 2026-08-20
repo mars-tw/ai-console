@@ -269,10 +269,19 @@ def load_codex_threads():
         return info, children
     try:
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-        for row in con.execute("SELECT rollout_path, title, cwd FROM threads"):
-            rp, title, cwd = row
+        # archived 是 Codex 自己的封存旗標 —— 使用者在 Codex 裡封存掉的對話，
+        # 控制台不應該還把它當成現役的列在清單上。這是唯一有權威來源的封存狀態：
+        # Claude Code 沒有封存功能，Qwen / Kimi 桌面版把狀態放在 Electron 的
+        # LevelDB 裡，沒有可靠的旗標可讀。
+        try:
+            rows = con.execute("SELECT rollout_path, title, cwd, archived FROM threads")
+        except sqlite3.Error:
+            rows = ((r[0], r[1], r[2], 0) for r in
+                    con.execute("SELECT rollout_path, title, cwd FROM threads"))
+        for rp, title, cwd, archived in rows:
             if rp:
-                info[Path(str(rp)).name] = {"title": title or "", "cwd": cwd or ""}
+                info[Path(str(rp)).name] = {"title": title or "", "cwd": cwd or "",
+                                            "archived": bool(archived)}
         try:
             for (cid,) in con.execute("SELECT child_thread_id FROM thread_spawn_edges"):
                 children.add(str(cid))
@@ -503,11 +512,13 @@ def main():
                 is_subagent = True
             # Codex：官方 threads DB 的標題/cwd + spawn 關係
             official_title = ""
+            archived = False
             if src["tool"] == "codex":
                 th = codex_threads.get(path.name)
                 if th:
                     official_title = th["title"]
                     cwd = cwd or th["cwd"]
+                    archived = th.get("archived", False)
                 if sid in codex_children:
                     is_subagent = True
             # Grok / Kimi：附屬檔的官方標題與 cwd
@@ -554,6 +565,8 @@ def main():
                 "lastTs": last_ts,
                 "msgCount": count,
                 "subagent": is_subagent,
+                # 在來源工具裡被封存的：控制台預設收進垃圾桶，但不刪檔
+                "archived": archived,
                 "dispatch": no_human_turn or is_dispatch(title, first_user_msg),
                 "resume": src["resume"](sid, cwd),
                 "hasMessages": bool(msgs),
@@ -598,6 +611,7 @@ def main():
             "total": len(conversations),
             "subagent": skipped_subagent,
             "duplicates": dup_count,
+            "archived": sum(1 for c in conversations if c.get("archived")),
             "dispatch": sum(1 for c in conversations if c.get("dispatch") and not c["subagent"] and not c.get("dup")),
             "unique": len(conversations) - dup_count,
             "elapsed_sec": round(time.time() - t0, 1),
