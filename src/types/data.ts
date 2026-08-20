@@ -61,6 +61,14 @@ export interface DispatchRecord {
   mode: 'headless' | 'sync' | 'terminal'
   pid?: number | null
   alive?: boolean
+  /**
+   * 伺服器導出的真正狀態。
+   *   running 執行中 / waiting 終端還沒被跑起來 / done 完成
+   *   failed  跑起來但 log 裡有失敗訊息 / silent 跑完卻沒有任何輸出
+   * 原本只有 alive 一個布林值，畫面只分得出「執行中」跟「不是執行中」，
+   * 於是跑完的、失敗的、還沒按下去的全部長一樣。
+   */
+  state?: 'running' | 'waiting' | 'done' | 'failed' | 'silent'
   result?: string
   reply?: string
 }

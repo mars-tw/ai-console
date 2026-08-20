@@ -78,6 +78,46 @@ _BIN_CANDIDATES = {
 }
 
 
+
+# Windows 上每一次 subprocess 都會閃一個主控台視窗，而且會把焦點搶走。
+# 下面這些呼叫是每隔幾秒輪詢一次的（工具狀態、派工是否還活著），
+# 使用者只要開著介面就會被打斷打字 —— 實測回報「一直閃 CMD，沒辦法打字」。
+# CREATE_NO_WINDOW 只有 Windows 有，所以用 dict 展開的方式帶進去，
+# 其他平台自然是空的。
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
+
+def _run(argv, **kw):
+    """跑一個子行程，不要在畫面上閃視窗"""
+    return subprocess.run(argv, **_NO_WINDOW, **kw)
+
+
+# 一整批 pid 的存活狀態，快取幾秒。
+# /api/dispatches 每 8 秒被輪詢一次，而主控台與辦公室兩個分頁都在輪詢，
+# 沒有快取的話同一秒可能連問兩次。
+_ALIVE_CACHE: dict[str, object] = {"at": 0.0, "pids": set()}
+
+
+def _alive_pids(pids: set) -> set:
+    """一次查完一整批 pid 是否還活著"""
+    if not pids:
+        return set()
+    now = time.time()
+    if now - float(_ALIVE_CACHE["at"]) < 3.0:
+        return {p for p in pids if p in _ALIVE_CACHE["pids"]}
+    alive = set()
+    try:
+        r = _run(["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=15)
+        for line in r.stdout.splitlines():
+            parts = [p.strip('"') for p in line.split('","')]
+            if len(parts) > 1 and parts[1].strip().isdigit():
+                alive.add(int(parts[1].strip()))
+    except Exception:
+        return set()
+    _ALIVE_CACHE["at"] = now
+    _ALIVE_CACHE["pids"] = alive
+    return {p for p in pids if p in alive}
+
 def _find_bin(tool: str) -> str:
     """找工具執行檔。找不到就回工具名，交給 PATH 解析（失敗訊息也還看得懂）"""
     import shutil
@@ -146,7 +186,7 @@ def lms_loaded():
     if not LMS_BIN.exists():
         return []
     try:
-        r = subprocess.run([str(LMS_BIN), "ps", "--json"], capture_output=True, text=True, timeout=15)
+        r = _run([str(LMS_BIN), "ps", "--json"], capture_output=True, text=True, timeout=15)
         data = json.loads(r.stdout or "[]")
         return [m.get("identifier") or m.get("modelKey") for m in data if isinstance(m, dict)]
     except Exception:
@@ -168,7 +208,7 @@ def model_complete(model_id: str) -> bool:
 def detect_heavy_job():
     """偵測產片/渲染等大型工作：進程名特徵或單進程記憶體過高"""
     try:
-        r = subprocess.run(["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=20)
+        r = _run(["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=20)
         for line in r.stdout.splitlines():
             parts = [p.strip('"') for p in line.split('","')]
             if len(parts) < 5:
@@ -420,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
                     '{"audit_script": "...", "audit_report": "..."}'}, 404)
             report_path = Path(report)
             try:
-                subprocess.run([sys.executable, str(audit_script)],
+                _run([sys.executable, str(audit_script)],
                                capture_output=True, timeout=120)
                 if report_path.exists():
                     return self._json(json.loads(report_path.read_text(encoding="utf-8")))
@@ -516,7 +556,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/api/refresh":
             try:
-                r = subprocess.run([sys.executable, str(INDEXER)], capture_output=True,
+                r = _run([sys.executable, str(INDEXER)], capture_output=True,
                                    text=True, timeout=300, cwd=str(APP_ROOT))
                 return self._json({"ok": r.returncode == 0, "out": (r.stdout or r.stderr)[-500:]})
             except Exception as e:
@@ -882,40 +922,90 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json({"ok": False, "error": f"地端呼叫失敗：{e}"}, 502)
 
-        # grok 無無頭模式 → 開可見終端並預填指令
+        # 沒有無頭模式的工具 → 開可見終端並預填指令
+        #
+        # 原本只有 grok 會把指令帶進去，其他工具開的是一個空的 CLI ——
+        # 介面卻回報「已開終端」，看起來像已經派出去了，實際上那個視窗裡什麼都沒有。
+        # 現在一律走跟無頭模式相同的作法：工單寫成 UTF-8 檔，命令列只帶一行
+        # ASCII 的「去讀這個檔」，中文不會被命令列的地碼頁弄壞，也不怕換行截斷。
         try:
             exe = BIN.get(tool, tool)
-            argv = ["cmd", "/c", "start", f"AI:{tool}", "cmd", "/k", f'"{exe}" "{task}"'] if tool == "grok" \
-                else ["cmd", "/c", "start", f"AI:{tool}", "cmd", "/k", f'"{exe}"']
+            order_file = log_dir / f"{stamp}_task.md"
+            try:
+                order_file.write_text(task, encoding="utf-8")
+                prompt = (f"Read the UTF-8 work order at {order_file} and carry it out. "
+                          f"The file is the full instruction; do not ask for more input.")
+            except OSError:
+                prompt = task
+            argv = ["cmd", "/c", "start", f"AI:{tool}", "cmd", "/k", f'"{exe}" "{prompt}"']
             subprocess.Popen(argv, cwd=str(Path.home()))
+            log_file.write_text(f"[{stamp}] {tool} 開啟可見終端\n指令：{task}", encoding="utf-8")
+            # 記下這份「回音」有多大：之後只要檔案沒有長大，就表示那個視窗裡
+            # 還沒有任何實際輸出，也就是使用者還沒讓它跑起來
+            try:
+                echo_size = log_file.stat().st_size
+            except OSError:
+                echo_size = 0
             self.DISPATCHES.append({"id": stamp, "tool": tool, "task": raw_task[:120],
                                     "started": stamp, "pid": None, "log": str(log_file),
-                                    "mode": "terminal"})
+                                    "mode": "terminal", "echo_size": echo_size})
             self._save_registry()
-            log_file.write_text(f"[{stamp}] {tool} 開啟可見終端\n指令：{task}", encoding="utf-8")
-            note = f"{tool} 已開終端並帶入指令" if tool == "grok" else f"{tool} 無無頭模式，已開啟終端，指令請貼入"
+            note = f"{tool} 已開終端並帶入指令"
             return self._json({"ok": True, "tool": tool, "mode": "terminal",
                                "note": note, "log": str(log_file)})
         except Exception as e:
             return self._json({"ok": False, "error": str(e)}, 500)
 
+    # 從 log 尾端認出「跑起來了但失敗」。這些都是實際踩過的訊息，不是猜的。
+    _FAIL_MARKS = ("usage limit", "rate limit", "quota exceeded", "error:",
+                   "traceback (most recent call last)", "is not recognized",
+                   "command not found", "invalid_grant")
+
+    def _dispatch_state(self, d: dict, alive: bool) -> str:
+        """running / waiting / done / failed / silent
+
+        原本只有 alive 一個布林值，所以畫面只分得出「執行中」跟「不是執行中」，
+        跑完的、失敗的、還沒被按下去的終端全部長一樣 ——
+        清單標題寫「執行中的派工」，實際上是一份只增不減的歷史。
+        """
+        if alive:
+            return "running"
+        if d.get("mode") == "sync":
+            return "done"
+        log = Path(d.get("log") or "")
+        try:
+            size = log.stat().st_size if log.exists() else 0
+        except OSError:
+            size = 0
+        if d.get("mode") == "terminal":
+            # 終端模式追不到 pid。log 裡只有派工當下寫進去的那份指令回音，
+            # 表示那個視窗還沒被執行 —— 這是最常見的「以為派出去了其實沒有」。
+            echo = d.get("echo_size")
+            if echo is None:
+                # 舊登錄沒有這個欄位，退回保守判斷：只有回音那幾行就算還沒跑
+                return "waiting" if size < 4000 else "done"
+            return "waiting" if size <= echo else "done"
+        if size == 0:
+            return "silent"          # 無頭跑完但一個字都沒輸出
+        try:
+            tail = log.read_text(encoding="utf-8", errors="ignore")[-4000:].lower()
+        except OSError:
+            return "done"
+        return "failed" if any(m in tail for m in self._FAIL_MARKS) else "done"
+
     def do_dispatches(self):
-        """派工追蹤：列出登錄的派工，檢查進程是否還活著，附 log 尾端預覽"""
+        """派工追蹤：列出登錄的派工，判斷真正的狀態，附 log 尾端預覽"""
         if not self.DISPATCHES:
             self._load_registry()
         out = []
-        for d in reversed(self.DISPATCHES[-30:]):
-            d = dict(d)
-            pid = d.get("pid")
-            if pid:
-                try:
-                    r = subprocess.run(["tasklist", "/fi", f"PID eq {pid}", "/nh"],
-                                       capture_output=True, text=True, timeout=8)
-                    d["alive"] = str(pid) in r.stdout
-                except Exception:
-                    d["alive"] = False
-            else:
-                d["alive"] = False
+        recent = [dict(d) for d in reversed(self.DISPATCHES[-30:])]
+        # 一次把所有 pid 問完。原本是每一筆各叫一次 tasklist，
+        # 一次輪詢就開好幾個子行程；這個端點每 8 秒被打一次，
+        # 在 Windows 上等於持續閃視窗、持續搶焦點。
+        alive_pids = _alive_pids({int(d["pid"]) for d in recent if d.get("pid")})
+        for d in recent:
+            d["alive"] = bool(d.get("pid")) and int(d["pid"]) in alive_pids
+            d["state"] = self._dispatch_state(d, d["alive"])
             log = Path(d.get("log", ""))
             if log.exists() and not d["alive"]:
                 d["result"] = log.read_text(encoding="utf-8", errors="ignore")[-400:]

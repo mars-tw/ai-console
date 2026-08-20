@@ -9,6 +9,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { t, useLang } from '@/i18n'
+import { isLive, look, stateOf } from '@/lib/dispatchState'
 import type { DispatchRecord } from '@/types/data'
 
 interface Step {
@@ -43,11 +44,17 @@ export default function Console() {
   const [note, setNote] = useState('')
   const [autoRun, setAutoRun] = useState(false)
   const [dispatches, setDispatches] = useState<DispatchRecord[]>([])
+  const [showDone, setShowDone] = useState(false)
   const [history, setHistory] = useState<string[]>([])
   // 展開中的派工與它的產出。派出去卻看不到結果，等於白派。
   const [openLog, setOpenLog] = useState<string | null>(null)
   const [logText, setLogText] = useState<Record<string, string>>({})
   const boxRef = useRef<HTMLTextAreaElement>(null)
+
+  // 進行中的排前面，結束的收進摺疊區。之前是一份只增不減的歷史全部攤在
+  // 「執行中的派工」標題底下，看久了就完全不知道現在到底有沒有東西在跑。
+  const live = dispatches.filter(isLive)
+  const done = dispatches.filter((d) => !isLive(d))
 
   // 派工狀態每 8 秒刷新一次，讓「執行中 → 完成」自己會動
   useEffect(() => {
@@ -259,12 +266,30 @@ export default function Console() {
 
       {/* ── 執行追蹤 ── */}
       <div className="rounded border border-zinc-800 bg-zinc-900 p-3">
-        <div className="mb-2 text-xs font-medium tracking-widest text-zinc-400">{t('🛰️ 執行中的派工')}</div>
+        <div className="mb-2 flex items-center gap-2">
+          <span className="text-xs font-medium tracking-widest text-zinc-400">{t('🛰️ 派工')}</span>
+          {live.length > 0 && (
+            <span className="rounded bg-amber-400/15 px-1.5 text-[10px] text-amber-300">
+              {t('{n} 件進行中', { n: live.length })}
+            </span>
+          )}
+          {done.length > 0 && (
+            <button
+              className="ml-auto text-[10px] text-zinc-500 hover:text-zinc-300"
+              onClick={() => setShowDone((v) => !v)}
+            >
+              {showDone ? t('收起已結束（{n}）', { n: done.length }) : t('看已結束（{n}）', { n: done.length })}
+            </button>
+          )}
+        </div>
         {dispatches.length === 0 && (
           <div className="text-xs text-zinc-600">{t('目前沒有派工')}</div>
         )}
+        {dispatches.length > 0 && live.length === 0 && !showDone && (
+          <div className="text-xs text-zinc-600">{t('沒有進行中的派工')}</div>
+        )}
         <div className="flex flex-col gap-1">
-          {dispatches.slice(0, 12).map((d) => (
+          {(showDone ? [...live, ...done] : live).slice(0, 12).map((d) => (
             <div key={d.id}>
               <button
                 onClick={() => loadLog(d.id)}
@@ -276,8 +301,8 @@ export default function Console() {
                   {d.tool}
                 </span>
                 <span className="min-w-0 flex-1 truncate text-zinc-400" title={d.task}>{d.task}</span>
-                <span className="flex-none text-zinc-500">
-                  {d.alive ? t('執行中') : d.result || d.reply ? t('完成') : t('已開終端')}
+                <span className={`flex-none ${look(stateOf(d)).tone}`}>
+                  {look(stateOf(d)).label}
                 </span>
               </button>
               {openLog === d.id && (

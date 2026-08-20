@@ -91,22 +91,16 @@ export class OfficeRenderer {
     b.beginPath()
     b.ellipse(a.x, a.y - 1, 9, 3.5, 0, 0, Math.PI * 2)
     b.fill()
-    if (a.mode === 'away') {
-      // 外出：整隻抽成灰階。
-      //
-      // 原本是在牠身上疊一塊 saturation 混色的方塊，但混色作用的對象是
-      // 「方塊底下的所有東西」—— 地板、地毯、家具一起被抽掉彩度，
-      // 畫面上就多出一個硬邊灰方塊（拍宣傳截圖時特別明顯）。
-      // filter 只影響接下來畫的這一次 drawImage，不會波及背景。
-      b.save()
-      // 抽到全灰又只剩半透明的話，看起來會像石雕而不是「那隻龍出去了」。
-      // 留一點原色、透明度也拉高，才認得出是誰。
-      b.filter = 'grayscale(0.85)'
-      drawAgent(b, a.key, frame, a.x, a.y + bob, flip, 0.8)
-      b.restore()
-    } else {
-      drawAgent(b, a.key, frame, a.x, a.y + bob, flip, 1)
-    }
+    // 沒有活動跡象的（外出／查不到狀態）只調透明度，**不要**抽彩度。
+    //
+    // 這裡踩過兩次：
+    //   1. 最早是疊一塊 saturation 混色方塊，但混色作用於「方塊底下的所有東西」，
+    //      地板家具一起被抽掉彩度，畫面上多出一個硬邊灰方塊
+    //   2. 改成 filter: grayscale 之後方塊沒了，但整隻變灰 —— 黃色的傻龍看起來
+    //      像壞掉的素材。辦公室的全部意義就是「一眼認出誰是誰」，
+    //      抽掉顏色等於把身分也抽掉了
+    // 半透明已經足夠表達「不在狀態內」，而且認得出是哪一隻。
+    drawAgent(b, a.key, frame, a.x, a.y + bob, flip, a.mode === 'away' ? 0.55 : 1)
     if (o.hover === a.key) {
       b.strokeStyle = SKINS[a.key]?.color ?? '#fff'
       b.lineWidth = 1

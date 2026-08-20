@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import PixelOffice from '@/components/PixelOffice'
 import { SKINS } from '@/pixel/sprites'
 import { t, useLang } from '@/i18n'
+import { isLive, look, stateOf } from '@/lib/dispatchState'
 import type { ConversationSummary, DispatchRecord, HubProject, ToolStatus } from '@/types/data'
 
 // ── 角色人設（名稱與配色統一由 SKINS 提供，這裡只放對話用的人格）──
@@ -105,6 +106,10 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   const [audit, setAudit] = useState<AuditReport | null>(null)
   const [auditBusy, setAuditBusy] = useState(false)
 
+  // 只有還沒結束的才算「現在正在發生」。整份歷史攤在這裡的話，
+  // 辦公室永遠看起來很忙，實際上可能一件都沒在跑。
+  const liveDispatches = dispatches.filter(isLive)
+
   const refreshDispatches = () => {
     fetch('/api/dispatches').then((r) => r.ok ? r.json() : null)
       .then((d) => d?.ok && setDispatches(d.dispatches)).catch(() => {})
@@ -194,7 +199,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
     ['#fbbf24', t('偷懶中'), t('上廁所、看書、泡咖啡、種花、走來走去')],
     ['#818cf8', t('休息中'), t('額度用畢躺沙發，對話框寫明恢復時間')],
     ['#f59e0b', t('派工中'), t('站到白板前執行任務（tool calling）')],
-    ['#71717a', t('外出'), t('沒有活動跡象，灰階待命')],
+    ['#71717a', t('沒紀錄'), t('找不到這個工具的使用紀錄，先擺在門邊；半透明不是壞掉')],
   ]
 
   return (
@@ -251,17 +256,26 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
               {t('派出')}
             </button>
           </div>
-          {/* 派工追蹤 */}
-          {dispatches.length > 0 && (
+          {/* 派工追蹤：只列還沒結束的。結束的留在主控台分頁看，
+              這裡是「現在辦公室裡在發生什麼」，不是歷史紀錄 */}
+          {liveDispatches.length > 0 && (
             <div className="mt-2 flex max-h-32 flex-col gap-1 overflow-y-auto">
-              {dispatches.map((d) => (
-                <div key={d.id} className="flex items-center gap-2 rounded bg-zinc-950 px-2 py-1 text-xs" title={d.result || ''}>
-                  <span className={`inline-block h-2 w-2 flex-none rounded-full ${d.alive ? 'animate-pulse bg-amber-400' : d.mode === 'sync' || d.result ? 'bg-emerald-500' : 'bg-zinc-500'}`} />
-                  <span className="flex-none font-medium text-zinc-300">{d.tool}</span>
-                  <span className="min-w-0 flex-1 truncate text-zinc-500">{d.task}</span>
-                  <span className="flex-none text-zinc-500">{d.alive ? t('執行中') : d.result || d.reply ? t('完成') : t('已開終端')}</span>
-                </div>
-              ))}
+              {liveDispatches.map((d) => {
+                const lk = look(stateOf(d))
+                return (
+                  <div key={d.id} className="flex items-center gap-2 rounded bg-zinc-950 px-2 py-1 text-xs" title={d.result || ''}>
+                    <span className={`inline-block h-2 w-2 flex-none rounded-full ${lk.dot}`} />
+                    <span className="flex-none font-medium text-zinc-300">{d.tool}</span>
+                    <span className="min-w-0 flex-1 truncate text-zinc-500">{d.task}</span>
+                    <span className={`flex-none ${lk.tone}`}>{lk.label}</span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          {dispatches.length > 0 && liveDispatches.length === 0 && (
+            <div className="mt-2 text-[11px] text-zinc-600">
+              {t('目前沒有進行中的派工（最近 {n} 件都結束了）', { n: dispatches.length })}
             </div>
           )}
           {/* 稽核列 */}
