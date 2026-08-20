@@ -43,6 +43,15 @@ function folderName(dir: string): string {
   return parts[parts.length - 1] || dir
 }
 
+/** 讀某個對話的本機聊天暫存。壞掉就當成空的，不要讓整頁炸掉 */
+function readChatCache(id?: string): { role: string; text: string }[] {
+  if (!id) return []
+  try {
+    const saved = localStorage.getItem('ac_chat_' + id)
+    return saved ? JSON.parse(saved) : []
+  } catch { return [] }
+}
+
 export default function Home() {
   useLang()   // 語言一換就整頁重繪
   const [index, setIndex] = useState<IndexData | null>(null)
@@ -53,7 +62,18 @@ export default function Home() {
   const [showOld, setShowOld] = useState(() => localStorage.getItem('ac_showOld') === '1')
   const [showDispatch, setShowDispatch] = useState(() => localStorage.getItem('ac_showDisp') === '1')
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({})
-  const [selected, setSelected] = useState<ConversationSummary | null>(null)
+  /**
+   * 選取的對話只存 id，實體從索引推導。
+   *
+   * 原本存整個物件，於是「重新整理後還原上次選取」得靠一個 effect：
+   * 等索引載進來 → 找出那一筆 → setState。那是典型的 derived state，
+   * 多一次 render 不說，索引更新後手上那份還會是舊的副本。
+   */
+  /** 目前聊天串屬於哪一個對話。跟 selectedId 不同步時就重置 */
+  const [chatFor, setChatFor] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(
+    () => localStorage.getItem('ac_selected'),
+  )
   const [detail, setDetail] = useState<ConversationDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [showAll, setShowAll] = useState<Record<string, boolean>>({})
@@ -96,6 +116,11 @@ export default function Home() {
     }).catch(() => setApiOk(false))
   }, [])
 
+  const normalize = (d: IndexData): IndexData => {
+    d.conversations.forEach((c) => { if (c.mtime < 1e12) c.mtime *= 1000 })  // python 秒 → JS 毫秒
+    return d
+  }
+
   const reloadIndex = () => {
     fetch('/data/index.json?t=' + Date.now()).then((r) => r.json()).then((d) => setIndex(normalize(d))).catch(() => {})
   }
@@ -112,16 +137,10 @@ export default function Home() {
     return () => clearInterval(timer)
   }, [apiOk])
 
-  // 還原上次選取的對話
-  useEffect(() => {
-    if (index && !selected) {
-      const lastId = localStorage.getItem('ac_selected')
-      if (lastId) {
-        const c = index.conversations.find((x) => x.id === lastId)
-        if (c) setSelected(c)
-      }
-    }
-  }, [index])
+  const selected = useMemo(
+    () => (selectedId ? index?.conversations.find((c) => c.id === selectedId) ?? null : null),
+    [index, selectedId],
+  )
 
   /** 刪除一個對話：伺服器把來源檔搬到回收區，可以救回來 */
   const removeConv = async (c: ConversationSummary) => {
@@ -135,7 +154,7 @@ export default function Home() {
       const d = await r.json()
       if (d.ok) {
         setDeleted((s2) => new Set(s2).add(c.id))
-        if (selected?.id === c.id) setSelected(null)
+        if (selected?.id === c.id) setSelectedId(null)
         showToast(t('已移到回收區'))
       } else showToast(t('刪除失敗：{err}', { err: d.error || '' }))
     } catch { showToast(t('控制 API 無回應')) }
@@ -165,14 +184,20 @@ export default function Home() {
     setBusy('')
   }
 
-  // 選新對話時重置聊天串，並嘗試還原本機暫存
-  useEffect(() => {
-    if (!selected) { setChatMsgs([]); return }
-    try {
-      const saved = localStorage.getItem('ac_chat_' + selected.id)
-      setChatMsgs(saved ? JSON.parse(saved) : [])
-    } catch { setChatMsgs([]) }
-  }, [selected])
+  /**
+   * 換對話時重置聊天串，並還原本機暫存。
+   *
+   * 用 React 官方的「render 期間調整 state」寫法，不用 effect：
+   * effect 版本要等畫面先用舊訊息渲染一次、再被覆蓋掉，中間那一幀
+   * 會看到上一個對話的內容閃過去。訊息本身還是 state（使用者會繼續往下打），
+   * 所以不能純推導。
+   */
+  if (chatFor !== (selected?.id ?? null)) {
+    setChatFor(selected?.id ?? null)
+    setChatMsgs(readChatCache(selected?.id))
+    setDetail(null)          // 上一個對話的內容不要殘留到新的那一欄
+    setDetailLoading(!!selected?.hasMessages)
+  }
 
   const seedChat = () => {
     if (!detail?.messages?.length) return
@@ -241,10 +266,6 @@ export default function Home() {
     setChatBusy(false)
   }
 
-  const normalize = (d: IndexData): IndexData => {
-    d.conversations.forEach((c) => { if (c.mtime < 1e12) c.mtime *= 1000 })  // python 秒 → JS 毫秒
-    return d
-  }
 
   useEffect(() => {
     fetch('/data/index.json')
@@ -259,20 +280,27 @@ export default function Home() {
   useEffect(() => {
     if (!selected) return
     localStorage.setItem('ac_selected', selected.id)
-    setDetail(null)
     if (!selected.hasMessages) return
-    setDetailLoading(true)
     fetch(`/data/conv/${selected.id}.json`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => { setDetail(d); setDetailLoading(false) })
       .catch(() => setDetailLoading(false))
   }, [selected])
 
+  /**
+   * 「一週未使用」的基準時刻。
+   *
+   * 用索引自己的產生時間，不用 Date.now()：render 期間呼叫不純函式會讓
+   * 結果隨著任何一次重繪跳動（React 也會擋）。而且對齊索引的快照時刻本來就比較對 ——
+   * 判斷冷熱的資料是那一刻掃出來的，不是使用者盯著畫面的當下。
+   */
+  const indexNow = index?.generated_at ? new Date(index.generated_at).getTime() : 0
+
   // 依「原始專案資料夾」分組（保留各工具原本的目錄結構）
   const groups = useMemo(() => {
     if (!index) return [] as { dir: string; line: string; convs: ConversationSummary[] }[]
     const q = search.trim().toLowerCase()
-    const cutoff = Date.now() - WEEK_MS
+    const cutoff = indexNow - WEEK_MS
     const filtered = index.conversations.filter((c) => {
       if (deleted.has(c.id)) return false
       // 有搜尋字串時豁免所有隱藏過濾器。
@@ -311,13 +339,13 @@ export default function Home() {
         return { dir, line, convs }
       })
       .sort((a, b) => (b.convs[0]?.mtime ?? 0) - (a.convs[0]?.mtime ?? 0))
-  }, [index, search, showSubagent, showDup, showOld, showDispatch, activeDays, deleted])
+  }, [index, indexNow, search, showSubagent, showDup, showOld, showDispatch, activeDays, deleted])
 
   const oldCount = useMemo(() => {
     if (!index) return 0
-    const cutoff = Date.now() - WEEK_MS
+    const cutoff = indexNow - WEEK_MS
     return index.conversations.filter((c) => c.mtime < cutoff && !c.subagent && !c.dup).length
-  }, [index])
+  }, [index, indexNow])
 
   const hubProjects = useMemo(() => {
     const m = new Map<string, { status: string; needs_handoff: boolean; next_step: string }>()
@@ -462,7 +490,7 @@ export default function Home() {
                       className={`group flex w-full items-start gap-1 px-3 py-1.5 pl-7 hover:bg-zinc-50 dark:hover:bg-zinc-900 ${selected?.id === c.id ? 'bg-zinc-100 dark:bg-zinc-800' : ''}`}
                     >
                       <button
-                        onClick={() => setSelected(c)}
+                        onClick={() => setSelectedId(c.id)}
                         className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
                       >
                         <span className="truncate text-sm">
