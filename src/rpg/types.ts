@@ -93,8 +93,6 @@ export interface Hero {
   look: HeroLook
   level: number
   xp: number
-  skillPoints: number
-  attrPoints: number
   gold: number
   bag: Item[]
   loadouts: Loadout[]
@@ -110,6 +108,8 @@ export interface Hero {
   pets: Pet[]
   /** 出戰中的寵物 id；沒有就不帶 */
   activePet?: string
+  /** 隊伍成員（SKINS 的 key）。存檔裡才記得住，不然每次重開都要重新揪人 */
+  party?: string[]
 }
 
 /** 由等級 + 屬性 + 裝備 + 技能算出來的最終數值 */

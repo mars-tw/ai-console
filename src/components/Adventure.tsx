@@ -10,10 +10,11 @@ import { SKINS } from '@/pixel/sprites'
 import { itemLabel, t, useLang } from '@/i18n'
 import { DUNGEONS, RARITY_ORDER, SKILLS_OF_LINE, SKILL_BY_ID, ZONES } from '@/rpg/data'
 import {
-  activeLoadout, allyCombatant, autoEquipBest, collect, computeStats, isUpgrade,
-  itemById, itemScore, linePoints, skillUnlocked, startBattle, stepBattle,
+  activeLoadout, allyCombatant, attrLeft, autoEquipBest, collect, computeStats, isUpgrade,
+  itemById, itemScore, linePoints, skillLeft, skillUnlocked, startBattle, stepBattle,
   xpForLevel, type Battle,
 } from '@/rpg/engine'
+import { SHOP, type BuyResult, type ShopEntry } from '@/rpg/shop'
 import { loadHero, resetHero, saveHero } from '@/rpg/save'
 import { commitOrder, guard, setFocus, stepTurn, drinkPotion, petXpForLevel } from '@/rpg/engine'
 import {
@@ -138,8 +139,8 @@ export default function Adventure({ tools }: Props) {
   const [hero, setHero] = useState<Hero>(() => loadHero())
   const [battle, setBattle] = useState<Battle | null>(null)
   const [auto, setAuto] = useState(true)
-  const [party, setParty] = useState<string[]>([])
-  const [tab, setTab] = useState<'skills' | 'gear' | 'bag'>('skills')
+  const [party, setPartyState] = useState<string[]>(() => hero.party ?? [])
+  const [tab, setTab] = useState<'skills' | 'gear' | 'bag' | 'shop'>('skills')
   // 背包篩選
   const [fSlot, setFSlot] = useState<Slot | 'all'>('all')
   const [fRarity, setFRarity] = useState<Rarity | 'all'>('all')
@@ -148,6 +149,7 @@ export default function Adventure({ tools }: Props) {
   const [notice, setNotice] = useState('')
   const heroRef = useRef(hero)
   const battleRef = useRef(battle)
+  const partyRef = useRef(party)
   /** 手動模式排隊的技能：放在 ref，不去改動 state 物件 */
   // ref 只在 effect 裡更新，不在 render 期間寫
   const autoRef = useRef(auto)
@@ -157,6 +159,9 @@ export default function Adventure({ tools }: Props) {
 
   const stats = useMemo(() => computeStats(hero), [hero])
   const lo = activeLoadout(hero)
+  // 點數是「這一套」的，不是全域共用的池子 —— 三套各自配滿，隨時切
+  const attrPts = attrLeft(hero)
+  const skillPts = skillLeft(hero)
 
   const flash = (m: string) => { setNotice(m); setTimeout(() => setNotice(''), 3500) }
   const update = useCallback((fn: (h: Hero) => void) => {
@@ -224,11 +229,6 @@ export default function Adventure({ tools }: Props) {
     return () => clearTimeout(timer)
   }, [])
 
-  const enterZone = (id: string) => {
-    setBattle(startBattle(hero, 'field', id, buildParty()))
-    update((h) => { h.zone = id })
-  }
-
   const buildParty = (members: string[] = party): Combatant[] =>
     members.map((k) => {
       const lv = Math.max(1, Math.round((hero.level - 1 + Math.random() * 3) * allyState(k).bonus))
@@ -245,17 +245,68 @@ export default function Adventure({ tools }: Props) {
     return picked
   }
 
+  /**
+   * 隊伍變動 → 存檔 + 立刻反映到進行中的戰鬥。
+   *
+   * 原本 setParty 只是元件內的 state，兩個問題都很致命：
+   *   1. 沒有存檔，重開就散隊，每次都要重揪
+   *   2. 只影響「下一場」，打到一半按入隊只有按鈕變綠，戰場上根本沒那個人
+   * 看起來就是組隊功能壞掉。這裡兩個一起修。
+   */
+  const setParty = (next: string[] | ((p: string[]) => string[])) => {
+    const members = typeof next === 'function' ? next(partyRef.current) : next
+    partyRef.current = members
+    setPartyState(members)
+    update((h) => { h.party = members })
+
+    const b = battleRef.current
+    if (!b || b.over) return
+    const keep = b.allies.filter((a) => members.includes(a.art))
+    const have = new Set(keep.map((a) => a.art))
+    b.allies = [...keep, ...buildParty(members.filter((k) => !have.has(k)))]
+    const nb = { ...b }
+    battleRef.current = nb      // 心跳讀的是 ref，只 setBattle 會被下一拍蓋掉
+    setBattle(nb)
+  }
+
+  /**
+   * 開一場新的。
+   *
+   * battleRef 一定要當場設好：心跳跑在 setTimeout 上、讀的是 battleRef.current，
+   * 而 useEffect 同步 ref 要等這次 render 提交完。中間那段空窗如果剛好心跳到了，
+   * 它會推進舊的那一場再 setBattle 蓋回去 —— 表現出來就是「按了新地圖沒有換」。
+   */
+  const launch = (b: Battle, zoneId: string) => {
+    battleRef.current = b
+    setBattle(b)
+    update((h) => { h.zone = zoneId })
+  }
+
+  /** 打到一半換地方 = 這一場的進度全丟，先問過再說 */
+  const confirmLeave = () => {
+    const b = battleRef.current
+    return !b || b.over || confirm(t('這一場還沒打完，換地方就得從頭開始。確定要走嗎？'))
+  }
+
+  const enterZone = (id: string) => {
+    if (!confirmLeave()) return
+    launch(startBattle(hero, 'field', id, buildParty()), id)
+  }
+
   const enterDungeon = (id: string) => {
     const dg = DUNGEONS.find((d) => d.id === id)!
     if (hero.level < dg.minLevel) return flash(t('等級不足，{name} 需要 Lv.{lv}', { name: t(dg.name), lv: dg.minLevel }))
+    if (!confirmLeave()) return
     // 人不夠不擋你，直接叫 AI 夥伴補位
     const members = party.length + 1 < dg.partySize ? autoParty(dg.partySize) : party
     if (members.length !== party.length) {
-      setParty(members)
       const added = members.filter((k) => !party.includes(k)).map((k) => SKINS[k].name).join('、')
+      partyRef.current = members
+      setPartyState(members)
+      update((h) => { h.party = members })
       flash(t('人手不夠，{who} 自動加入隊伍', { who: added }))
     }
-    setBattle(startBattle(hero, 'dungeon', id, buildParty(members)))
+    launch(startBattle(hero, 'dungeon', id, buildParty(members)), id)
   }
 
   /**
@@ -287,19 +338,33 @@ export default function Adventure({ tools }: Props) {
 
   // ── 配點 ──
   const addAttr = (a: typeof ATTRS[number]) => update((h) => {
-    if (h.attrPoints <= 0) return
-    h.attrPoints--
+    if (attrLeft(h) <= 0) return
     h.loadouts[h.active].attrs[a] = (h.loadouts[h.active].attrs[a] ?? 0) + 1
   })
   const addSkill = (id: string) => update((h) => {
     const l = h.loadouts[h.active]
     const sk = SKILL_BY_ID[id]
-    if (h.skillPoints <= 0 || !sk) return
+    if (skillLeft(h) <= 0 || !sk) return
     if ((l.skills[id] ?? 0) >= sk.maxLv) return
     if (linePoints(l, sk.line) < sk.req) return
-    h.skillPoints--
     l.skills[id] = (l.skills[id] ?? 0) + 1
   })
+  /**
+   * 買東西。
+   *
+   * 金幣本來只進不出 —— 打贏拿到的數字沒有任何用處，藥水喝完也只能等掉落。
+   * 有了出口，賣雜物、要不要現在換裝、留著洗點才變成決策。
+   */
+  const buy = (e: ShopEntry) => {
+    const price = e.price(hero)
+    if (hero.gold < price) return flash(t('金幣不夠，還差 {n}', { n: price - hero.gold }))
+    const why = e.blocked?.(hero)
+    if (why) return flash(t(why))
+    let res: BuyResult | undefined
+    update((h) => { h.gold -= price; res = e.buy(h) })
+    setTimeout(() => { if (res) flash(t(res.msg, res.params)) }, 0)
+  }
+
   const equip = (it: Item) => update((h) => { h.loadouts[h.active].equipped[it.slot] = it.id })
   const unequip = (s: Slot) => update((h) => { delete h.loadouts[h.active].equipped[s] })
   const sell = (it: Item) => update((h) => {
@@ -408,13 +473,13 @@ export default function Adventure({ tools }: Props) {
             <div>{t('急速')} <span className="text-zinc-200">{(stats.haste * 100).toFixed(1)}%</span></div>
           </div>
           <div className="mt-2 border-t border-zinc-800 pt-2">
-            <div className="mb-1 text-[10px] text-zinc-500">{t('屬性點：{n}', { n: hero.attrPoints })}</div>
+            <div className="mb-1 text-[10px] text-zinc-500">{t('屬性點：{n}（這一套）', { n: attrPts })}</div>
             <div className="flex flex-wrap gap-1.5">
               {ATTRS.map((a) => (
                 <button
                   key={a}
                   className="rounded border border-zinc-700 px-1.5 py-0.5 text-xs hover:bg-zinc-800 disabled:opacity-40"
-                  disabled={hero.attrPoints <= 0}
+                  disabled={attrPts <= 0}
                   onClick={() => addAttr(a)}
                 >
                   {t(ATTR_NAME[a])} {stats.attrs[a]} <span className="text-emerald-400">+</span>
@@ -702,9 +767,10 @@ export default function Adventure({ tools }: Props) {
       <div className="rounded border border-zinc-800 bg-zinc-900 p-3">
         <div className="mb-2 flex gap-2">
           {([
-            ['skills', t('技能（{n} 點）', { n: hero.skillPoints })],
+            ['skills', t('技能（{n} 點）', { n: skillPts })],
             ['gear', t('裝備')],
             ['bag', t('背包（{n}）', { n: hero.bag.length })],
+            ['shop', t('🏪 商店')],
           ] as const).map(([k, label]) => (
             <button
               key={k}
@@ -730,12 +796,12 @@ export default function Adventure({ tools }: Props) {
                         key={sk.id}
                         title={`${t(sk.desc)}${open ? '' : t('（需要 {line} 投入 {n} 點）', { line: t(LINE_NAME[line]), n: sk.req })}`}
                         className="flex items-center gap-1.5 rounded border border-zinc-800 px-2 py-1 text-left text-xs hover:bg-zinc-800 disabled:opacity-40"
-                        disabled={!open || hero.skillPoints <= 0 || lv >= sk.maxLv}
+                        disabled={!open || skillPts <= 0 || lv >= sk.maxLv}
                         onClick={() => addSkill(sk.id)}
                       >
                         <span className={open ? '' : 'text-zinc-600'}>{t(sk.name)}</span>
                         <span className="ml-auto text-zinc-500">{lv}/{sk.maxLv}</span>
-                        {open && hero.skillPoints > 0 && lv < sk.maxLv && <span className="text-emerald-400">+</span>}
+                        {open && skillPts > 0 && lv < sk.maxLv && <span className="text-emerald-400">+</span>}
                       </button>
                     )
                   })}
@@ -828,6 +894,40 @@ export default function Adventure({ tools }: Props) {
                     {!equipped && <button className="flex-none text-zinc-500 hover:text-red-400" onClick={() => sell(it)}>{t('賣')}</button>}
                     {equipped && <span className="flex-none text-zinc-600">{t('使用中')}</span>}
                   </div>
+                )
+              })}
+            </div>
+          </>
+        )}
+
+        {tab === 'shop' && (
+          <>
+            <div className="mb-2 text-[11px] text-zinc-500">
+              {t('身上有 {n} 金。價格會隨等級走，所以任何時候都買得起一點東西。', { n: hero.gold })}
+            </div>
+            <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
+              {SHOP.map((e) => {
+                const price = e.price(hero)
+                const why = e.blocked?.(hero)
+                const poor = hero.gold < price
+                return (
+                  <button
+                    key={e.id}
+                    onClick={() => buy(e)}
+                    disabled={!!why}
+                    title={t(e.desc)}
+                    className={`flex flex-col gap-0.5 rounded border px-2.5 py-2 text-left ${
+                      why ? 'border-zinc-800 opacity-40'
+                        : poor ? 'border-zinc-800 hover:bg-zinc-800'
+                          : 'border-amber-700/50 hover:bg-amber-950/30'}`}
+                  >
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <span>{e.icon}</span>
+                      <span className="font-medium text-zinc-200">{t(e.name)}</span>
+                      <span className={`ml-auto ${poor ? 'text-zinc-600' : 'text-amber-300'}`}>🪙 {price}</span>
+                    </div>
+                    <div className="text-[10px] leading-snug text-zinc-500">{why ? t(why) : t(e.desc)}</div>
+                  </button>
                 )
               })}
             </div>

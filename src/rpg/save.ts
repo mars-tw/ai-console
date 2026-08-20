@@ -22,6 +22,7 @@ export function loadHero(): Hero {
     // 外觀與寵物都是後來加的，舊存檔要補
     h.look ??= 'hero'
     h.pets ??= []
+    h.party ??= []
     h.potions.hp ??= 0
     h.potions.mp ??= 0
     h.active = Math.min(h.active ?? 0, h.loadouts.length - 1)

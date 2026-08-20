@@ -43,7 +43,7 @@ export function emptyLoadout(name: string): Loadout {
 
 export function newHero(name = '你', look: HeroLook = 'hero'): Hero {
   const h: Hero = {
-    name, look, level: 1, xp: 0, skillPoints: 3, attrPoints: 5, gold: 0,
+    name, look, level: 1, xp: 0, gold: 0,
     bag: [], loadouts: [emptyLoadout('主要'), emptyLoadout('第二套'), emptyLoadout('第三套')],
     active: 0, zone: 'meadow', kills: 0, deaths: 0,
     potions: { hp: 3, mp: 2 },
@@ -58,6 +58,24 @@ export function newHero(name = '你', look: HeroLook = 'hero'): Hero {
 }
 
 export const activeLoadout = (h: Hero) => h.loadouts[h.active]
+
+/**
+ * 配點預算：每一套各自算，不是共用一個池子。
+ *
+ * 原本點數池放在 Hero 上（h.attrPoints），配出去的點卻記在各自的套裝裡。
+ * 結果第一套配完，池子歸零，切到第二套時屬性全是 0、又沒有點可以配 ——
+ * 那兩套等於是壞的，而「整組切換」這個賣點也就不存在了。
+ * 改成「等級給的總點數 − 這一套已經配掉的」，三套就各自獨立、隨時可切。
+ */
+export const attrBudget = (level: number) => 5 + (level - 1) * 3
+export const skillBudget = (level: number) => 3 + (level - 1) * 2
+
+const sum = (o: Record<string, number>) => Object.values(o).reduce((a, b) => a + b, 0)
+export const spentAttr = (lo: Loadout) => sum(lo.attrs)
+export const spentSkill = (lo: Loadout) => sum(lo.skills)
+/** 這一套還剩幾點可以配 */
+export const attrLeft = (h: Hero, lo: Loadout = activeLoadout(h)) => attrBudget(h.level) - spentAttr(lo)
+export const skillLeft = (h: Hero, lo: Loadout = activeLoadout(h)) => skillBudget(h.level) - spentSkill(lo)
 export const itemById = (h: Hero, id?: string) => (id ? h.bag.find((i) => i.id === id) : undefined)
 
 /** 某條線總共投了幾點（決定技能解鎖） */
@@ -791,8 +809,6 @@ export function collect(h: Hero, b: Battle): { levels: number; loot: Item[]; new
   while (h.xp >= xpForLevel(h.level)) {
     h.xp -= xpForLevel(h.level)
     h.level++
-    h.skillPoints += 2
-    h.attrPoints += 3
     levels++
   }
   const loot = b.loot
