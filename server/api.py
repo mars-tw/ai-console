@@ -1215,13 +1215,23 @@ class Handler(BaseHTTPRequestHandler):
                 req = urllib.request.Request("http://127.0.0.1:1234/v1/chat/completions",
                                              data=payload, headers={"Content-Type": "application/json; charset=utf-8"})
                 resp = json.loads(urllib.request.urlopen(req, timeout=280).read())
-                content = (resp.get("choices") or [{}])[0].get("message", {}).get("content", "")
+                msg = (resp.get("choices") or [{}])[0].get("message", {}) or {}
+                # 推理型模型會把答案留在 reasoning_content，content 反而空的。
+                # 拆解器早就兩邊都看了，這條漏掉 —— 結果是畫面顯示「完成」
+                # 但回覆一個字都沒有，使用者也看不出發生什麼事。
+                content = msg.get("content") or msg.get("reasoning_content") or ""
+                if not content.strip():
+                    finish = (resp.get("choices") or [{}])[0].get("finish_reason") or ""
+                    content = (f"（{model} 沒有回出內容"
+                               + (f"，finish_reason={finish}" if finish else "")
+                               + "。推理型模型可能把額度用在推理上，"
+                               "換一個模型或把問題講得更短會好一些）")
                 log_file.write_text(f"[{stamp}] local({model})\n指令：{task}\n\n{content}", encoding="utf-8")
                 self._reg_append({"id": stamp, "tool": "local", "task": raw_task[:120],
                                   "started": stamp, "pid": None, "log": str(log_file),
                                   "mode": "sync", "reply": content[:300]})
                 return self._json({"ok": True, "tool": "local", "model": model, "mode": "sync",
-                                   "reply": content, "log": str(log_file)})
+                                   "id": stamp, "reply": content, "log": str(log_file)})
             except Exception as e:
                 return self._json({"ok": False, "error": f"地端呼叫失敗：{e}"}, 502)
 
@@ -1263,7 +1273,7 @@ class Handler(BaseHTTPRequestHandler):
                               "mode": "terminal", "echo_size": echo_size})
             note = f"{tool} 已開終端並帶入指令"
             return self._json({"ok": True, "tool": tool, "mode": "terminal",
-                               "note": note, "log": str(log_file)})
+                               "id": stamp, "note": note, "log": str(log_file)})
         except Exception as e:
             return self._json({"ok": False, "error": str(e)}, 500)
 
