@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -41,12 +42,52 @@ def load() -> list[dict]:
     return []
 
 
+# 排程執行緒與請求執行緒都會讀寫這個檔，要序列化。
+# 用 RLock 是因為 upsert()／remove() 會在持鎖狀態下再呼叫 save()，
+# 普通 Lock 會自己卡死自己。
+_LOCK = threading.RLock()
+
+
 def save(rows: list[dict]) -> None:
-    try:
-        STORE.parent.mkdir(parents=True, exist_ok=True)
-        STORE.write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
-    except OSError:
-        pass
+    with _LOCK:
+        try:
+            STORE.parent.mkdir(parents=True, exist_ok=True)
+            # 先寫暫存再換掉：同時寫或中途斷電，至少不會留下半個 JSON
+            tmp = STORE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
+            tmp.replace(STORE)
+        except OSError:
+            pass
+
+
+def upsert(job: dict) -> dict:
+    """新增或更新一筆，整段讀改寫都在鎖裡
+
+    呼叫端不可以自己 load() 改完再 save() —— 那是三個獨立動作，
+    中間插進另一個執行緒就會互相蓋掉（壓測實證：同時存三筆只活一筆）。
+    """
+    with _LOCK:
+        rows = [j for j in load() if j.get("id") != job["id"]]
+        rows.append(job)
+        save(rows)
+        return job
+
+
+def remove(job_id: str) -> None:
+    with _LOCK:
+        save([j for j in load() if j.get("id") != job_id])
+
+
+def update(job_id: str, fn) -> dict | None:
+    """就地改一筆。fn 收到那一筆的 dict，直接改它"""
+    with _LOCK:
+        rows = load()
+        job = next((j for j in rows if j.get("id") == job_id), None)
+        if job is None:
+            return None
+        fn(job)
+        save(rows)
+        return job
 
 
 def next_run(job: dict, after: datetime | None = None) -> float:
@@ -91,7 +132,10 @@ def normalize(job: dict) -> dict:
     """把使用者送來的設定收成乾淨的樣子，並算好下一次"""
     kind = job.get("kind") if job.get("kind") in KINDS else "daily"
     out = {
-        "id": str(job.get("id") or f"s{int(time.time() * 1000):x}"),
+        # id 一定要夠獨特。原本是 f"s{毫秒:x}" —— 同一毫秒進來的兩個請求
+        # 會拿到同一個 id，upsert 就把彼此覆蓋掉了。
+        # 壓測實證：同時存六筆只活三筆（三個不同的毫秒）。
+        "id": str(job.get("id") or f"s{int(time.time() * 1000):x}{uuid.uuid4().hex[:6]}"),
         "name": str(job.get("name") or "").strip()[:60],
         "task": str(job.get("task") or "").strip(),
         "tool": str(job.get("tool") or "auto").strip(),
@@ -135,6 +179,13 @@ class Scheduler(threading.Thread):
                 pass
 
     def tick(self) -> None:
+        # 整段鎖住：這裡是讀 → 改 lastRun/nextRun → 寫，
+        # 跟使用者在介面上存檔是同一類的讀改寫，不鎖會互相蓋掉。
+        # fire() 只是啟動子行程（非阻塞），不會長時間佔著鎖。
+        with _LOCK:
+            self._tick_locked()
+
+    def _tick_locked(self) -> None:
         rows = load()
         if not rows:
             return

@@ -807,21 +807,30 @@ class Handler(BaseHTTPRequestHandler):
     KNOWN_TOOLS = set(BIN) | {"local", "auto"}
     CLOUD_CHAIN = ["claude", "codex", "gemini", "grok", "qwen"]  # 自動路由順序（地端由 LM Studio 兜底）
     DISPATCHES = []  # 派工登錄：{id, tool, task, started, pid, log, mode, reply}
+    # 請求執行緒、批次工作執行緒、排程執行緒都會動這份清單再整份寫檔。
+    # 沒有鎖的話兩邊同時寫會互相蓋掉 —— 這個專案已經因為登錄被覆蓋而丟過一次歷史。
+    _REG_LOCK = threading.Lock()
     REGISTRY = Path.home() / "ai-hub" / "dispatch-log" / "_registry.json"
 
     def _load_registry(self):
-        try:
-            if self.REGISTRY.exists():
-                self.DISPATCHES = json.loads(self.REGISTRY.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        with self._REG_LOCK:
+            try:
+                if self.REGISTRY.exists():
+                    type(self).DISPATCHES = json.loads(self.REGISTRY.read_text(encoding="utf-8"))
+            except Exception:
+                pass
 
     def _save_registry(self):
-        try:
-            self.REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-            self.REGISTRY.write_text(json.dumps(self.DISPATCHES[-100:], ensure_ascii=False), encoding="utf-8")
-        except Exception:
-            pass
+        with self._REG_LOCK:
+            try:
+                self.REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+                # 先寫暫存再換掉：中途斷電或同時寫，至少不會留下半個檔案
+                tmp = self.REGISTRY.with_suffix(".tmp")
+                tmp.write_text(json.dumps(self.DISPATCHES[-100:], ensure_ascii=False),
+                               encoding="utf-8")
+                tmp.replace(self.REGISTRY)
+            except Exception:
+                pass
 
     # 刪掉的對話搬到這裡，不是真的抹掉。誤刪救得回來。
     TRASH = Path.home() / ".ai-console" / "trash"
@@ -987,6 +996,7 @@ class Handler(BaseHTTPRequestHandler):
                         stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                         creationflags=subprocess.CREATE_NEW_CONSOLE, startupinfo=si)
                     proc_pid = proc.pid
+                    lf.close()          # 子行程已經有自己的一份，父行程不留
                 else:
                     lf = open(log_file, "w", encoding="utf-8")
                     env = dict(__import__("os").environ, QWEN_CODE_SUPPRESS_YOLO_WARNING="1")
@@ -994,6 +1004,7 @@ class Handler(BaseHTTPRequestHandler):
                                             stdin=subprocess.DEVNULL, env=env,
                                             creationflags=subprocess.CREATE_NO_WINDOW)
                     proc_pid = proc.pid
+                    lf.close()          # 同上
                 self.DISPATCHES.append({"id": stamp, "tool": tool, "task": raw_task[:120],
                                         "started": stamp, "pid": proc_pid, "log": str(log_file),
                                         "mode": "headless"})
@@ -1129,6 +1140,7 @@ class Handler(BaseHTTPRequestHandler):
                 make(safe), cwd=str(Path.home()), stdout=lf,
                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW)
+            lf.close()
         except Exception as e:
             return {"error": str(e)}
         self.DISPATCHES.append({
@@ -1161,32 +1173,32 @@ class Handler(BaseHTTPRequestHandler):
         job = schedule.normalize(body)
         if not job["task"]:
             return self._json({"ok": False, "error": "需要工作內容"}, 400)
-        rows = [j for j in schedule.load() if j.get("id") != job["id"]]
-        rows.append(job)
-        schedule.save(rows)
+        # 用 upsert 而不是自己 load→append→save：那是三個獨立動作，
+        # 中間插進另一個執行緒（或排程的 tick）就會互相蓋掉。
+        schedule.upsert(job)
         return self._json({"ok": True, "job": {**job, "desc": schedule.describe(job)}})
 
     def do_schedule_delete(self):
-        jid = str(self._body().get("id", ""))
-        rows = [j for j in schedule.load() if j.get("id") != jid]
-        schedule.save(rows)
+        schedule.remove(str(self._body().get("id", "")))
         return self._json({"ok": True})
 
     def do_schedule_run(self):
         """立刻跑一次。設定完馬上驗證得到，不用等到明天早上八點"""
         jid = str(self._body().get("id", ""))
-        rows = schedule.load()
-        job = next((j for j in rows if j.get("id") == jid), None)
+        job = next((j for j in schedule.load() if j.get("id") == jid), None)
         if not job:
             return self._json({"ok": False, "error": "找不到這個定時工作"}, 404)
         try:
             note = self._dispatch_now(job.get("task", ""), job.get("tool", "auto"))
         except Exception as e:
             return self._json({"ok": False, "error": str(e)}, 500)
-        job["lastRun"] = time.time()
-        job["runs"] = int(job.get("runs") or 0) + 1
-        job["lastResult"] = note[:200]
-        schedule.save(rows)
+
+        def mark(j: dict) -> None:
+            j["lastRun"] = time.time()
+            j["runs"] = int(j.get("runs") or 0) + 1
+            j["lastResult"] = note[:200]
+
+        schedule.update(jid, mark)
         return self._json({"ok": True, "note": note})
 
     # 目前這一批的進度，給介面看的
