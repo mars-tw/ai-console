@@ -15,3 +15,17 @@ assets-src/
 private/
 tools/projects.local.json
 .qwen/
+
+# 專案譜的開工檔：內容是這台機器上的絕對路徑（工作根、ATLAS、STATE、譜檔位置），
+# 每台機器都不一樣，而且放進公開 repo 等於把本機目錄結構攤出去。
+# 譜本身存在 ai-hub 底下，本來就不在這個 repo 裡。
+.graphify-project.json
+GRAPHIFY-BOOT.md
+graphify-out/
+
+# graphify 安裝程式在專案根產生的 Gemini 設定。
+# .gemini/settings.json 的 hook command 是 graphify 執行檔的絕對路徑（每台機器不同）；
+# GEMINI.md 叫 AI 去讀 graphify-out/，但這個專案的譜存在 ai-hub 底下、不在 repo 裡，
+# 照著做會查無此檔。兩個都是本機工具設定，不該進公開版。
+.gemini/
+GEMINI.md
