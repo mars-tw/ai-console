@@ -33,10 +33,19 @@ def _now() -> datetime:
 
 
 def load() -> list[dict]:
+    """讀存檔。壞掉的內容一律當成沒有，不要讓它有機會弄死伺服器。
+
+    只回 dict 項目：合法 JSON 但內容是 [null] 或 ["字串"] 的話，
+    後面每一處 j.get() 都會拋 AttributeError —— 而其中一處在啟動流程裡，
+    伺服器會在 serve_forever() 之前就死掉，畫面上只看到 API 連不上；
+    排程執行緒則是每 30 秒在同一筆失敗，後面的定時工作永遠不會跑。
+    實測重現：把 schedules.json 改成 [null, {...}] 兩邊都炸。
+    """
     try:
         if STORE.exists():
             data = json.loads(STORE.read_text(encoding="utf-8"))
-            return data if isinstance(data, list) else []
+            if isinstance(data, list):
+                return [j for j in data if isinstance(j, dict)]
     except Exception:
         pass
     return []

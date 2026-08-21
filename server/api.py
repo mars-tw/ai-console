@@ -23,6 +23,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -108,12 +109,26 @@ _ALIVE_CACHE: dict[str, object] = {"at": 0.0, "pids": set()}
 
 
 def _alive_pids(pids: set) -> set:
-    """一次查完一整批 pid 是否還活著"""
+    """一次查完一整批 pid 是否還活著
+
+    快取只能用來確認「還活著」，不能用來斷定「已經結束」。
+    問到的 pid 不在快取裡時有兩種可能：真的結束了，或是它在上一次
+    快照之後才誕生。這兩件事分不出來，就一定要重新查一次。
+
+    這不是理論問題，是序列派工壞掉的直接原因：
+    介面每 8 秒輪詢一次 /api/dispatches 把快取填滿，接著三秒內派出第一件，
+    新 pid 不在那份舊快照裡 → 回報「已結束」→ worker 立刻派下一件，
+    兩個 agent 同時改同一批檔案 —— 正是「一件一件跑」要避免的事。
+    實測重現：新行程明明在跑，_alive_pids 回空集合。
+    """
     if not pids:
         return set()
     now = time.time()
     if now - float(_ALIVE_CACHE["at"]) < 3.0:
-        return {p for p in pids if p in _ALIVE_CACHE["pids"]}
+        hit = {p for p in pids if p in _ALIVE_CACHE["pids"]}
+        if len(hit) == len(pids):
+            return hit          # 全部都確認活著，快取夠用
+        # 有人不在快取裡 —— 可能是新生的，重查一次才敢說它死了
     alive = set()
     try:
         r = _run(["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=15)
@@ -126,6 +141,60 @@ def _alive_pids(pids: set) -> set:
     _ALIVE_CACHE["at"] = now
     _ALIVE_CACHE["pids"] = alive
     return {p for p in pids if p in alive}
+
+_STAMP_LOCK = threading.Lock()
+
+
+def _new_stamp(log_dir: Path, tool: str) -> str:
+    """取一個同一秒也不會撞的派工編號
+
+    這個編號同時是派工 id、log 檔名與工單檔名。原本是
+    time.strftime("%Y%m%d-%H%M%S") 再配一個「檔案已存在就加 _2」的迴圈，
+    但那是先看再建：兩個執行緒在同一秒可以同時看到「不存在」，
+    於是拿到同一個編號 —— 兩件工共用一個 id、工單檔互相覆蓋、
+    點開 log 看到的是別人的產出。批次派工正是一口氣送出好幾件。
+
+    改成用 O_CREAT|O_EXCL 直接把 log 檔搶下來：建得起來才算搶到，
+    這一步在檔案系統層是原子的。行程內另外加一把鎖只是少繞幾圈。
+    """
+    base = time.strftime("%Y%m%d-%H%M%S")
+    with _STAMP_LOCK:
+        for n in range(1, 200):
+            stamp = base if n == 1 else f"{base}_{n}"
+            try:
+                fd = os.open(str(log_dir / f"{stamp}_{tool}.log"),
+                             os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                continue
+            except OSError:
+                break
+            os.close(fd)
+            return stamp
+    # 同一秒兩百件還撞得到就不要再猜了，直接給隨機碼
+    return f"{base}_{uuid.uuid4().hex[:6]}"
+
+
+def _tail_text(path: Path, limit: int = 64 * 1024) -> str:
+    """只讀檔案尾端。整份讀進來只為了取最後一行是很貴的。
+
+    從尾端往回 seek，切掉可能被切壞的第一個字元序列再解碼。
+    """
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            if size > limit:
+                f.seek(size - limit)
+                raw = f.read()
+                # 從尾端切進去可能落在多位元組字元中間，丟掉第一行比較乾淨
+                nl = raw.find(b"\n")
+                if nl >= 0:
+                    raw = raw[nl + 1:]
+            else:
+                raw = f.read()
+        return raw.decode("utf-8", errors="ignore")
+    except OSError:
+        return ""
+
 
 def _find_bin(tool: str) -> str:
     """找工具執行檔。找不到就回工具名，交給 PATH 解析（失敗訊息也還看得懂）"""
@@ -158,11 +227,29 @@ def sanitize_cwd(cwd: str) -> str:
     return c
 
 
+# 對話 id 的合法長相。這幾家用的都是 UUID 或 session_xxx，
+# 沒有一家會用到空白、引號或 & —— 收斂到這個範圍不影響任何真實的對話。
+_SID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def safe_sid(c: dict) -> str:
+    """取出可以安全放進指令列的 sessionId
+
+    這個值最後會被寫進一個 .cmd 批次檔。批次檔裡的 & 是真的會執行
+    第二條命令（同機制已用探針重現），所以不合格式就直接拒絕，
+    不要嘗試「跳脫掉再用」—— cmd.exe 的跳脫規則太容易寫錯。
+    """
+    sid = str(c.get("sessionId") or "")
+    if not _SID_RE.match(sid):
+        raise ValueError(f"對話 id 的格式不合法，為安全起見不開啟：{sid[:40]!r}")
+    return sid
+
+
 RESUME_CMD = {
-    "claude": lambda c: f'"{BIN["claude"]}" --resume {c["sessionId"]}',
-    "codex": lambda c: f'"{BIN["codex"]}" resume {c["sessionId"]}',
-    "kimi": lambda c: (f'"{BIN["kimi"]}" -r {c["sessionId"]}' if c["sessionId"].startswith("session_")
-                       else f'"{BIN["kimi"]}" -r session_{c["sessionId"]}'),
+    "claude": lambda c: f'"{BIN["claude"]}" --resume "{safe_sid(c)}"',
+    "codex": lambda c: f'"{BIN["codex"]}" resume "{safe_sid(c)}"',
+    "kimi": lambda c: (f'"{BIN["kimi"]}" -r "{safe_sid(c)}"' if safe_sid(c).startswith("session_")
+                       else f'"{BIN["kimi"]}" -r "session_{safe_sid(c)}"'),
     # grok / qwen / cursor 無公開 resume 旗標：開在原目錄即可
     "grok": lambda c: f'"{BIN["grok"]}"',
     "qwen": lambda c: f'cmd /c "{BIN["qwen"]}"',
@@ -446,9 +533,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # 請求體上限。工單再長也不會到 2 MB —— 這個數字是為了擋掉
+    # 「送一份 500 MB 的 body 把記憶體吃光」，不是為了限制正常使用。
+    MAX_BODY = 2 * 1024 * 1024
+
     def _body(self):
-        n = int(self.headers.get("Content-Length", 0))
-        if not n:
+        try:
+            n = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            return {}
+        if n <= 0:
+            return {}
+        if n > self.MAX_BODY:
+            # 一定要把資料讀掉再回，不然連線會卡在半路
+            remain = n
+            while remain > 0:
+                chunk = self.rfile.read(min(65536, remain))
+                if not chunk:
+                    break
+                remain -= len(chunk)
             return {}
         try:
             return json.loads(self.rfile.read(n).decode("utf-8"))
@@ -516,6 +619,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/dispatches":
             return self.do_dispatches()
         if self.path == "/api/audit":
+            # 這個 GET 會啟動外部腳本，等於有副作用 —— 一定要過同源檢查。
+            # 不然惡意網頁一個 <img src="http://127.0.0.1:5177/api/audit">
+            # 就能在使用者的機器上跑起這條流程。
+            if not self._same_origin():
+                return self._json({"ok": False, "error":
+                                   "跨來源請求已拒絕"}, 403)
             # 稽核是使用者私人的批次流程，路徑一律由 server/config.json 指定，
             # 不寫死任何個人專案位置；沒設定就明講，不要假裝有這功能。
             script = _CFG.get("audit_script")
@@ -638,7 +747,11 @@ class Handler(BaseHTTPRequestHandler):
             conv = find_conv(body.get("id", ""))
             if not conv:
                 return self._json({"ok": False, "error": "找不到對話"}, 404)
-            cmd, cwd = build_launch(conv)
+            try:
+                cmd, cwd = build_launch(conv)
+            except ValueError as e:
+                # safe_sid 擋下來的。講清楚是哪一筆，不要只回一個 500
+                return self._json({"ok": False, "error": str(e)}, 400)
             if not cmd:
                 return self._json({"ok": False, "error": "此工具不支援接續"}, 400)
             full = f'cd /d "{cwd}" && {cmd}'
@@ -835,7 +948,13 @@ class Handler(BaseHTTPRequestHandler):
         "claude": lambda p: [BIN["claude"], "--continue", "-p", p],
         "codex": lambda p: [BIN["codex"], "exec", "resume", "--last",
                             "--skip-git-repo-check", p],
-        "qwen": lambda p: ["cmd", "/c", BIN["qwen"], "-c", "-p", p],
+        # 不要用 cmd /c。qwen 是 npm 的 .CMD 包裝殼，經過 cmd.exe 的話
+        # 使用者補的那句話會被動三次手腳（實測矩陣）：
+        #   · 遇到雙引號就把後面整段截掉 —— 「改用 "tools/" 那份」只送出前半
+        #   · %VAR% 被展開 —— %CD% 變成本機絕對路徑，跟著送進雲端模型
+        #   · 含換行就整個不執行 —— 貼一段錯誤訊息會靜默失敗
+        # 直接給 argv，跟無頭派工那條走一樣的路。
+        "qwen": lambda p: [BIN["qwen"], "-c", "-p", p],
         "gemini": lambda p: [BIN["gemini"], "--dangerously-skip-permissions",
                              "--print-timeout", "30m", "-c", "-p", p],
     }
@@ -845,8 +964,26 @@ class Handler(BaseHTTPRequestHandler):
     DISPATCHES = []  # 派工登錄：{id, tool, task, started, pid, log, mode, reply}
     # 請求執行緒、批次工作執行緒、排程執行緒都會動這份清單再整份寫檔。
     # 沒有鎖的話兩邊同時寫會互相蓋掉 —— 這個專案已經因為登錄被覆蓋而丟過一次歷史。
-    _REG_LOCK = threading.Lock()
+    # 用 RLock：底下幾個交易在持鎖狀態下還會呼叫 _save_registry()
+    _REG_LOCK = threading.RLock()
+    # 批次的「檢查 + 標記」要原子，不然兩個請求會各開一個 worker
+    _BATCH_LOCK = threading.Lock()
+    MAX_STEPS = 20          # 一批最多幾件
+    MAX_TASK = 20000        # 單件工單字數上限
     REGISTRY = Path.home() / "ai-hub" / "dispatch-log" / "_registry.json"
+
+    def _reg_append(self, rec: dict) -> None:
+        """把一筆派工寫進登錄。整段（必要時載入 → append → 存檔）都在鎖裡。
+
+        原本 append 與 _save_registry() 是兩個獨立動作，鎖只包住後者。
+        兩個請求同時進來時，其中一筆的 append 會被另一筆的整份寫檔蓋掉 ——
+        這個專案已經因為登錄被覆蓋而丟過一次歷史。
+        """
+        with self._REG_LOCK:
+            if not self.DISPATCHES:
+                self._load_registry()
+            self.DISPATCHES.append(rec)
+            self._save_registry()
 
     def _load_registry(self):
         with self._REG_LOCK:
@@ -1003,16 +1140,11 @@ class Handler(BaseHTTPRequestHandler):
 
         log_dir = Path.home() / "ai-hub" / "dispatch-log"
         log_dir.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        # 時間戳只到秒，同一秒派兩件會寫到同一個檔、後者覆蓋前者。
-        # 實測就踩到了：一次派兩個測試員，第一個的結果直接消失。
+        # 時間戳只到秒，同一秒派兩件會撞號 —— 實測踩過：
+        # 一次派兩個測試員，第一個的結果直接消失。
+        # _new_stamp 用原子建檔搶號，不是「先看再建」。
+        stamp = _new_stamp(log_dir, tool)
         log_file = log_dir / f"{stamp}_{tool}.log"
-        if log_file.exists():
-            n = 2
-            while (log_dir / f"{stamp}_{tool}_{n}.log").exists():
-                n += 1
-            stamp = f"{stamp}_{n}"
-            log_file = log_dir / f"{stamp}_{tool}.log"
 
         if tool in self.DISPATCH_TOOLS:
             cwd = str(Path.home())
@@ -1028,8 +1160,13 @@ class Handler(BaseHTTPRequestHandler):
                 argv = self.DISPATCH_TOOLS[tool](
                     f"Read the UTF-8 work order at {order_file} and carry it out. "
                     f"The file is the full instruction; do not ask for more input.")
-            except OSError:
-                argv = self.DISPATCH_TOOLS[tool](task)   # 寫不了檔就退回原本作法
+            except OSError as e:
+                # 一定要 fail closed。原本這裡退回 DISPATCH_TOOLS[tool](task)，
+                # 把使用者原始文字直接放進命令列 —— 換行會被截斷、%VAR% 會被
+                # 展開成本機路徑，終端分支那條更會被寫進 .cmd 而執行第二條命令
+                # （已用探針重現）。寫不了工單就不要派，比派出一個殘缺或危險的好。
+                return self._json({"ok": False,
+                                   "error": f"工單檔寫不進去，這次不派工：{e}"}, 500)
             try:
                 if tool == "qwen":
                     # qwen 的 node-pty 需要一個 console。
@@ -1054,10 +1191,9 @@ class Handler(BaseHTTPRequestHandler):
                                             creationflags=subprocess.CREATE_NO_WINDOW)
                     proc_pid = proc.pid
                     lf.close()          # 同上
-                self.DISPATCHES.append({"id": stamp, "tool": tool, "task": raw_task[:120],
-                                        "started": stamp, "pid": proc_pid, "log": str(log_file),
-                                        "mode": "headless"})
-                self._save_registry()
+                self._reg_append({"id": stamp, "tool": tool, "task": raw_task[:120],
+                                  "started": stamp, "pid": proc_pid, "log": str(log_file),
+                                  "mode": "headless"})
                 return self._json({"ok": True, "tool": tool, "mode": "headless",
                                    "log": str(log_file), "id": stamp, "skills": applied_skills,
                                    "note": f"已派出 {tool} 無頭執行"
@@ -1081,10 +1217,9 @@ class Handler(BaseHTTPRequestHandler):
                 resp = json.loads(urllib.request.urlopen(req, timeout=280).read())
                 content = (resp.get("choices") or [{}])[0].get("message", {}).get("content", "")
                 log_file.write_text(f"[{stamp}] local({model})\n指令：{task}\n\n{content}", encoding="utf-8")
-                self.DISPATCHES.append({"id": stamp, "tool": "local", "task": raw_task[:120],
-                                        "started": stamp, "pid": None, "log": str(log_file),
-                                        "mode": "sync", "reply": content[:300]})
-                self._save_registry()
+                self._reg_append({"id": stamp, "tool": "local", "task": raw_task[:120],
+                                  "started": stamp, "pid": None, "log": str(log_file),
+                                  "mode": "sync", "reply": content[:300]})
                 return self._json({"ok": True, "tool": "local", "model": model, "mode": "sync",
                                    "reply": content, "log": str(log_file)})
             except Exception as e:
@@ -1103,8 +1238,11 @@ class Handler(BaseHTTPRequestHandler):
                 order_file.write_text(task, encoding="utf-8")
                 prompt = (f"Read the UTF-8 work order at {order_file} and carry it out. "
                           f"The file is the full instruction; do not ask for more input.")
-            except OSError:
-                prompt = task
+            except OSError as e:
+                # 同上，fail closed。這條的代價更高：prompt 會原樣寫進 .cmd，
+                # 而批次檔裡的 & 是真的會執行第二條命令（探針已重現）。
+                return self._json({"ok": False,
+                                   "error": f"工單檔寫不進去，這次不派工：{e}"}, 500)
             # 跟 /api/launch 一樣：指令寫成 .cmd 再執行，不要整串當參數傳。
             # 巢狀引號經過 list2cmdline 會被跳脫成 \"，cmd.exe 不認，指令就壞了。
             crlf = "\r\n"
@@ -1120,10 +1258,9 @@ class Handler(BaseHTTPRequestHandler):
                 echo_size = log_file.stat().st_size
             except OSError:
                 echo_size = 0
-            self.DISPATCHES.append({"id": stamp, "tool": tool, "task": raw_task[:120],
-                                    "started": stamp, "pid": None, "log": str(log_file),
-                                    "mode": "terminal", "echo_size": echo_size})
-            self._save_registry()
+            self._reg_append({"id": stamp, "tool": tool, "task": raw_task[:120],
+                              "started": stamp, "pid": None, "log": str(log_file),
+                              "mode": "terminal", "echo_size": echo_size})
             note = f"{tool} 已開終端並帶入指令"
             return self._json({"ok": True, "tool": tool, "mode": "terminal",
                                "note": note, "log": str(log_file)})
@@ -1181,18 +1318,38 @@ class Handler(BaseHTTPRequestHandler):
         safe = rules._neutralize(text)
         log_dir = Path.home() / "ai-hub" / "dispatch-log"
         log_dir.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
+        stamp = _new_stamp(log_dir, f"{tool}_followup")
         log_file = log_dir / f"{stamp}_{tool}_followup.log"
+        # 補的話一律寫成 UTF-8 檔，命令列只帶一行 ASCII 的「去讀這個檔」。
+        # 派工那條早就這樣做了（因為踩過中文被地碼頁弄壞、換行被截斷），
+        # 續談這條卻漏掉 —— 同樣的坑要一起補，不然使用者會發現
+        # 「第一次講的有效、補的那句沒效」而完全不知道為什麼。
+        order_file = log_dir / f"{stamp}_followup.md"
+        try:
+            order_file.write_text(safe, encoding="utf-8")
+        except OSError as e:
+            return {"error": f"補充內容寫不進檔案，這次不送：{e}"}
+        prompt = (f"Read the UTF-8 note at {order_file} and continue accordingly. "
+                  f"The file is the full instruction; do not ask for more input.")
         try:
             lf = open(log_file, "w", encoding="utf-8")
+            # qwen 的 node-pty 需要一個 console，跟無頭派工那條一樣給它一個並最小化
+            extra = {}
+            if tool == "qwen":
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                si.wShowWindow = 6      # SW_MINIMIZE
+                extra = {"startupinfo": si,
+                         "creationflags": subprocess.CREATE_NEW_CONSOLE}
+            else:
+                extra = {"creationflags": subprocess.CREATE_NO_WINDOW}
             proc = subprocess.Popen(
-                make(safe), cwd=str(Path.home()), stdout=lf,
-                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW)
+                make(prompt), cwd=str(Path.home()), stdout=lf,
+                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **extra)
             lf.close()
         except Exception as e:
             return {"error": str(e)}
-        self.DISPATCHES.append({
+        self._reg_append({
             "id": stamp, "tool": tool, "task": f"（接續）{text[:110]}",
             "started": stamp, "pid": proc.pid, "log": str(log_file),
             "mode": "headless", "followupOf": d.get("id"),
@@ -1265,17 +1422,33 @@ class Handler(BaseHTTPRequestHandler):
         serial = bool(body.get("serial", True))
         if not isinstance(steps, list) or not steps:
             return self._json({"ok": False, "error": "需要 steps"}, 400)
-        if self.BATCH["running"]:
-            return self._json({"ok": False, "error": "上一批還在跑，等它結束或先取消"}, 409)
+        if len(steps) > self.MAX_STEPS:
+            # 拆解器最多回 5 件，介面也不會生出更多。真的送幾千件進來，
+            # serial=false 會在幾秒內開出幾千個 AI CLI 行程，
+            # RAM、PID、檔案控制代碼跟雲端額度會一起見底。
+            return self._json({"ok": False,
+                               "error": f"一批最多 {self.MAX_STEPS} 件"}, 400)
 
-        jobs = [{"tool": str(x.get("tool") or "auto"), "task": str(x.get("task") or "").strip()}
-                for x in steps if str(x.get("task") or "").strip()]
+        jobs = []
+        for x in steps:
+            if not isinstance(x, dict):
+                continue            # [null] 這種進來不該讓整個請求執行緒死掉
+            task = str(x.get("task") or "").strip()
+            if task:
+                jobs.append({"tool": str(x.get("tool") or "auto"),
+                             "task": task[:self.MAX_TASK]})
         if not jobs:
             return self._json({"ok": False, "error": "工單內容都是空的"}, 400)
 
         cls = type(self)
-        cls.BATCH = {"total": len(jobs), "done": 0, "running": True,
-                     "current": jobs[0]["task"][:60], "note": ""}
+        # 「看有沒有在跑」跟「標記成在跑」必須是同一個不可分割的動作。
+        # 分開寫的話兩個請求可以同時讀到 running=False，各自啟動一個 worker，
+        # 然後互相覆蓋同一份進度 —— 使用者會看到進度條莫名其妙倒退。
+        with cls._BATCH_LOCK:
+            if cls.BATCH["running"]:
+                return self._json({"ok": False, "error": "上一批還在跑，等它結束或先取消"}, 409)
+            cls.BATCH = {"total": len(jobs), "done": 0, "running": True,
+                         "current": jobs[0]["task"][:60], "note": ""}
 
         def worker():
             for i, j in enumerate(jobs):
@@ -1327,10 +1500,13 @@ class Handler(BaseHTTPRequestHandler):
         pid = target.get("pid")
         alive = bool(pid) and int(pid) in _alive_pids({int(pid)})
         if alive:
-            pend = list(target.get("pending") or [])
-            pend.append(text)
-            target["pending"] = pend
-            self._save_registry()
+            # 讀 pending → 加一句 → 寫回，要在同一把鎖裡。
+            # 分開做的話兩個分頁同時補話，後寫的那份會把前一句吃掉。
+            with self._REG_LOCK:
+                pend = list(target.get("pending") or [])
+                pend.append(text)
+                target["pending"] = pend
+                self._save_registry()
             return self._json({"ok": True, "queued": True,
                                "note": f"這一輪還在跑，已排隊（第 {len(pend)} 句），結束後自動送出"})
         r = self._send_followup(target, text)
@@ -1340,20 +1516,28 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"ok": True, "queued": False, "note": f"已送出給 {target['tool']}"})
 
     def _flush_pending(self, rows: list) -> None:
-        """跑完的那些，把排隊中的續談送出去"""
-        changed = False
-        for d in rows:
-            if d.get("alive") or not d.get("pending"):
-                continue
-            src = next((x for x in self.DISPATCHES if x.get("id") == d.get("id")), None)
-            if not src:
-                continue
-            text = "\n".join(src.get("pending") or [])
-            src["pending"] = []
-            changed = True
+        """跑完的那些，把排隊中的續談送出去
+
+        先在鎖裡把 pending「認領」走（讀出來並立刻清空），再放開鎖去送。
+        兩個分頁同時輪詢 /api/dispatches 都會走到這裡 —— 不認領的話兩邊
+        會讀到同一句還沒清空的 pending，同一句話送出兩次、
+        開兩個 AI 行程去改同一批檔案。
+        送出動作放在鎖外，因為它會啟動子行程，不該佔著鎖。
+        """
+        claimed = []
+        with self._REG_LOCK:
+            for d in rows:
+                if d.get("alive") or not d.get("pending"):
+                    continue
+                src = next((x for x in self.DISPATCHES if x.get("id") == d.get("id")), None)
+                if not src or not src.get("pending"):
+                    continue
+                claimed.append((src, "\n".join(src.get("pending") or [])))
+                src["pending"] = []
+            if claimed:
+                self._save_registry()
+        for src, text in claimed:
             self._send_followup(src, text)
-        if changed:
-            self._save_registry()
 
     def do_dispatches(self):
         """派工追蹤：列出登錄的派工，判斷真正的狀態，附 log 尾端預覽"""
@@ -1370,7 +1554,10 @@ class Handler(BaseHTTPRequestHandler):
             d["state"] = self._dispatch_state(d, d["alive"])
             log = Path(d.get("log", ""))
             if log.exists():
-                text = log.read_text(encoding="utf-8", errors="ignore")
+                # 只讀尾端。這個端點每 8 秒被打一次、兩個分頁都在打，
+                # 而 CLI 可以吐出幾百 MB 的 log —— 整份讀進來只為了取最後一行，
+                # 記憶體會被輪詢本身吃掉。
+                text = _tail_text(log)
                 if not d["alive"]:
                     d["result"] = text[-400:]
                 # 執行中的最後一行輸出。使用者最常問的是「到底有沒有在動」——
@@ -1386,7 +1573,11 @@ class Handler(BaseHTTPRequestHandler):
             out.append(d)
         # 排隊中的續談：上一輪一結束就送出去。放在輪詢裡而不是另開執行緒，
         # 是因為主控台本來就每 8 秒問一次，不需要再多一個背景迴圈。
-        self._flush_pending(out)
+        #
+        # 但這一步會啟動子行程 —— 是副作用，不是讀取。跨來源的 <img> 也能打
+        # 到這個 GET，所以只在同源時才送；跨來源就純粹回報狀態。
+        if self._same_origin():
+            self._flush_pending(out)
         return self._json({"ok": True, "dispatches": out})
 
 
