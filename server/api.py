@@ -267,6 +267,52 @@ def find_conv(conv_id: str):
     return None
 
 
+def _claude_desktop_session_roots() -> list[Path]:
+    home = Path.home()
+    return [
+        home / "AppData" / "Roaming" / "Claude" / "claude-code-sessions",
+        home / "AppData" / "Local" / "Packages" / "Claude_pzs8sxrjxfjjc"
+        / "LocalCache" / "Roaming" / "Claude" / "claude-code-sessions",
+    ]
+
+
+def claude_desktop_cards(cli_id: str) -> list[Path]:
+    """對上 Claude Desktop 側欄卡（cliSessionId == jsonl 檔名）。"""
+    if not cli_id:
+        return []
+    seen: set[str] = set()
+    out: list[Path] = []
+    for root in _claude_desktop_session_roots():
+        if not root.is_dir():
+            continue
+        for path in root.rglob("local_*.json"):
+            try:
+                d = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if str(d.get("cliSessionId") or "") != cli_id:
+                continue
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(path)
+    return out
+
+
+def drop_index_conv(conv_id: str) -> None:
+    try:
+        data = json.loads(INDEX_JSON.read_text(encoding="utf-8"))
+        before = len(data.get("conversations", []))
+        data["conversations"] = [c for c in data["conversations"] if c["id"] != conv_id]
+        if len(data["conversations"]) != before:
+            st = data.setdefault("stats", {})
+            st["total"] = max(0, (st.get("total") or before) - 1)
+            INDEX_JSON.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
 def lms_models():
     """LM Studio /v1/models 的清單"""
     try:
@@ -277,16 +323,37 @@ def lms_models():
         return []
 
 
-def lms_loaded():
-    """lms ps 已載入記憶體的模型"""
+def _lms_ps():
     if not LMS_BIN.exists():
         return []
     try:
         r = _run([str(LMS_BIN), "ps", "--json"], capture_output=True, text=True, timeout=15)
         data = json.loads(r.stdout or "[]")
-        return [m.get("identifier") or m.get("modelKey") for m in data if isinstance(m, dict)]
+        return [m for m in data if isinstance(m, dict)]
     except Exception:
         return []
+
+
+def lms_loaded():
+    """lms ps 已載入記憶體的模型（識別碼優先，給所有權檢查用）"""
+    return [m.get("identifier") or m.get("modelKey") for m in _lms_ps()]
+
+
+def lms_loaded_keys():
+    """已載入模型的「模型名」。
+
+    不能用 lms_loaded() 來比對模型名 —— 它回的是識別碼，
+    而載入時可以用 --identifier 取任意名字。實測踩過：
+    用 `lms load kimi-linear-48b-a3b-instruct --identifier copy-line` 載入之後，
+    lms_loaded() 回 ["copy-line"]，任何拿模型名去比對的判斷都不會中，
+    於是「已載入優先」失效、又去冷載入另一個模型，還把這個踢掉。
+    """
+    out = []
+    for m in _lms_ps():
+        k = m.get("modelKey") or m.get("identifier")
+        if k:
+            out.append(k)
+    return out
 
 
 def model_complete(model_id: str) -> bool:
@@ -355,12 +422,20 @@ def planner_model():
     所以先看 lms ps，已經載入的又夠格就直接用它。
     """
     available = [m for m in lms_models() if model_complete(m)]
-    # 順序照「拆得出 JSON 又跑得快」排，不是照參數量排。
-    # 原本 qwen3.8-27b 在第一個 —— 那是 dense 27B，實測這台機器只有 3.7 tok/s，
-    # 一份兩步驟的計畫要 87 秒，真實工單常常超過 120 秒的逾時。
-    # 3.6-35b-a3b 與 kimi-linear-48b-a3b 是 MoE，只啟用 3B，同樣的活快一個數量級。
-    capable = ("qwen3.6-35b", "kimi-linear-48b", "qwen3-coder-next", "gpt-oss-120b", "qwen3.8-27b")
-    loaded = [m for m in lms_loaded() if m]
+    # 順序照「多久拿得到能用的產出」排，不是照參數量、也不是照 tok/s 排。
+    #
+    # 這台機器（CPU 推論）三個模型的實測：
+    #   kimi-linear-48b-a3b-instruct   9.3 tok/s   推理 0 tok    3 秒交稿  ← 最快拿到東西
+    #   qwen3.6-35b-a3b               14.9 tok/s   推理 100%     永遠空的
+    #   qwen3.8-27b（dense）            3.7 tok/s   推理大量      61 秒一句話
+    #
+    # 中間那個原本被我排在第一位，因為它 tok/s 最高 —— 但它是推理型，
+    # 給到 1500 tokens 還是全花在 reasoning_content 上，content 一個字都不吐，
+    # 連 /no_think 都關不掉。tok/s 高但吐不出東西等於零。
+    # instruct 版沒有這個問題，所以排最前面。
+    capable = ("kimi-linear-48b", "qwen3-coder-next", "qwen3.8-27b",
+               "gpt-oss-120b", "qwen3.6-35b")
+    loaded = [m for m in lms_loaded_keys() if m]
     for m in loaded:
         if any(c in m for c in capable):
             return m
@@ -372,10 +447,32 @@ def planner_model():
     return (loaded[0] if loaded else (available[0] if available else ""))
 
 
+# 任務鏈：順序照「多久拿得到能用的產出」排，不是照參數量或 tok/s。
+#
+# 這台機器是 CPU 推論（GPU0 影片管線專屬、GPU1 只放得下 4B），實測：
+#   kimi-linear-48b-a3b-instruct   9.3 tok/s  推理 0 tok   3 秒交稿
+#   qwen3.6-35b-a3b               14.9 tok/s  推理 100%    永遠吐不出 content
+#   qwen3.8-27b（dense）            3.7 tok/s  推理大量     61 秒一句話
+# 所以 instruct 版的 MoE 排在最前面：tok/s 不是最高的，但它真的會交東西。
+_CHAINS = {
+    "coding": ["qwen3-coder-next", "kimi-linear-48b", "qwen3.8-27b"],
+    "long": ["kimi-linear-48b", "qwen3.8-27b"],
+    "general": ["kimi-linear-48b", "qwen3.8-27b", "gpt-oss-120b"],
+}
+
+
+def chains_all():
+    return _CHAINS
+
+
+def chains_for(task: str):
+    return _CHAINS.get(task, []) + _CHAINS["general"]
+
+
 def route_model(task: str = "general"):
     """依任務類型 + 系統狀態自動選模型，回傳 (model, reason, signals)"""
     available = [m for m in lms_models() if model_complete(m)]
-    loaded = lms_loaded()
+    loaded = lms_loaded_keys()          # 比對模型名，不是識別碼
     heavy = detect_heavy_job()
     signals = {"loaded": loaded, "heavy_job": heavy, "available": len(available)}
 
@@ -386,17 +483,30 @@ def route_model(task: str = "general"):
                     return m
         return None
 
-    # 1. 大型工作進行中 → 輕量模型，避免搶資源
+    # 1. 已經載入的優先 —— 這一關要在「大型工作降級」之前。
+    #
+    # LM Studio 一次只載一個。任務鏈挑的是「磁碟上有的」，挑到沒載入的
+    # 就會冷載入，順便把別人載的那個踢掉：這台機器載一個 20～28 GB 的模型
+    # 要 30～55 秒，而且違反 ai-hub 的「不得卸載或取代未知實例」。
+    #
+    # 為什麼要贏過降級規則：影片管線一跑就是整個週末，heavy 會一直命中，
+    # 於是每一次對話都想冷載入 4B、把已經載好的模型踢掉 —— 換來的「輕量」
+    # 遠不如「不要重載」值錢。何況現在是 CPU 推論，降級省的不是顯卡而是
+    # CPU，而已經常駐的模型不會因為換成小的就少佔記憶體（要先卸再載）。
+    if loaded:
+        for c in chains_for(task):
+            for m in loaded:
+                if m and c in m:
+                    return m, "沿用已載入的模型（避免冷載入與互踢）", signals
+
+    # 2. 大型工作進行中且手上沒有現成模型 → 挑輕量的，避免搶資源
     if heavy:
         m = pick(["qwen3.5-4b"])
         if m:
             return m, f"偵測到大型工作進行中（{heavy}），自動改用輕量模型避免搶資源", signals
-    # 2. 任務鏈
-    chains = {
-        "coding": ["qwen3-coder-next", "qwen3.8-27b", "qwen3.6-35b"],
-        "long": ["kimi-linear-48b", "qwen3.8-27b"],
-        "general": ["qwen3.8-27b", "gpt-oss-120b", "qwen3.6-35b"],
-    }
+
+    # 3. 任務鏈
+    chains = chains_all()
     for t in ([task] if task in chains else []) + ["general"]:
         m = pick(chains.get(t, []))
         if m:
@@ -819,6 +929,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/api/conv/delete":
             return self.do_conv_delete()
+        if self.path == "/api/conv/archive":
+            return self.do_conv_archive()
         if self.path == "/api/plan":
             return self.do_plan()
         if self.path == "/api/schedule/save":
@@ -1023,36 +1135,85 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error": "找不到這個對話"}, 404)
 
         src = Path(conv.get("path", ""))
-        if not src.exists():
-            return self._json({"ok": True, "note": "來源檔已不存在，視為已刪除"})
-        # 只允許動使用者家目錄底下的對話檔，擋掉任何奇怪的路徑
-        try:
-            if not src.resolve().is_relative_to(Path.home().resolve()):
-                return self._json({"ok": False, "error": "路徑不在家目錄內，拒絕"}, 400)
-        except (OSError, ValueError):
-            return self._json({"ok": False, "error": "路徑無法解析"}, 400)
+        home = Path.home().resolve()
+        extras: list[Path] = []
+        if conv.get("tool") == "claude":
+            extras = claude_desktop_cards(str(conv.get("sessionId") or ""))
 
-        self.TRASH.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        dest = self.TRASH / f"{stamp}_{conv.get('tool', 'x')}_{src.name}"
-        try:
-            import shutil
-            shutil.move(str(src), str(dest))
-        except OSError as e:
-            return self._json({"ok": False, "error": f"搬移失敗：{e}"}, 500)
+        # jsonl 已不在時仍要把桌面板殘卡清掉，否則側欄會掛著刪不掉
+        if src.exists():
+            try:
+                if not src.resolve().is_relative_to(home):
+                    return self._json({"ok": False, "error": "路徑不在家目錄內，拒絕"}, 400)
+            except (OSError, ValueError):
+                return self._json({"ok": False, "error": "路徑無法解析"}, 400)
+            self.TRASH.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            dest = self.TRASH / f"{stamp}_{conv.get('tool', 'x')}_{src.name}"
+            try:
+                import shutil
+                shutil.move(str(src), str(dest))
+            except OSError as e:
+                return self._json({"ok": False, "error": f"搬移失敗：{e}"}, 500)
+        else:
+            dest = None
 
-        # 同步把索引裡那筆拿掉，畫面不用等重新掃描
+        for card in extras:
+            try:
+                if not card.resolve().is_relative_to(home):
+                    continue
+            except (OSError, ValueError):
+                continue
+            self.TRASH.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            cdest = self.TRASH / f"{stamp}_claude-card_{card.name}"
+            try:
+                import shutil
+                shutil.move(str(card), str(cdest))
+            except OSError:
+                continue
+
+        drop_index_conv(conv_id)
+        return self._json({"ok": True, "trash": str(dest) if dest else "card-only"})
+
+    def do_conv_archive(self):
+        """封存 Claude Desktop 側欄卡：寫 isArchived，不刪 jsonl。"""
+        body = self._body()
+        conv_id = str(body.get("id", "")).strip()
+        archived = bool(body.get("archived", True))
+        if not conv_id:
+            return self._json({"ok": False, "error": "需要 id"}, 400)
+        conv = find_conv(conv_id)
+        if not conv:
+            return self._json({"ok": False, "error": "找不到這個對話"}, 404)
+        if conv.get("tool") != "claude":
+            return self._json({"ok": False, "error": "目前只支援 Claude 桌面板封存"}, 400)
+        cards = claude_desktop_cards(str(conv.get("sessionId") or ""))
+        if not cards:
+            return self._json({"ok": False, "error": "找不到桌面板對話卡"}, 404)
+        n = 0
+        for card in cards:
+            try:
+                data = json.loads(card.read_text(encoding="utf-8"))
+                data["isArchived"] = archived
+                tmp = card.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                tmp.replace(card)
+                n += 1
+            except (OSError, json.JSONDecodeError) as e:
+                return self._json({"ok": False, "error": f"寫入失敗：{e}"}, 500)
         try:
             data = json.loads(INDEX_JSON.read_text(encoding="utf-8"))
-            before = len(data.get("conversations", []))
-            data["conversations"] = [c for c in data["conversations"] if c["id"] != conv_id]
-            if len(data["conversations"]) != before:
-                st = data.setdefault("stats", {})
-                st["total"] = max(0, (st.get("total") or before) - 1)
-                INDEX_JSON.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            for c in data.get("conversations", []):
+                if c["id"] == conv_id:
+                    c["archived"] = archived
+                    c["trashed"] = archived or c.get("trashed")
+                    if archived:
+                        c["trashReason"] = "archived"
+            INDEX_JSON.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         except (OSError, json.JSONDecodeError):
             pass
-        return self._json({"ok": True, "trash": str(dest)})
+        return self._json({"ok": True, "cards": n, "archived": archived})
 
     def do_plan(self):
         """一句話 → 派工計畫。只回計畫，不動手 —— 派工是使用者按下去才發生的。"""
