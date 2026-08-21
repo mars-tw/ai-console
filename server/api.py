@@ -233,6 +233,25 @@ def detect_heavy_job():
     return ""
 
 
+def faster_model_hint(current: str, available: list[str]) -> str:
+    """拆解逾時的時候，建議一個更適合的地端模型
+
+    這台機器實測：dense 的 qwen3.8-27b 吞吐只有 3.7 tok/s，一份三步驟的
+    計畫連 240 秒都跑不完，每次都退回整件派工。而同一台機器上有 a3b 的
+    MoE 模型（只啟用 3B），同樣的活快一個數量級。
+
+    刻意「只建議、不自己換」：LM Studio 一次只能載一個，自動換掉會把
+    使用者為了別的用途（影片管線、其他專案）載的模型踢掉。
+    """
+    if any(k in (current or "").lower() for k in ("a3b", "moe")):
+        return ""                                   # 已經在用快的了，沒得建議
+    faster = [m for m in available
+              if ("a3b" in m.lower() or "moe" in m.lower()) and m != current]
+    if not faster:
+        return ""
+    return f"　建議在 LM Studio 改載 {faster[0]}（MoE，只啟用 3B，同樣的拆解快很多）。"
+
+
 def planner_model():
     """挑一個拆解派工用的模型
 
@@ -240,13 +259,30 @@ def planner_model():
     而 4B 拆不出結構化的派工計畫 —— 實測會把提示詞的範例整段抄回來。
     拆解只是一次幾秒的短呼叫，不像影片管線是持續佔用，所以這裡優先挑有能力的，
     真的只剩小模型才用小模型。
+
+    但「有能力」要讓位給「已經載入」。lms_models() 列的是磁碟上有的，
+    照偏好清單挑等於常常點到一個沒載入的 —— LM Studio 就得臨時載，
+    這台機器載一個 27B 要好幾分鐘，而拆解的逾時是 120 秒。
+    結果就是每一次拆解都逾時、每一次都退回「整句話原封不動派出去」。
+    實測踩到：note 回「地端模型呼叫失敗：timed out」。
+    所以先看 lms ps，已經載入的又夠格就直接用它。
     """
     available = [m for m in lms_models() if model_complete(m)]
-    for want in ("qwen3.8-27b", "qwen3.6-35b", "gpt-oss-120b", "qwen3-coder-next", "kimi-linear-48b"):
+    # 順序照「拆得出 JSON 又跑得快」排，不是照參數量排。
+    # 原本 qwen3.8-27b 在第一個 —— 那是 dense 27B，實測這台機器只有 3.7 tok/s，
+    # 一份兩步驟的計畫要 87 秒，真實工單常常超過 120 秒的逾時。
+    # 3.6-35b-a3b 與 kimi-linear-48b-a3b 是 MoE，只啟用 3B，同樣的活快一個數量級。
+    capable = ("qwen3.6-35b", "kimi-linear-48b", "qwen3-coder-next", "gpt-oss-120b", "qwen3.8-27b")
+    loaded = [m for m in lms_loaded() if m]
+    for m in loaded:
+        if any(c in m for c in capable):
+            return m
+    for want in capable:
         for m in available:
             if want in m:
                 return m
-    return available[0] if available else ""
+    # 偏好清單全落空時，已載入的還是比要重新載的好
+    return (loaded[0] if loaded else (available[0] if available else ""))
 
 
 def route_model(task: str = "general"):
@@ -907,6 +943,19 @@ class Handler(BaseHTTPRequestHandler):
         result = planner.plan(instruction, model, skills=skills, available=usable)
         result["usable"] = usable
         result["limited"] = sorted(limited)
+
+        # 拆解失敗時，如果磁碟上有更適合的模型就直接講出來。
+        #
+        # 這台機器實測：載 dense 的 qwen3.8-27b 時吞吐只有 3.7 tok/s，
+        # 一份三步驟的計畫連 240 秒都跑不完，每次都退回整件派工。
+        # 而同一台機器上有 a3b 的 MoE 模型（只啟用 3B），同樣的活快一個數量級。
+        # 這裡刻意「只建議、不自己換」—— LM Studio 一次只能載一個，
+        # 自動換掉會把使用者為了別的用途載的模型踢掉。
+        if not result.get("ok") and result.get("model"):
+            hint = faster_model_hint(result["model"],
+                                     [m for m in lms_models() if model_complete(m)])
+            if hint:
+                result["note"] = result.get("note", "") + hint
         return self._json(result)
 
     def do_dispatch(self):

@@ -118,6 +118,21 @@ export default function Console() {
   const [openLog, setOpenLog] = useState<string | null>(null)
   const [logText, setLogText] = useState<Record<string, string>>({})
   const boxRef = useRef<HTMLTextAreaElement>(null)
+  /** 上一輪還在跑的 id。用來抓「剛剛跑完」那個瞬間 */
+  const liveIds = useRef<Set<string>>(new Set())
+  const [justDone, setJustDone] = useState<DispatchRecord[]>([])
+  /** log 是否跟著捲到底。使用者往上捲就停下來，捲回底部再繼續跟 */
+  const followLog = useRef(true)
+  // 拆解是地端模型，最長要等 120 秒。按鈕只寫「拆解中…」的話，
+  // 等超過十幾秒就會開始懷疑是不是當掉了 —— 秒數會跳，就知道它還活著。
+  const [planSec, setPlanSec] = useState(0)
+  /** 拆解是可以中止的。地端模型慢的時候不該把人綁在原地 */
+  const planAbort = useRef<AbortController | null>(null)
+  useEffect(() => {
+    if (!planning) return
+    const timer = setInterval(() => setPlanSec((n) => n + 1), 1000)
+    return () => clearInterval(timer)
+  }, [planning])
 
   // 進行中的排前面，結束的收進摺疊區。之前是一份只增不減的歷史全部攤在
   // 「執行中的派工」標題底下，看久了就完全不知道現在到底有沒有東西在跑。
@@ -128,7 +143,20 @@ export default function Console() {
   useEffect(() => {
     const pull = () => {
       fetch('/api/dispatches').then((r) => (r.ok ? r.json() : null))
-        .then((d) => d?.dispatches && setDispatches(d.dispatches))
+        .then((d) => {
+          if (!d?.dispatches) return
+          setDispatches(d.dispatches)
+          // 「進行中 → 結束」那個瞬間要講一聲。
+          // 之前這裡什麼都不做，而已結束的預設是收起來的 —— 一件工跑完就
+          // 直接從畫面上消失，使用者只看到東西不見了，不知道是跑完還是壞掉。
+          const nowLive: Set<string> = new Set(d.dispatches.filter(isLive).map((x: DispatchRecord) => x.id))
+          const finished = d.dispatches.filter(
+            (x: DispatchRecord) => liveIds.current.has(x.id) && !nowLive.has(x.id),
+          )
+          liveIds.current = nowLive
+          // 第一次輪詢時 liveIds 是空的，所以剛開啟主控台不會冒出一堆舊通知
+          if (finished.length) setJustDone((q) => [...finished, ...q].slice(0, 4))
+        })
         .catch(() => {})
       fetch('/api/dispatch/batch').then((r) => (r.ok ? r.json() : null))
         .then((d) => d && setBatch(d)).catch(() => {})
@@ -145,13 +173,17 @@ export default function Console() {
     const instruction = input.trim()
     if (!instruction || planning) return
     setPlanning(true)
+    setPlanSec(0)
     setNote('')
     setSteps([])
+    const ac = new AbortController()
+    planAbort.current = ac
     try {
       const r = await fetch('/api/plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ instruction }),
+        signal: ac.signal,
       })
       // 一定要看 r.ok。原本直接 .json() 然後照用，後端回 500 時
       // steps 變空陣列、note 是空字串 —— 按鈕轉一下就沒反應，
@@ -164,13 +196,42 @@ export default function Console() {
       const d = await r.json()
       const got: Step[] = (d.steps || []).map((s: Step) => ({ ...s, state: 'idle' as const }))
       setSteps(got)
-      setNote(d.note || (got.length ? '' : t('沒有拆解出任何工作，換個說法試試')))
       setHistory((h) => [instruction, ...h.filter((x) => x !== instruction)].slice(0, 8))
-      if (autoRun && got.length) void runAll(got)
-    } catch {
-      setNote(t('控制 API 無回應'))
+      // d.ok === false 代表拆解沒成功，後端退而求其次把整句話當成一件工。
+      // 那一件的內容是使用者原封不動的句子，沒有經過拆解器判斷該給誰、
+      // 該切成幾步 —— 這種時候「省略確認」不該生效，不然一句
+      // 「把舊的清一清」就會照字面直接派給某個會改檔案的 agent。
+      // 原本這裡只看 got.length，失敗照樣自動派出去，而且畫面上沒有任何警告。
+      if (!d.ok) {
+        setNote(`⚠️ ${d.note || t('拆解失敗')}${autoRun ? t('（已暫停自動派工，請先確認下面這件再送）') : ''}`)
+      } else {
+        setNote(d.note || (got.length ? '' : t('沒有拆解出任何工作，換個說法試試')))
+        if (autoRun && got.length) void runAll(got)
+      }
+    } catch (e) {
+      // 使用者自己按「不等了」不是錯誤，不要當成 API 掛掉來報
+      if (!(e instanceof DOMException && e.name === 'AbortError')) {
+        setNote(t('控制 API 無回應'))
+      }
     }
+    planAbort.current = null
     setPlanning(false)
+  }
+
+  /**
+   * 不等地端拆解了，整件當成一件工單。
+   *
+   * 這跟「逾時自動退回」看起來一樣，差別在這是使用者主動選的：
+   * 產生的那一件維持 idle，還是要按下派工才會送出去。
+   * 沒有這個出口的話，地端模型慢的時候人只能乾等好幾分鐘或重新整理頁面。
+   */
+  const givePlanUp = () => {
+    planAbort.current?.abort()
+    const task = input.trim()
+    if (task) {
+      setSteps([{ tool: 'auto', task, why: t('你選擇不等拆解，整件派工'), state: 'idle' }])
+      setNote(t('已停止拆解。下面這一件還沒送出，確認過再按派工。'))
+    }
   }
 
   /**
@@ -263,9 +324,7 @@ export default function Console() {
       .then((d) => d?.jobs && setJobs(d.jobs)).catch(() => {})
   }
 
-  const loadLog = async (id: string) => {
-    if (openLog === id) { setOpenLog(null); return }
-    setOpenLog(id)
+  const fetchLog = async (id: string) => {
     try {
       const r = await fetch(`/api/dispatch/log?id=${encodeURIComponent(id)}`)
       const d = await r.json()
@@ -274,6 +333,24 @@ export default function Console() {
       setLogText((m) => ({ ...m, [id]: t('控制 API 無回應') }))
     }
   }
+
+  const loadLog = async (id: string) => {
+    if (openLog === id) { setOpenLog(null); return }
+    followLog.current = true      // 每次重新展開都先回到跟著跑的狀態
+    setOpenLog(id)
+    await fetchLog(id)
+  }
+
+  // 展開中的 log 如果那件還在跑，就每 3 秒續抓。
+  // 之前只在展開的那一刻抓一次 —— 打開一件正在跑的工作，畫面就永遠停在
+  // 打開的那一秒，看起來跟當掉沒兩樣。
+  useEffect(() => {
+    if (!openLog) return
+    const d = dispatches.find((x) => x.id === openLog)
+    if (!d || !isLive(d)) return
+    const timer = setInterval(() => { void fetchLog(openLog) }, 3000)
+    return () => clearInterval(timer)
+  }, [openLog, dispatches])
 
   const editStep = (i: number, patch: Partial<Step>) =>
     setSteps((s) => s.map((x, j) => (j === i ? { ...x, ...patch } : x)))
@@ -324,7 +401,17 @@ export default function Console() {
             disabled={!input.trim() || planning}
             onClick={makePlan}
           >
-            {planning ? t('拆解中…') : t('分析並排程')}
+            {planning ? t('拆解中… {n} 秒', { n: planSec }) : t('分析並排程')}
+          </button>
+          {/* 超過 25 秒才出現。地端模型正常幾秒就回，太早出現只會讓人以為壞了 */}
+          <button
+            className={`rounded border border-line2 px-2 py-1 text-[11px] text-mute hover:bg-elev ${
+              planning && planSec >= 25 ? '' : 'hidden'
+            }`}
+            onClick={givePlanUp}
+            title={t('地端模型太慢的話可以不等。整件會變成一張工單，還是要你按下派工才送出')}
+          >
+            {t('不等了，整件當一件')}
           </button>
           <span className="text-[11px] text-mute3">Ctrl + Enter</span>
           {note && <span className="text-[11px] text-amber-700 dark:text-amber-400/90">{note}</span>}
@@ -579,6 +666,46 @@ export default function Console() {
             </button>
           )}
         </div>
+        {/* 剛跑完的講一聲。不自己消失 —— 使用者可能正好離開座位 */}
+        {justDone.map((d) => {
+          const bad = stateOf(d) === 'failed'
+          return (
+            <div
+              key={d.id}
+              className={`mb-1 flex items-center gap-2 rounded border px-2 py-1 text-[11px] ${
+                bad
+                  ? 'border-red-300 bg-red-50 dark:border-red-800/60 dark:bg-red-950/40'
+                  : 'border-emerald-300 bg-emerald-50 dark:border-emerald-800/60 dark:bg-emerald-950/40'
+              }`}
+            >
+              <span className="flex-none">{bad ? '⚠️' : '✅'}</span>
+              <span className="w-14 flex-none font-medium" style={{ color: TOOL_COLOR[d.tool] ?? undefined }}>
+                {d.tool}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-mute" title={d.task}>{d.task}</span>
+              <span className={`flex-none ${bad ? 'text-red-600 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'}`}>
+                {bad ? t('失敗') : t('完成')}
+              </span>
+              <button
+                className="flex-none rounded border border-line2 px-1.5 text-mute hover:bg-elev"
+                onClick={() => {
+                  setShowDone(true)
+                  if (openLog !== d.id) void loadLog(d.id)
+                  setJustDone((q) => q.filter((x) => x.id !== d.id))
+                }}
+              >
+                {t('看結果')}
+              </button>
+              <button
+                className="flex-none text-mute3 hover:text-ink3"
+                title={t('知道了')}
+                onClick={() => setJustDone((q) => q.filter((x) => x.id !== d.id))}
+              >
+                ✕
+              </button>
+            </div>
+          )
+        })}
         {dispatches.length === 0 && (
           <div className="text-xs text-mute3">{t('目前沒有派工')}</div>
         )}
@@ -641,8 +768,23 @@ export default function Console() {
                 </div>
               )}
               {openLog === d.id && (
-                <pre className="mx-4 my-1 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-app p-2 font-mono text-[11px] leading-5 text-ink3">
+                <pre
+                  // 還在跑的就自動捲到底，跟 tail -f 一樣。
+                  // 使用者往上捲會停下來（不然想看前面一段會一直被拉走），
+                  // 捲回底部就恢復跟隨。
+                  ref={(el) => {
+                    if (el && isLive(d) && followLog.current) el.scrollTop = el.scrollHeight
+                  }}
+                  onScroll={(e) => {
+                    const el = e.currentTarget
+                    followLog.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+                  }}
+                  className="mx-4 my-1 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-app p-2 font-mono text-[11px] leading-5 text-ink3"
+                >
                   {logText[d.id] ?? t('讀取中…')}
+                  {isLive(d) && (
+                    <span className="ml-1 inline-block h-3 w-1.5 animate-pulse bg-amber-400 align-middle" />
+                  )}
                 </pre>
               )}
             </div>

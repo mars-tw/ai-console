@@ -156,8 +156,13 @@ def _parse_lines(text: str, allowed: set[str], fallback_tool: str) -> list[dict]
 
 
 def plan(instruction: str, model: str, skills: dict[str, str] | None = None,
-         available: list[str] | None = None, timeout: int = 120) -> dict:
+         available: list[str] | None = None, timeout: int = 240) -> dict:
     """回傳 {ok, steps, model, note}
+
+    timeout 240 秒是量出來的，不是猜的：這台機器如果載的是 dense 27B，
+    吞吐只有 3.7 tok/s，一份計畫要 90～150 秒 —— 原本設 120 秒正好卡在邊界，
+    時好時壞。而逾時的代價（把整句話原封不動當一件工派出去）比多等一分鐘高。
+    前端有秒數與「不等了」按鈕，所以等待是看得見、可以中止的。
 
     失敗時 steps 一定至少有一筆（整句話交給預設工具），呼叫端不用另外處理。
     """
@@ -201,7 +206,16 @@ def plan(instruction: str, model: str, skills: dict[str, str] | None = None,
         # 有些模型會把 JSON 留在推理欄位裡，content 反而空的，兩邊都要看
         content = msg.get("content") or msg.get("reasoning_content") or ""
     except Exception as e:
-        return {"ok": False, "steps": single, "model": model, "note": f"地端模型呼叫失敗：{e}"}
+        # 錯誤訊息要能讓人知道下一步做什麼。原本直接吐 "timed out"，
+        # 使用者只會看到一個英文詞，不知道那是「LM Studio 沒開」還是
+        # 「模型沒載入所以正在臨時載一個 27B」—— 這兩件的處理方式完全不同。
+        why = str(e)
+        if "timed out" in why or "timeout" in why.lower():
+            why = f"等了 {timeout} 秒沒回應（模型可能正在載入，或這台機器跑不動這個尺寸）"
+        elif "refused" in why.lower() or "urlopen" in why.lower():
+            why = "連不上 LM Studio（127.0.0.1:1234）——它可能沒開，或沒開伺服器模式"
+        return {"ok": False, "steps": single, "model": model,
+                "note": f"地端拆解失敗：{why}。已改成整件派工，請先確認下面這件再送。"}
 
     # 先試 JSON，失敗再試行格式。小模型寫不出巢狀 JSON 但寫得出一行一件，
     # 而主控台在重載工作時本來就會被降級到小模型，所以兩種都要吃。

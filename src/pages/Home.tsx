@@ -1,10 +1,16 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ConversationDetail, ConversationSummary, IndexData } from '@/types/data'
 import Adventure from '@/components/Adventure'
 import Console from '@/components/Console'
 import Office from '@/components/Office'
 import { t, useLang } from '@/i18n'
 import LangSwitch from '@/components/LangSwitch'
+
+/** python 存的是秒，JS 要毫秒。純函式，跟元件狀態無關，所以放在模組層級 */
+const normalize = (d: IndexData): IndexData => {
+  d.conversations.forEach((c) => { if (c.mtime < 1e12) c.mtime *= 1000 })
+  return d
+}
 
 const STATUS_DOT: Record<string, string> = {
   active: 'bg-emerald-500',
@@ -141,12 +147,10 @@ export default function Home() {
     }).catch(() => setApiOk(false))
   }, [])
 
-  const normalize = (d: IndexData): IndexData => {
-    d.conversations.forEach((c) => { if (c.mtime < 1e12) c.mtime *= 1000 })  // python 秒 → JS 毫秒
-    return d
-  }
-
-  const reloadIndex = () => {
+  // useCallback + 空相依：底下每 60 秒的輪詢把這個函式收進 setInterval 的閉包，
+  // 每次 render 重新產生一份的話，計時器會一直握著第一次那份。
+  // 它現在只用到 setIndex（本來就穩定）跟模組層級的 normalize，所以空相依是對的。
+  const reloadIndex = useCallback(() => {
     fetch('/data/index.json', { cache: 'no-cache' })
       .then((r) => {
         if (r.status === 304) return null
@@ -157,7 +161,7 @@ export default function Home() {
         if (d) setIndex(normalize(d))
       })
       .catch(() => {})
-  }
+  }, [])
 
   // 每 60 秒輪詢索引與即時狀態（自動化每 15 分鐘會刷新磁碟上的資料）
   useEffect(() => {
@@ -169,7 +173,7 @@ export default function Home() {
       }
     }, 60000)
     return () => clearInterval(timer)
-  }, [apiOk])
+  }, [apiOk, reloadIndex])
 
   const selected = useMemo(
     () => (selectedId ? index?.conversations.find((c) => c.id === selectedId) ?? null : null),

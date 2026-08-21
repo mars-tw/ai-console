@@ -179,28 +179,40 @@ class Scheduler(threading.Thread):
                 pass
 
     def tick(self) -> None:
-        # 整段鎖住：這裡是讀 → 改 lastRun/nextRun → 寫，
-        # 跟使用者在介面上存檔是同一類的讀改寫，不鎖會互相蓋掉。
-        # fire() 只是啟動子行程（非阻塞），不會長時間佔著鎖。
-        with _LOCK:
-            self._tick_locked()
+        """挑出到期的 → 放開鎖去派 → 再拿鎖寫回結果
 
-    def _tick_locked(self) -> None:
-        rows = load()
-        if not rows:
-            return
+        三段是刻意分開的。前一版整個 tick 都在鎖裡，包含 fire()，
+        而 fire() 是打 HTTP 回自己的 /api/dispatch、逾時 60 秒 ——
+        那 60 秒內使用者在介面上按「存起來」會整個卡住，看起來像當機。
+        鎖只該保護讀寫檔案的那兩小段，不該罩住對外呼叫。
+        """
         now = time.time()
-        changed = False
-        for job in rows:
-            if not job.get("enabled") or float(job.get("nextRun") or 0) > now:
-                continue
-            changed = True
-            job["lastRun"] = now
-            job["runs"] = int(job.get("runs") or 0) + 1
+        with _LOCK:
+            rows = load()
+            due = [j for j in rows
+                   if j.get("enabled") and float(j.get("nextRun") or 0) <= now]
+            if not due:
+                return
+            # 先把 nextRun 推掉再放開鎖。不然 fire() 那 60 秒內下一次 tick
+            # 進來會看到同一批還沒到期的紀錄，同一件工作被派兩次。
+            for job in due:
+                job["lastRun"] = now
+                job["runs"] = int(job.get("runs") or 0) + 1
+                job["nextRun"] = next_run(job)
+            save(rows)
+            fire_list = [(j["id"], dict(j)) for j in due]
+
+        # ── 這一段沒有鎖 ──
+        results: dict[str, str] = {}
+        for job_id, job in fire_list:
             try:
-                job["lastResult"] = (self.fire(job) or "")[:200]
+                results[job_id] = (self.fire(job) or "")[:200]
             except Exception as e:
-                job["lastResult"] = f"派工失敗：{e}"[:200]
-            job["nextRun"] = next_run(job)
-        if changed:
+                results[job_id] = f"派工失敗：{e}"[:200]
+
+        with _LOCK:
+            rows = load()
+            for job in rows:
+                if job.get("id") in results:
+                    job["lastResult"] = results[job["id"]]
             save(rows)

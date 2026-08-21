@@ -10,7 +10,9 @@
     "dev:vite": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "test": "vitest run",
+    "test": "vitest run && npm run test:py",
+    "test:web": "vitest run",
+    "test:py": "python -m unittest discover -s server/tests",
     "preview": "vite preview",
     "app": "electron .",
     "pack": "electron-packager . \"AI控制台\" --platform=win32 --arch=x64 --out=release --icon=build/icon.ico --overwrite --ignore=\"node_modules/(?!.*electron)\" --ignore=\"^/src\" --ignore=\"^/public\" --ignore=\"^/archives\" --ignore=\"^/private\" --ignore=\"^/assets-src\" --ignore=\"^/release\""
