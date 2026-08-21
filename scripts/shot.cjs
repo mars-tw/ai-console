@@ -50,6 +50,27 @@ const SEED = `(async () => {
   h.activePet = 'p1'
   S.saveHero(h)
   localStorage.setItem('ac_lang', 'zh')
+  // 主題釘成深色。預設是「跟隨系統」，而系統是亮的還暗的因人而異 ——
+  // 辦公室與地城那兩張本來就是深色像素場景，主控台跟著亮起來會不搭。
+  // 釘死之後不管誰在哪台機器上重拍，三張都是同一個色調。
+  localStorage.setItem('ac_theme', 'dark')
+
+  // 主控台那張的派工計畫也擺在這裡，不要在截圖時真的去呼叫拆解器。
+  //
+  // 原本是「填輸入框 → 按分析並排程 → 輪詢等結果」。那看起來比較誠實，
+  // 但結果取決於當下 LM Studio 載了哪個模型 —— 這台機器載 dense 27B 時
+  // 一份三步驟的計畫要四分鐘以上，輪詢視窗等不到，拍出來會是「拆解中…」
+  // 或逾時後的警告訊息。宣傳圖不該有這種不確定性。
+  // 計畫本來就存在 localStorage（切分頁不會弄丟），從這裡塞進去
+  // 跟使用者自己拆出來的完全一樣，畫面沒有造假。
+  localStorage.setItem('ac_console_steps', JSON.stringify([
+    { tool: 'codex', task: '掃過 tools/ 底下每一個 .py，補上檔案開頭的用途說明與參數表',
+      why: '規格明確、範圍清楚，適合一次講完的工單', state: 'idle' },
+    { tool: 'claude', task: '依補好的說明調整 README 的架構段落，讓它跟實際檔案對得起來',
+      why: '要跨檔案讀上下文再改寫', state: 'idle' },
+    { tool: 'qwen', task: '跑一次完整測試（npm test），把失敗的項目整理成清單',
+      why: '量大但不難，用便宜的就好', state: 'idle' },
+  ]))
   return h.level
 })()`
 
@@ -112,16 +133,14 @@ const SHOTS = [
          set.call(ta, '幫我把 tools 底下的腳本都補上使用說明，然後跑一次測試')
          ta.dispatchEvent(new Event('input', { bubbles: true }))
        }`,
-      // 真的跑一次拆解。/api/plan 是唯讀的（只回傳計畫，不會派工），
-      // 而且「省略確認」預設沒勾，所以拆完會停在等你確認的狀態 —— 沒有副作用。
-      // 空白的輸入框拍起來看不出這個分頁在做什麼，有計畫清單才說明得了。
-      clickJs('/^分析並排程$/'),
-      // 等模型把計畫吐回來。時間不固定（雲端模型忙的時候會拖），所以用輪詢，
-      // 不用固定 sleep —— 固定等太短會拍到「拆解中…」，太長是白等。
-      `for (let i = 0; i < 60; i++) {
-         if (!/拆解中/.test(document.querySelector('main').innerText)) break
-         await new Promise(r => setTimeout(r, 2000))
-       }`,
+      // 計畫已經由 SEED 擺好了，這裡不按「分析並排程」——
+      // 見 SEED 裡的說明：真的去呼叫地端拆解器會讓截圖結果取決於
+      // 當下載了哪個模型，慢的時候只拍得到「拆解中…」。
+      //
+      // 定時工作那一區**刻意不展開**。它讀的是伺服器上使用者真實的排程，
+      // 名稱與工作內容都是私人的，而 REDACT 只處理絕對路徑、擋不住這種。
+      // 收著至少看得到「⏰ 定時工作 · N 件啟用中」，功能有交代到；
+      // 為了多拍一個賣點把別人的排程放上公開 README 不划算。
     ],
     settle: 1500,
     fit: true,             // 裁掉下面一大片黑，不要留半個畫面的空白

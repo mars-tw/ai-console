@@ -98,10 +98,17 @@ python server/api.py       # 啟動整合伺服器 → http://127.0.0.1:5177/
 開發模式（熱更新）：`npm run dev`（會同時啟動 API + vite）。
 
 ```bash
-npm test                   # 單元測試（vitest）
+npm test                   # 前後端測試一起跑（211 個）
+npm run test:web           # 只跑前端（vitest，137 個）
+npm run test:py            # 只跑後端（unittest，74 個，純標準庫）
 npx tsc --noEmit -p tsconfig.app.json   # 型別檢查
-npx eslint src/            # 靜態檢查
+npx eslint .               # 靜態檢查（零警告）
 ```
+
+後端測試刻意用標準庫的 `unittest` 而不是 pytest —— Python 這一側沒有任何
+pip 依賴，測試不該是第一個引進的。覆蓋的重點是「看程式碼看不出來、
+要壓測才會現形」的那幾類：同一毫秒的 id 撞號、併發讀改寫掉資料、
+排程 tick 期間別的執行緒拿不拿得到鎖、把使用者文字放進命令列會發生什麼事。
 
 地端續聊：安裝 LM Studio 並啟動其本地伺服器（預設 `127.0.0.1:1234`），載入任一模型即可。
 
@@ -195,10 +202,14 @@ AI（Grok CLI / Codex CLI / Qwen / kimi 產圖外掛），批次時「一個後�
 tools/indexer.py           # 對話索引器：掃描 → 正規化 → 去重 → 專案分組 → public/data/*.json
 tools/gen_sheets_grok.py   # 角色動作圖生成（派工給 Grok CLI）
 tools/pack_sprites.py      # 動作圖 → 引擎用 sprite sheet
-server/api.py              # 整合伺服器：dist 靜態 + /data 即時資料 + /api 控制端點
 tools/imagegen.py          # 共用產圖層：多 AI 後端探測與派工
 tools/gen_office_art.py    # 環境材質與家具生成
 tools/pack_props.py        # 家具 → 引擎用素材
+server/api.py              # 整合伺服器：dist 靜態 + /data 即時資料 + /api 控制端點
+server/planner.py          # 一句話 → 派工計畫（指名優先、地端模型拆解、失敗一定有退路）
+server/rules.py            # 工單前置：掛規範與技能目錄，中和偽裝成系統指示的內容
+server/schedule.py         # 定時工作：JSON 存檔 + 一條背景執行緒，30 秒一個 tick
+server/tests/              # 後端測試（unittest，無 pip 依賴）
 src/pixel/                 # 像素辦公室引擎：房間、精靈、尋路、狀態機、渲染
 src/rpg/                   # 冒險模式：資料模型、內容表、戰鬥引擎、存檔
 src/                       # React + TypeScript + Tailwind 前端
@@ -211,6 +222,27 @@ src/                       # React + TypeScript + Tailwind 前端
 - 所有資料與 API 僅綁定 `127.0.0.1`，不對外開放
 - 索引器對原始對話檔**只讀不寫**
 - 清理工具（`tools/cleanup_old.py`）採「封存 → 驗證 → 刪除」流程
+
+只綁 loopback 不等於安全 —— **你用瀏覽器打開的任何網頁都能對 `127.0.0.1` 發請求**，
+而這個 API 能派工、能開終端。所以還有幾層：
+
+- **同源檢查**：所有會產生副作用的端點都要求 Origin 來自本應用自己的頁面。
+  連「完全沒有 Origin」也擋 —— 本機任何程式（某個套件的安裝腳本、下載來的執行檔）
+  都能發請求，而瀏覽器跨來源時一定會帶 Origin，所以要求它不影響正常使用。
+  會啟動外部流程的 GET（`/api/audit`）同樣要過這關
+- **工具白名單**：派工的 `tool` 必須是已知工具名。沒有這一層的話，
+  任意字串會掉進「開終端」分支被當成執行檔名跑，還能用 `..\` 把 log 寫到目錄外
+- **使用者文字不進命令列**：工單一律寫成 UTF-8 檔案，命令列只帶一行 ASCII 的
+  「去讀這個檔」。理由不只是安全 —— 經過 `cmd.exe` 的文字會在第一個雙引號被截斷、
+  `%VAR%` 會被展開成本機絕對路徑（然後跟著送進雲端模型）、含換行會整個不執行。
+  寫不了工單檔就直接失敗，不會退回把原始文字塞進批次檔
+- **請求上限**：body 2 MB、一批 20 件、單件工單 20000 字。
+  沒有上限的話一次幾千件會在幾秒內開出幾千個 CLI 行程
+- **對話 id 白名單**：`--resume <id>` 的 id 收斂成 `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`
+- **金鑰只在記憶體裡**傳給 SDK，不印出、不寫進 log
+- **宣傳截圖有防洩漏閘門**：`scripts/shot.cjs` 拍之前會把畫面上的絕對路徑
+  換成中性佔位字串，然後再掃一次；還找得到路徑就整個中止不拍。
+  這種洩漏用肉眼檢查會漏 —— 上一版就漏過一次
 
 ## License
 
