@@ -93,9 +93,24 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   useLang()
   const tone = useReadable()   // 語言一換就重繪
   const [chatWith, setChatWith] = useState<string | null>(null)
-  const [agentMsgs, setAgentMsgs] = useState<Record<string, ChatMsg[]>>({})
+  // 對話存起來。原本只是元件 state —— 關掉對話框或切到別的分頁就全沒了，
+  // 而使用者常常在這裡打一長串指示。切分頁回來看到空白，會以為送丟了。
+  const [agentMsgs, setAgentMsgs] = useState<Record<string, ChatMsg[]>>(() => {
+    try { return JSON.parse(localStorage.getItem('ac_office_chat') || '{}') } catch { return {} }
+  })
+  useEffect(() => {
+    try { localStorage.setItem('ac_office_chat', JSON.stringify(agentMsgs)) } catch { /* 存不了不影響使用 */ }
+  }, [agentMsgs])
   const [agentInput, setAgentInput] = useState('')
   const [chatBusy, setChatBusy] = useState(false)
+  // 地端模型一句話可能要等一分鐘。只寫「思考中…」看起來跟當掉一樣，
+  // 秒數會跳才知道它還活著。
+  const [chatSec, setChatSec] = useState(0)
+  useEffect(() => {
+    if (!chatBusy) return
+    const timer = setInterval(() => setChatSec((n) => n + 1), 1000)
+    return () => clearInterval(timer)
+  }, [chatBusy])
   const [routed, setRouted] = useState('')
   // 中控
   const [cmdTool, setCmdTool] = useState('auto')
@@ -146,6 +161,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
     setAgentMsgs((m) => ({ ...m, [chatWith]: next }))
     setAgentInput('')
     setChatBusy(true)
+    setChatSec(0)
     try {
       let model = routed
       if (!model) {
@@ -166,6 +182,46 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
       setAgentMsgs((m) => ({ ...m, [chatWith]: [...next, { role: 'assistant', text: reply }] }))
     } catch {
       setAgentMsgs((m) => ({ ...m, [chatWith]: [...next, { role: 'assistant', text: t('⚠️ API 無回應') }] }))
+    }
+    setChatBusy(false)
+  }
+
+  /**
+   * 把打好的那句話真的交給這隻龍代表的工具去做。
+   *
+   * 為什麼要有這個：對話框本來就寫著「或叫他去工作」，但在這之前
+   * 框裡唯一的動作是「送出」——那只是叫地端模型扮演這隻龍回話。
+   * 使用者對 GROK 說「幫我把 X 做完」，得到「好的，我這就去做」，
+   * 然後什麼都沒發生。介面承諾了一件它做不到的事，這是最糟的一種壞。
+   *
+   * 派出去走的是跟主控台完全一樣的 /api/dispatch，所以同樣會掛規範與技能、
+   * 同樣寫 log、同樣進派工登錄 —— 不另外做一套。
+   */
+  const dispatchToAgent = async () => {
+    const text = agentInput.trim()
+    if (!text || !chatWith || chatBusy) return
+    const name = CHARS[chatWith].name
+    setAgentMsgs((m) => ({
+      ...m, [chatWith]: [...(m[chatWith] || []), { role: 'user', text }],
+    }))
+    setAgentInput('')
+    setChatBusy(true)
+    setChatSec(0)
+    try {
+      const d = await fetch('/api/dispatch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool: chatWith, task: text }),
+      }).then((r) => r.json())
+      const note = d.ok
+        ? `⚡ ${d.note || t('已派給 {name}', { name })}`
+        : `⚠️ ${d.error || t('派工失敗')}`
+      setAgentMsgs((m) => ({
+        ...m, [chatWith]: [...(m[chatWith] || []), { role: 'assistant', text: note }],
+      }))
+    } catch {
+      setAgentMsgs((m) => ({
+        ...m, [chatWith]: [...(m[chatWith] || []), { role: 'assistant', text: t('⚠️ 控制 API 無回應') }],
+      }))
     }
     setChatBusy(false)
   }
@@ -382,7 +438,13 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto p-3">
             {(agentMsgs[chatWith] || []).length === 0 && (
-              <p className="text-xs text-mute2">跟 {CHARS[chatWith].name} 聊聊，或叫他去工作。</p>
+              <p className="text-xs text-mute2">
+                {t('「說說看」是跟 {name} 聊天，由地端模型代答，不會動到任何檔案。',
+                   { name: CHARS[chatWith].name })}
+                <br />
+                {t('要他真的去做，打完之後按「⚡ 交給他做」—— 那會派給真正的 {tool}。',
+                   { tool: chatWith })}
+              </p>
             )}
             <div className="flex flex-col gap-2">
               {(agentMsgs[chatWith] || []).map((m, i) => (
@@ -390,7 +452,14 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
                   {m.text}
                 </div>
               ))}
-              {chatBusy && <div className="text-xs text-mute2">{CHARS[chatWith].name} 思考中…</div>}
+              {chatBusy && (
+                <div className="text-xs text-mute2">
+                  {t('{name} 思考中… {n} 秒', { name: CHARS[chatWith].name, n: chatSec })}
+                  {chatSec > 20 && (
+                    <span className="ml-1 text-mute3">{t('（地端模型比較慢，還在跑）')}</span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
           <div className="flex flex-none gap-2 border-t border-line2 p-2">
@@ -399,10 +468,29 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
               placeholder="說點什麼…"
               value={agentInput}
               onChange={(e) => setAgentInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') sendAgentChat() }}
+              // Enter 走聊天、Ctrl+Enter 才派工。
+              // 反過來的話手一快就會派出一個會改檔案的 agent。
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter') return
+                if (e.ctrlKey || e.metaKey) void dispatchToAgent()
+                else void sendAgentChat()
+              }}
             />
-            <button className="rounded bg-ink px-3 text-sm text-invink hover:bg-white disabled:opacity-60 dark:disabled:opacity-40" disabled={chatBusy} onClick={sendAgentChat}>
-              送出
+            <button
+              className="flex-none rounded border border-line3 px-2 text-xs text-mute hover:bg-elev disabled:opacity-40"
+              disabled={chatBusy || !agentInput.trim()}
+              title={t('只是聊天，由地端模型代答，不會動到任何檔案')}
+              onClick={sendAgentChat}
+            >
+              {t('說說看')}
+            </button>
+            <button
+              className="flex-none rounded bg-ink px-2 text-xs text-invink hover:bg-white disabled:opacity-60 dark:disabled:opacity-40"
+              disabled={chatBusy || !agentInput.trim()}
+              title={t('真的派給 {tool} 執行，會掛上規範與技能，跟主控台派工同一條路徑', { tool: chatWith })}
+              onClick={dispatchToAgent}
+            >
+              {t('⚡ 交給他做')}
             </button>
           </div>
         </div>
