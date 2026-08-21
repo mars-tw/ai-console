@@ -803,6 +803,8 @@ class Handler(BaseHTTPRequestHandler):
         "gemini": lambda p: [BIN["gemini"], "--dangerously-skip-permissions",
                              "--print-timeout", "30m", "-c", "-p", p],
     }
+    # 可以被指定的工具名。任何不在這裡面的一律拒絕 —— 見 do_dispatch 的說明。
+    KNOWN_TOOLS = set(BIN) | {"local", "auto"}
     CLOUD_CHAIN = ["claude", "codex", "gemini", "grok", "qwen"]  # 自動路由順序（地端由 LM Studio 兜底）
     DISPATCHES = []  # 派工登錄：{id, tool, task, started, pid, log, mode, reply}
     REGISTRY = Path.home() / "ai-hub" / "dispatch-log" / "_registry.json"
@@ -912,6 +914,17 @@ class Handler(BaseHTTPRequestHandler):
         tool = str(body.get("tool", "auto")).strip()
         if not task:
             return self._json({"ok": False, "error": "需要 task"}, 400)
+        # tool 一定要是已知的工具名。
+        #
+        # 之前完全沒有這一層：任何字串只要不在 DISPATCH_TOOLS 也不是 "local"，
+        # 就會掉進最後的「開可見終端」分支，而那裡拿它做兩件事：
+        #   log_dir / f"{stamp}_{tool}.log"   → tool 帶 ..\..\ 就寫到 dispatch-log 外面
+        #   exe = BIN.get(tool, tool)          → 找不到就直接把 tool 當執行檔名跑
+        # 等於「指定任意路徑寫檔」加「執行任意程式」。
+        # 伺服器只綁 127.0.0.1、POST 又有同源檢查，門檻不低，但這個洞太便宜，不該留著。
+        if tool not in self.KNOWN_TOOLS:
+            return self._json({"ok": False,
+                               "error": f"不認得的工具：{tool[:40]}"}, 400)
         raw_task = task
 
         # 自動路由：依 ROUTER 鏈跳過限流的工具
