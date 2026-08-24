@@ -10,6 +10,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { t, useLang } from '@/i18n'
 import { isLive, look, stateOf } from '@/lib/dispatchState'
+import LiveTerminal from '@/components/LiveTerminal'
 import type { DispatchRecord } from '@/types/data'
 
 interface Step {
@@ -123,6 +124,23 @@ export default function Console() {
   const [justDone, setJustDone] = useState<DispatchRecord[]>([])
   /** log 是否跟著捲到底。使用者往上捲就停下來，捲回底部再繼續跟 */
   const followLog = useRef(true)
+  /**
+   * 互動終端：哪一件正開著、各工具的執行檔路徑、這個環境支不支援。
+   *
+   * 只有桌面版有（node-pty 在 Electron 主行程裡）。瀏覽器開發模式拿不到
+   * window.acPty —— 那時候按鈕就不要出現，給一個按了沒反應的鈕更糟。
+   */
+  const [ptyFor, setPtyFor] = useState<string | null>(null)
+  const [bins, setBins] = useState<Record<string, string>>({})
+  const [ptyOk, setPtyOk] = useState(false)
+  useEffect(() => {
+    const api = (window as unknown as { acPty?: { available: () => Promise<boolean> } }).acPty
+    if (!api) return
+    void api.available().then(setPtyOk).catch(() => setPtyOk(false))
+    fetch('/api/bins').then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d?.paths && d.bins) setBins(d.bins) })
+      .catch(() => {})
+  }, [])
   // 拆解是地端模型，最長要等 120 秒。按鈕只寫「拆解中…」的話，
   // 等超過十幾秒就會開始懷疑是不是當掉了 —— 秒數會跳，就知道它還活著。
   const [planSec, setPlanSec] = useState(0)
@@ -748,6 +766,26 @@ export default function Console() {
               >
                 {replyTo === d.id ? t('取消') : t('💬 補一句')}
               </button>
+              {ptyOk && bins[d.tool] && (
+                <button
+                  className="ml-2 text-[10px] text-sky-700 hover:text-sky-500 dark:text-sky-400"
+                  title={t('開一條真正互動的終端接手 {tool}。可以直接打字進去 —— '
+                    + '它問你要不要繼續時，這裡回得了話', { tool: d.tool })}
+                  onClick={() => setPtyFor(ptyFor === d.id ? null : d.id)}
+                >
+                  {ptyFor === d.id ? t('收起終端') : t('🖥️ 開終端接手')}
+                </button>
+              )}
+              {ptyFor === d.id && (
+                <div className="mx-4 my-1 h-72">
+                  <LiveTerminal
+                    id={`disp-${d.id}`}
+                    tool={d.tool}
+                    bin={bins[d.tool]}
+                    onClose={() => setPtyFor(null)}
+                  />
+                </div>
+              )}
               {replyTo === d.id && (
                 <div className="ml-6 mt-1 flex gap-1">
                   <input

@@ -4,7 +4,8 @@
 //
 // 這裡刻意把每一步都寫進啟動日誌，因為打包後主程序的 console 看不到，
 // 出事時只會看到一個白視窗，很難查。日誌位置會顯示在錯誤畫面上。
-const { app, BrowserWindow, Menu, shell } = require('electron')
+const { app, BrowserWindow, Menu, shell, ipcMain } = require('electron')
+const ptyMgr = require('./pty.cjs')
 const { spawn } = require('child_process')
 const path = require('path')
 const fs = require('fs')
@@ -156,9 +157,41 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
+/**
+ * 互動終端的 IPC。
+ *
+ * 每一個都在這一側再驗一次（工具白名單、數量上限、尺寸夾制）——
+ * renderer 是畫面那一層，它傳來的東西一律當成不可信。
+ */
+function wirePty() {
+  const push = (channel) => (id, payload) => {
+    if (win && !win.isDestroyed()) win.webContents.send(channel, id, payload)
+  }
+  ipcMain.handle('pty:available', () => ptyMgr.available())
+  ipcMain.handle('pty:open', (_e, opts) => {
+    const o = opts || {}
+    return ptyMgr.open(
+      { id: String(o.id || ''), tool: String(o.tool || ''), bin: String(o.bin || ''),
+        cwd: o.cwd ? String(o.cwd) : '', cols: +o.cols || 100, rows: +o.rows || 30 },
+      push('pty:data'), push('pty:exit'),
+    )
+  })
+  ipcMain.handle('pty:write', (_e, id, data) => ptyMgr.write(String(id), String(data)))
+  ipcMain.handle('pty:resize', (_e, id, c, r) => ptyMgr.resize(String(id), +c, +r))
+  ipcMain.handle('pty:close', (_e, id) => ptyMgr.close(String(id)))
+  ipcMain.handle('pty:list', () => ptyMgr.list())
+  ipcMain.handle('pty:backlog', (_e, id) => ptyMgr.backlog(String(id)))
+
+  // 收掉閒置與已結束的。跑一整夜的工作持續有輸出，不會被誤殺。
+  setInterval(() => ptyMgr.sweep(), 60_000).unref()
+  log(`互動終端：${ptyMgr.available() ? '可用' : '不可用（node-pty 沒載入）'}`)
+}
+
+
 async function createWindow() {
   log(`--- 啟動 --- ${app.isPackaged ? '打包版' : '開發版'}  資源=${__dirname}`)
   buildMenu()
+  wirePty()
   win = new BrowserWindow({
     width: 1280,
     height: 840,
@@ -170,7 +203,12 @@ async function createWindow() {
     icon: path.join(__dirname, '..', 'build', 'icon.png'),
     backgroundColor: '#09090b',
     autoHideMenuBar: true,
-    webPreferences: { contextIsolation: true },
+    webPreferences: {
+      contextIsolation: true,
+      // preload 是 renderer 唯一能碰到主行程的通道。
+      // contextIsolation 維持開著 —— 畫面那一層不該直接拿到 Node。
+      preload: path.join(__dirname, 'preload.cjs'),
+    },
   })
 
   const ok = await ensureServer()
@@ -197,6 +235,10 @@ app.whenReady()
   .then(createWindow)
   .catch((e) => log(`createWindow 例外：${e && e.stack}`))
 
+app.on('before-quit', () => {
+  // 不收的話那些 CLI 會變成孤兒行程繼續佔著資源
+  try { ptyMgr.killAll() } catch { /* 關閉流程不要因為這個中斷 */ }
+})
 app.on('window-all-closed', () => app.quit())
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow()

@@ -15,10 +15,13 @@
     "test:py": "python -m unittest discover -s server/tests",
     "preview": "vite preview",
     "app": "electron .",
-    "pack": "electron-packager . \"AI控制台\" --platform=win32 --arch=x64 --out=release --icon=build/icon.ico --overwrite --ignore=\"node_modules/(?!.*electron)\" --ignore=\"^/src\" --ignore=\"^/public\" --ignore=\"^/archives\" --ignore=\"^/private\" --ignore=\"^/assets-src\" --ignore=\"^/release\""
+    "pack": "electron-packager . \"AI控制台\" --platform=win32 --arch=x64 --out=release --icon=build/icon.ico --overwrite --ignore=\"node_modules/(?!.*(electron|node-pty|node-addon-api))\" --ignore=\"^/src\" --ignore=\"^/public\" --ignore=\"^/archives\" --ignore=\"^/private\" --ignore=\"^/assets-src\" --ignore=\"^/release\""
   },
   "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "clsx": "^2.1.1",
+    "node-pty": "^1.1.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router": "^7.6.1",

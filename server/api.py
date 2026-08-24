@@ -952,6 +952,25 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/health":
             return self._json({"ok": True, "ts": time.time()})
+        if self.path == "/api/bins":
+            # 互動終端要拿執行檔路徑才開得起 pty session。
+            #
+            # 只回「白名單裡而且真的存在」的那幾個 —— 這份清單本來就是
+            # 這台機器上裝了哪些 AI CLI，介面上早就看得到（辦公室的龍、
+            # 派工的下拉選單）。真正敏感的是路徑本身，所以：
+            #   · 只在同源請求下回完整路徑
+            #   · 跨來源只回「有沒有裝」，不給路徑
+            # 這個端點沒有副作用，純讀。
+            same = self._same_origin()
+            out = {}
+            for name in sorted(self.KNOWN_TOOLS):
+                if name in ("local", "auto"):
+                    continue
+                path = BIN.get(name) or ""
+                if not path or not Path(path).exists():
+                    continue
+                out[name] = path if same else True
+            return self._json({"ok": True, "bins": out, "paths": same})
         if self.path == "/api/status":
             if STATUS_JSON.exists():
                 data = json.loads(STATUS_JSON.read_text(encoding="utf-8"))
