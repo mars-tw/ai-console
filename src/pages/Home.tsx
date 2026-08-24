@@ -481,7 +481,7 @@ export default function Home() {
             <label className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500">
               {t('只看最近')}
               <select
-                className="rounded border border-zinc-200 bg-transparent px-1 py-0.5 text-xs dark:border-zinc-700"
+                className="rounded border border-line2 bg-panel px-1 py-0.5 text-xs text-ink2 [&>option]:bg-panel [&>option]:text-ink2"
                 value={activeDays}
                 onChange={(e) => setActiveDays(Number(e.target.value))}
               >
@@ -711,7 +711,7 @@ export default function Home() {
                     <div className="mb-2 flex items-center gap-2">
                       <span className="text-sm font-medium">💬 用地端模型接續</span>
                       <select
-                        className="rounded-md border border-zinc-200 bg-transparent px-2 py-1 text-xs dark:border-zinc-700"
+                        className="rounded-md border border-line2 bg-panel px-2 py-1 text-xs text-ink2 [&>option]:bg-panel [&>option]:text-ink2"
                         value={chatModel}
                         onChange={(e) => setChatModel(e.target.value)}
                       >

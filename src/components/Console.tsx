@@ -479,7 +479,7 @@ export default function Console() {
               <div key={i} className="rounded border border-line p-2">
                 <div className="mb-1 flex items-center gap-2">
                   <select
-                    className="rounded border border-line2 bg-transparent px-1.5 py-0.5 text-[11px]"
+                    className="rounded border border-line2 bg-panel px-1.5 py-0.5 text-[11px] text-ink2 [&>option]:bg-panel [&>option]:text-ink2"
                     style={{ color: TOOL_COLOR[s.tool] ?? undefined }}
                     value={s.tool}
                     disabled={s.state !== 'idle'}
