@@ -218,6 +218,103 @@ def _tail_text(path: Path, limit: int = 64 * 1024) -> str:
         return ""
 
 
+# ── 派工到底成功了沒 ────────────────────────────────────
+#
+# 為什麼不能只看 exit code：
+#   實際案例（2026-08-24）—— 派給 codex 的實作工單，它的地端優先治理層先用
+#   一顆 4B 產出「候選設計」，接著的雲端步驟撞上 API Error 529 Overloaded，
+#   整份工作在沒有改到任何一個檔案的情況下結束，**而行程回傳 0**。
+#   派工畫面顯示的是正常結束，使用者會以為工作做完了，
+#   幾個小時後才發現檔案根本沒動。
+#
+#   各家 CLI 對「我失敗了」的表達方式都在 log 裡，不在 exit code 裡。
+#   所以判斷依據是 log 內容。
+
+# 各家 CLI 宣告自己失敗的說法。命中就是 error，並把那一行當成原因回報。
+# 要有「動詞」才算數，不能只有名詞。
+# 第一版是 r'(?:usage|rate)[ _-]?limit' 這種裸名詞 —— 立刻被自己的測試打回來：
+# 工單本文會被寫進 log 開頭，而工單裡交代「如果撞到 usage limit 就回報」
+# 是家常便飯，於是每一件成功的派工都被標成紅色失敗。
+# 誤判比沒有這個功能更糟：使用者會開始不相信這個標示，連真的失敗也一起忽略。
+_FAIL_PATTERNS = [
+    re.compile(r'API Error:\s*\d{3}[^"\n]*'),
+    re.compile(r'"terminal_reason"\s*:\s*"(?:api_error|error|timeout)"'),
+    re.compile(r'(?:rate|usage|quota|credit)[ _-]?limits?\s+'
+               r'(?:reached|exceeded|hit)\b[^"\n]{0,60}', re.I),
+    re.compile(r"(?:hit|reached|exceeded)\s+(?:your\s+)?(?:\w+\s+){0,2}"
+               r'(?:rate|usage|quota|credit)[ _-]?limit\b[^"\n]{0,60}', re.I),
+    re.compile(r'\b429\s+Too\s+Many\s+Requests\b', re.I),
+    re.compile(r'\b(?:quota|credits?)\s+exhaust\w*[^"\n]{0,60}', re.I),
+]
+# 治理層自己回報「我一個檔都沒改」
+_NO_CHANGE_RE = re.compile(r'"changed_files"\s*:\s*\[\s*\]')
+# Claude CLI 的結算 JSON
+_COST_USD_RE = re.compile(r'"total_cost_usd"\s*:\s*([0-9.]+)')
+_MODEL_USAGE_RE = re.compile(
+    r'"([a-z0-9][\w.-]*)"\s*:\s*\{[^{}]*?"inputTokens"\s*:\s*(\d+)[^{}]*?"outputTokens"\s*:\s*(\d+)')
+# 地端治理層的結算 JSON（沒有金額，地端不花錢，但有 token 數）
+_LOCAL_STATS_RE = re.compile(
+    r'"input_tokens"\s*:\s*(\d+)\s*,\s*"total_output_tokens"\s*:\s*(\d+)')
+
+# log 不會回頭改寫，所以同一個 (路徑, 大小) 的解析結果可以一直用。
+# 沒有這層的話，/api/dispatches 每 8 秒被打一次、每次重掃 30 份 log 的尾端，
+# 光是正規表示式就會把輪詢本身變成負擔。
+_OUTCOME_CACHE: dict = {}
+_OUTCOME_LOCK = threading.Lock()
+
+
+def _parse_outcome(text: str) -> dict:
+    """從 log 尾端判斷結果與花費。純字串處理，不碰檔案系統。"""
+    issue = ""
+    for pat in _FAIL_PATTERNS:
+        m = pat.search(text)
+        if m:
+            issue = _ANSI_RE.sub("", m.group(0)).strip()[:160]
+            break
+
+    cost = None
+    usd = _COST_USD_RE.findall(text)
+    mu = _MODEL_USAGE_RE.findall(text)
+    if usd or mu:
+        # 一份 log 可能有好幾段結算（重試、子代理），全部加總才是這一趟的真實花費
+        cost = {
+            "usd": round(sum(float(x) for x in usd), 6),
+            "in": sum(int(i) for _, i, _ in mu),
+            "out": sum(int(o) for _, _, o in mu),
+            "model": mu[-1][0] if mu else "",
+        }
+    else:
+        loc = _LOCAL_STATS_RE.findall(text)
+        if loc:
+            cost = {"usd": 0.0,
+                    "in": sum(int(i) for i, _ in loc),
+                    "out": sum(int(o) for _, o in loc),
+                    "model": "local"}
+
+    if issue:
+        outcome = "error"
+    elif _NO_CHANGE_RE.search(text):
+        outcome = "no_changes"
+    else:
+        outcome = "ok"
+    return {"outcome": outcome, "issue": issue, "cost": cost}
+
+
+def _outcome_for(log: Path, size: int, text: str) -> dict:
+    key = (str(log), size)
+    with _OUTCOME_LOCK:
+        hit = _OUTCOME_CACHE.get(key)
+        if hit is not None:
+            return hit
+    got = _parse_outcome(text)
+    with _OUTCOME_LOCK:
+        # 上限只是防呆：一台機器的派工紀錄本來就只留最近幾十筆
+        if len(_OUTCOME_CACHE) > 500:
+            _OUTCOME_CACHE.clear()
+        _OUTCOME_CACHE[key] = got
+    return got
+
+
 def _find_bin(tool: str) -> str:
     """找工具執行檔。找不到就回工具名，交給 PATH 解析（失敗訊息也還看得懂）"""
     import shutil
@@ -1033,6 +1130,8 @@ class Handler(BaseHTTPRequestHandler):
                 {**j, "desc": schedule.describe(j)} for j in schedule.load()]})
         if self.path == "/api/dispatches":
             return self.do_dispatches()
+        if self.path.split("?", 1)[0] == "/api/dispatch/diff":
+            return self.do_dispatch_diff()
         if self.path == "/api/audit":
             # 這個 GET 會啟動外部腳本，等於有副作用 —— 一定要過同源檢查。
             # 不然惡意網頁一個 <img src="http://127.0.0.1:5177/api/audit">
@@ -1621,7 +1720,18 @@ class Handler(BaseHTTPRequestHandler):
         log_file = log_dir / f"{stamp}_{tool}.log"
 
         if tool in self.DISPATCH_TOOLS:
-            cwd = str(Path.home())
+            # 派工可以指定工作目錄。沒指定才退回家目錄。
+            #
+            # 為什麼要能指定：無頭派工原本一律從家目錄啟動，工單裡只用文字寫著
+            # 「專案根目錄：…」。後果有兩層：
+            #   1. agent 得自己 cd 過去，多一個會出錯的步驟
+            #   2. 派工紀錄裡的 cwd 永遠是家目錄，於是「這一筆改了什麼」
+            #      根本問不出來 —— 家目錄不是 git 專案，git diff 沒有東西可看
+            # sanitize_cwd 已經處理過引號、斜線與 \\?\ 前綴。
+            want = (body.get("cwd") or body.get("projectDir") or "").strip()
+            cwd = sanitize_cwd(want) if want else str(Path.home())
+            if not Path(cwd).is_dir():
+                cwd = str(Path.home())
             # 工單一律寫成 UTF-8 檔案，命令列只傳一行 ASCII 的「去讀這個檔」。
             #
             # 兩個實測踩到的理由：
@@ -2023,6 +2133,80 @@ class Handler(BaseHTTPRequestHandler):
         for src, text in claimed:
             self._send_followup(src, text)
 
+    def do_dispatch_diff(self):
+        """某一筆派工的工作目錄現在有什麼未提交的改動。
+
+        為什麼是「未提交的改動」而不是「這一趟改了什麼」：
+          派出去的 agent 一律不 commit（工單就是這樣寫的），所以工作目錄的
+          未提交差異就是它做的事。真要精確到「這一趟」得在派工開始時存一份
+          git 快照，但那會讓每一次派工都多一次 git 呼叫，而收穫只在
+          「同一個目錄連續派兩件、想分開看」這種少見情況 —— 不值得。
+          這個取捨要講出來，不然使用者會以為看到的是精確歸屬。
+
+        只在使用者按下按鈕時才跑，不在輪詢路徑上 —— git diff 在大 repo 上不便宜。
+        """
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        did = (q.get("id") or [""])[0]
+        if not self.DISPATCHES:
+            self._load_registry()
+        rec = next((d for d in self.DISPATCHES if d.get("id") == did), None)
+        if not rec:
+            return self._json({"ok": False, "error": "找不到這筆派工"}, 404)
+        cwd = rec.get("cwd") or ""
+        if not cwd or not Path(cwd).is_dir():
+            return self._json({"ok": True, "cwd": cwd, "isGit": False, "files": []})
+        try:
+            top = _run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+                       capture_output=True, text=True, timeout=15)
+            if top.returncode != 0:
+                return self._json({"ok": True, "cwd": cwd, "isGit": False, "files": []})
+            # --numstat 拿增減行數，--patch 拿內容。分兩次呼叫比解析合併輸出可靠得多。
+            stat = _run(["git", "-C", cwd, "diff", "--numstat", "HEAD"],
+                        capture_output=True, text=True, timeout=30)
+            patch = _run(["git", "-C", cwd, "diff", "--patch", "HEAD"],
+                         capture_output=True, text=True, timeout=30)
+        except Exception as e:
+            return self._json({"ok": False, "error": str(e)}, 500)
+
+        # 依檔案切開 patch。git 每個檔案一定以 "diff --git " 開頭。
+        chunks: dict = {}
+        cur = None
+        for line in (patch.stdout or "").splitlines(keepends=True):
+            if line.startswith("diff --git "):
+                # "diff --git a/x b/x" —— 取 b/ 那一側，改名時它才是新名字
+                cur = line.rstrip("\n").split(" b/", 1)[-1]
+                chunks[cur] = []
+            elif cur is not None:
+                chunks[cur].append(line)
+
+        files, total = [], 0
+        truncated = False
+        for ln in (stat.stdout or "").splitlines():
+            parts = ln.split("\t")
+            if len(parts) < 3:
+                continue
+            added, removed, path = parts[0], parts[1], parts[2]
+            body = "".join(chunks.get(path, []))
+            # 單檔上限。一個被格式化工具掃過的檔可以有幾萬行 diff，
+            # 整份送到瀏覽器只會讓畫面卡住 —— 那不是「看得到改動」，是當機。
+            if len(body) > 200_000:
+                body = body[:200_000] + "\n… （這個檔的差異太長，只顯示前段）"
+                truncated = True
+            total += len(body)
+            files.append({
+                "path": path,
+                # 二進位檔 git 給的是 "-"
+                "added": int(added) if added.isdigit() else 0,
+                "removed": int(removed) if removed.isdigit() else 0,
+                "binary": not added.isdigit(),
+                "patch": body,
+            })
+            if total > 2_000_000:
+                truncated = True
+                break
+        return self._json({"ok": True, "cwd": cwd, "isGit": True,
+                           "files": files, "truncated": truncated})
+
     def do_dispatches(self):
         """派工追蹤：列出登錄的派工，判斷真正的狀態，附 log 尾端預覽"""
         if not self.DISPATCHES:
@@ -2054,6 +2238,14 @@ class Handler(BaseHTTPRequestHandler):
                     d["logSize"] = log.stat().st_size
                 except OSError:
                     d["logSize"] = 0
+                # 還在跑的不判定結果 —— 中途出現的一次重試訊息不代表最後失敗。
+                # 但花費是累積的，跑到一半也算得出來，先給使用者看。
+                got = _outcome_for(log, d["logSize"], text)
+                d["cost"] = got["cost"]
+                if d["alive"]:
+                    d["outcome"], d["issue"] = None, ""
+                else:
+                    d["outcome"], d["issue"] = got["outcome"], got["issue"]
             out.append(d)
         # 排隊中的續談：上一輪一結束就送出去。放在輪詢裡而不是另開執行緒，
         # 是因為主控台本來就每 8 秒問一次，不需要再多一個背景迴圈。

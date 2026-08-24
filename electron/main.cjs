@@ -4,13 +4,19 @@
 //
 // 這裡刻意把每一步都寫進啟動日誌，因為打包後主程序的 console 看不到，
 // 出事時只會看到一個白視窗，很難查。日誌位置會顯示在錯誤畫面上。
-const { app, BrowserWindow, Menu, shell, ipcMain } = require('electron')
+const { app, BrowserWindow, Menu, shell, ipcMain, Notification } = require('electron')
 const ptyMgr = require('./pty.cjs')
 const { spawn } = require('child_process')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
 const http = require('http')
+
+// Windows 的通知中心（Action Center）依賴 AppUserModelId 來歸屬與顯示通知。
+// 如果沒有設定，Windows 無法識別發送通知的應用程式身份，導致 Toast 通知被系統靜默丟棄。
+if (process.platform === 'win32') {
+  app.setAppUserModelId('tw.mars.ai-console')
+}
 
 const PORT = 5177
 const APP_URL = `http://127.0.0.1:${PORT}/`
@@ -187,11 +193,58 @@ function wirePty() {
   log(`互動終端：${ptyMgr.available() ? '可用' : '不可用（node-pty 沒載入）'}`)
 }
 
+/**
+ * 系統通知 IPC。
+ *
+ * 派工完成或失敗時，發出作業系統層級的桌面通知。
+ * 當使用者切換到其他視窗工作時，透過通知得知派工結束；
+ * 點擊通知時會將主視窗展開並移至前景，讓使用者能立即查看結果。
+ */
+const activeNotifications = new Set()
+
+function wireNotify() {
+  ipcMain.handle('notify:available', () => Notification.isSupported())
+  ipcMain.handle('notify:send', (_e, opts) => {
+    if (!Notification.isSupported()) return false
+    const o = opts || {}
+    const title = String(o.title || 'AI 控制台')
+    const body = String(o.body || '')
+    const iconPath = path.join(__dirname, '..', 'build', 'icon.png')
+    const n = new Notification({
+      title,
+      body,
+      icon: fs.existsSync(iconPath) ? iconPath : undefined,
+    })
+
+    // Electron 的 Notification 物件若只保留在區域變數，可能在使用者點擊前
+    // 就被 V8 垃圾回收機制回收，導致 click 與 close 監聽器失效。
+    // 這裡暫存引用，待事件結束後再釋放。
+    activeNotifications.add(n)
+    const cleanup = () => activeNotifications.delete(n)
+
+    n.on('click', () => {
+      cleanup()
+      // 點擊通知將視窗喚醒至前景：
+      // 若視窗被最小化，必須先呼叫 restore()，否則單獨 show()/focus() 無法解除最小化狀態。
+      if (win && !win.isDestroyed()) {
+        if (win.isMinimized()) win.restore()
+        win.show()
+        win.focus()
+      }
+    })
+    n.on('close', cleanup)
+    n.on('failed', cleanup)
+    n.show()
+    return true
+  })
+}
+
 
 async function createWindow() {
   log(`--- 啟動 --- ${app.isPackaged ? '打包版' : '開發版'}  資源=${__dirname}`)
   buildMenu()
   wirePty()
+  wireNotify()
   win = new BrowserWindow({
     width: 1280,
     height: 840,

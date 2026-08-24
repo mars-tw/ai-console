@@ -23,6 +23,35 @@ interface Step {
   log?: string
 }
 
+interface DispatchCost {
+  usd: number
+  in: number
+  out: number
+  model: string
+}
+
+type ConsoleDispatch = DispatchRecord & {
+  outcome?: 'ok' | 'no_changes' | 'error' | null
+  cost?: DispatchCost | null
+  issue?: string
+}
+
+interface DiffFile {
+  path: string
+  added: number
+  removed: number
+  patch: string
+}
+
+interface DispatchDiff {
+  ok: boolean
+  cwd?: string
+  isGit: boolean
+  files: DiffFile[]
+  truncated?: boolean
+  error?: string
+}
+
 /**
  * 上一輪還在跑的派工 id。刻意放在模組層級 —— 見下面 liveIds 的說明。
  * 模組只載入一次，切分頁不會把它清掉。
@@ -44,6 +73,45 @@ function elapsed(stamp: string): string {
   if (s < 60) return `${s} 秒`
   if (s < 3600) return `${Math.floor(s / 60)} 分 ${s % 60} 秒`
   return `${Math.floor(s / 3600)} 小時 ${Math.floor((s % 3600) / 60)} 分`
+}
+
+function formatUsd(usd: number): string {
+  if (!Number.isFinite(usd) || usd <= 0) return ''
+  return `$${usd.toFixed(8).replace(/0+$/, '').replace(/\.$/, '')}`
+}
+
+const TOKEN_FORMAT = new Intl.NumberFormat('en-US')
+
+function outcomeLook(d: ConsoleDispatch): { label: string; tone: string } {
+  switch (d.outcome) {
+    case 'ok':
+      return { label: t('已完成'), tone: 'text-emerald-700 dark:text-emerald-300' }
+    case 'no_changes':
+      return { label: t('跑完了但沒有改到任何檔案'), tone: 'text-amber-700 dark:text-amber-300' }
+    case 'error':
+      return { label: t('執行失敗'), tone: 'text-red-700 dark:text-red-300' }
+    default:
+      return look(stateOf(d))
+  }
+}
+
+function patchLineTone(line: string): string {
+  if (line.startsWith('@@')) return 'text-zinc-600 dark:text-zinc-300'
+  if (line.startsWith('+')) return 'text-emerald-700 dark:text-emerald-300'
+  if (line.startsWith('-')) return 'text-red-700 dark:text-red-300'
+  return 'text-ink3'
+}
+
+function PatchLines({ patch }: { patch: string }) {
+  return (
+    <pre className="mt-1 max-h-96 overflow-auto rounded border border-line2 bg-app p-2 font-mono text-[11px] leading-5">
+      {patch.split('\n').map((line, i) => (
+        <span key={`${i}-${line}`} className={`block min-w-max ${patchLineTone(line)}`}>
+          {line || ' '}
+        </span>
+      ))}
+    </pre>
+  )
 }
 
 /**
@@ -107,7 +175,7 @@ export default function Console() {
   const [planning, setPlanning] = useState(false)
   const [note, setNote] = useState('')
   const [autoRun, setAutoRun] = useState(false)
-  const [dispatches, setDispatches] = useState<DispatchRecord[]>([])
+  const [dispatches, setDispatches] = useState<ConsoleDispatch[]>([])
   const [showDone, setShowDone] = useState(false)
   /** 正在對哪一件補話，以及打到一半的內容 */
   const [replyTo, setReplyTo] = useState<string | null>(null)
@@ -126,9 +194,13 @@ export default function Console() {
   const [logText, setLogText] = useState<Record<string, string>>({})
   const boxRef = useRef<HTMLTextAreaElement>(null)
 
-  const [justDone, setJustDone] = useState<DispatchRecord[]>([])
+  const [justDone, setJustDone] = useState<ConsoleDispatch[]>([])
   /** log 是否跟著捲到底。使用者往上捲就停下來，捲回底部再繼續跟 */
   const followLog = useRef(true)
+  const [diffFor, setDiffFor] = useState<string | null>(null)
+  const [diffData, setDiffData] = useState<Record<string, DispatchDiff>>({})
+  const [diffLoading, setDiffLoading] = useState<Record<string, boolean>>({})
+  const [openPatch, setOpenPatch] = useState<string | null>(null)
   /**
    * 互動終端：哪一件正開著、各工具的執行檔路徑、這個環境支不支援。
    *
@@ -161,6 +233,7 @@ export default function Console() {
   // 「執行中的派工」標題底下，看久了就完全不知道現在到底有沒有東西在跑。
   const live = dispatches.filter(isLive)
   const done = dispatches.filter((d) => !isLive(d))
+  const sessionUsd = dispatches.reduce((sum, d) => sum + (d.cost?.usd || 0), 0)
 
   // 派工狀態每 8 秒刷新一次，讓「執行中 → 完成」自己會動
   useEffect(() => {
@@ -172,9 +245,9 @@ export default function Console() {
           // 「進行中 → 結束」那個瞬間要講一聲。
           // 之前這裡什麼都不做，而已結束的預設是收起來的 —— 一件工跑完就
           // 直接從畫面上消失，使用者只看到東西不見了，不知道是跑完還是壞掉。
-          const nowLive: Set<string> = new Set(d.dispatches.filter(isLive).map((x: DispatchRecord) => x.id))
+          const nowLive: Set<string> = new Set(d.dispatches.filter(isLive).map((x: ConsoleDispatch) => x.id))
           const finished = d.dispatches.filter(
-            (x: DispatchRecord) => LIVE_IDS.current.has(x.id) && !nowLive.has(x.id),
+            (x: ConsoleDispatch) => LIVE_IDS.current.has(x.id) && !nowLive.has(x.id),
           )
           LIVE_IDS.current = nowLive
           // 第一次輪詢時 liveIds 是空的，所以剛開啟主控台不會冒出一堆舊通知
@@ -372,6 +445,48 @@ export default function Console() {
     followLog.current = true      // 每次重新展開都先回到跟著跑的狀態
     setOpenLog(id)
     await fetchLog(id)
+  }
+
+  const toggleDiff = async (id: string) => {
+    if (diffFor === id) {
+      setDiffFor(null)
+      setOpenPatch(null)
+      return
+    }
+    setDiffFor(id)
+    setOpenPatch(null)
+    if (Object.prototype.hasOwnProperty.call(diffData, id)) return
+
+    setDiffLoading((m) => ({ ...m, [id]: true }))
+    try {
+      const r = await fetch(`/api/dispatch/diff?id=${encodeURIComponent(id)}`)
+      const body = await r.json().catch(() => ({})) as Partial<DispatchDiff>
+      if (!r.ok || !body.ok) {
+        throw new Error(body.error || t('讀取改動失敗（HTTP {code}）', { code: r.status }))
+      }
+      setDiffData((m) => ({
+        ...m,
+        [id]: {
+          ok: true,
+          cwd: typeof body.cwd === 'string' ? body.cwd : '',
+          isGit: body.isGit === true,
+          files: Array.isArray(body.files) ? body.files : [],
+          truncated: body.truncated === true,
+        },
+      }))
+    } catch (e) {
+      setDiffData((m) => ({
+        ...m,
+        [id]: {
+          ok: false,
+          isGit: false,
+          files: [],
+          error: e instanceof Error && e.message ? e.message : t('控制 API 無回應'),
+        },
+      }))
+    } finally {
+      setDiffLoading((m) => ({ ...m, [id]: false }))
+    }
   }
 
   // 展開中的 log 如果那件還在跑，就每 3 秒續抓。

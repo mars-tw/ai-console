@@ -36,3 +36,10 @@ contextBridge.exposeInMainWorld('acPty', {
   onData: (id, fn) => { dataSubs.set(id, fn); return () => dataSubs.delete(id) },
   onExit: (id, fn) => { exitSubs.set(id, fn); return () => exitSubs.delete(id) },
 })
+
+contextBridge.exposeInMainWorld('acNotify', {
+  /** 這個環境有沒有系統通知（瀏覽器開發模式沒有，要能優雅退化） */
+  available: () => ipcRenderer.invoke('notify:available'),
+  /** 發送系統通知 */
+  send: (opts) => ipcRenderer.invoke('notify:send', opts),
+})
