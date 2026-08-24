@@ -506,6 +506,10 @@ export default function Home() {
                   onClick={() => {
                     setActiveDays(0); setShowOld(true); setShowSubagent(true)
                     setShowDup(true); setShowDispatch(true); setSearch('')
+                    // onlyCJK 與 showTrash 也要重設。漏掉它們的話：
+                    // 機器上主要是英文對話的人，或正好切在垃圾桶視圖的人，
+                    // 按了「重設所有過濾條件」還是 0 筆，畫面繼續叫他重設 —— 死循環。
+                    setOnlyCJK(false); setShowTrash(false)
                   }}
                 >
                   {t('重設所有過濾條件')}

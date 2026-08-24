@@ -71,6 +71,8 @@ export interface IndexData {
 
 /** /api/dispatches 回傳的派工紀錄 */
 export interface DispatchRecord {
+  /** 派工當時的工作目錄。「另開終端」要用它才會開在對的地方 */
+  cwd?: string
   id: string
   tool: string
   task: string

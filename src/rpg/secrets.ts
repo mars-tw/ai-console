@@ -54,7 +54,7 @@ export const SECRETS: Secret[] = [
     id: 'collector',
     name: '蒐藏家',
     desc: '常駐：金幣獲得 +15%。',
-    hint: '把六個人形夥伴都找齊。',
+    hint: '湊齊六個人形夥伴（總共有八個，任選六個就行）。',
     test: (h) => (h.roster ?? []).filter((r) => !['kimi', 'claude', 'codex', 'grok', 'qwen', 'cursor', 'gemini'].includes(r.kind)).length >= 6,
   },
   {

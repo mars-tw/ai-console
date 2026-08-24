@@ -23,6 +23,12 @@ interface Step {
   log?: string
 }
 
+/**
+ * 上一輪還在跑的派工 id。刻意放在模組層級 —— 見下面 liveIds 的說明。
+ * 模組只載入一次，切分頁不會把它清掉。
+ */
+const LIVE_IDS = { current: new Set<string>() }
+
 const TOOL_COLOR: Record<string, string> = {
   claude: '#D97757', codex: '#10A37F', qwen: '#615CED',
   grok: '#1D9BF0', local: '#71717a', kimi: '#2563EB',
@@ -119,8 +125,7 @@ export default function Console() {
   const [openLog, setOpenLog] = useState<string | null>(null)
   const [logText, setLogText] = useState<Record<string, string>>({})
   const boxRef = useRef<HTMLTextAreaElement>(null)
-  /** 上一輪還在跑的 id。用來抓「剛剛跑完」那個瞬間 */
-  const liveIds = useRef<Set<string>>(new Set())
+
   const [justDone, setJustDone] = useState<DispatchRecord[]>([])
   /** log 是否跟著捲到底。使用者往上捲就停下來，捲回底部再繼續跟 */
   const followLog = useRef(true)
@@ -169,9 +174,9 @@ export default function Console() {
           // 直接從畫面上消失，使用者只看到東西不見了，不知道是跑完還是壞掉。
           const nowLive: Set<string> = new Set(d.dispatches.filter(isLive).map((x: DispatchRecord) => x.id))
           const finished = d.dispatches.filter(
-            (x: DispatchRecord) => liveIds.current.has(x.id) && !nowLive.has(x.id),
+            (x: DispatchRecord) => LIVE_IDS.current.has(x.id) && !nowLive.has(x.id),
           )
-          liveIds.current = nowLive
+          LIVE_IDS.current = nowLive
           // 第一次輪詢時 liveIds 是空的，所以剛開啟主控台不會冒出一堆舊通知
           if (finished.length) setJustDone((q) => [...finished, ...q].slice(0, 4))
         })
@@ -769,11 +774,13 @@ export default function Console() {
               {ptyOk && bins[d.tool] && (
                 <button
                   className="ml-2 text-[10px] text-sky-700 hover:text-sky-500 dark:text-sky-400"
-                  title={t('開一條真正互動的終端接手 {tool}。可以直接打字進去 —— '
-                    + '它問你要不要繼續時，這裡回得了話', { tool: d.tool })}
+                  title={t('在同一個工作目錄另外開一條可以打字的 {tool}，用來接手往下做。'
+                    + '注意：這不會接到已經在跑的那個行程 —— 無頭派工的 stdin 是關掉的，'
+                    + '任何人都插不進去。要對進行中的工作補話請用「💬 補一句」。',
+                    { tool: d.tool })}
                   onClick={() => setPtyFor(ptyFor === d.id ? null : d.id)}
                 >
-                  {ptyFor === d.id ? t('收起終端') : t('🖥️ 開終端接手')}
+                  {ptyFor === d.id ? t('收起終端') : t('🖥️ 另開終端')}
                 </button>
               )}
               {ptyFor === d.id && (
@@ -782,6 +789,7 @@ export default function Console() {
                     id={`disp-${d.id}`}
                     tool={d.tool}
                     bin={bins[d.tool]}
+                    cwd={d.cwd}
                     onClose={() => setPtyFor(null)}
                   />
                 </div>

@@ -168,15 +168,23 @@ def _new_stamp(log_dir: Path, tool: str) -> str:
     於是拿到同一個編號 —— 兩件工共用一個 id、工單檔互相覆蓋、
     點開 log 看到的是別人的產出。批次派工正是一口氣送出好幾件。
 
-    改成用 O_CREAT|O_EXCL 直接把 log 檔搶下來：建得起來才算搶到，
+    改成用 O_CREAT|O_EXCL 直接搶號：建得起來才算搶到，
     這一步在檔案系統層是原子的。行程內另外加一把鎖只是少繞幾圈。
+
+    搶的是「不帶工具名」的佔位檔，不是 {stamp}_{tool}.log。
+    帶工具名的話，同一秒派給兩個不同工具會各自搶到同一個 stamp
+    （檔名不同、都建得起來），於是：
+      · 兩件工共用一個派工 id，查 log 與補一句都會指到錯的那一件
+      · 更糟的是 {stamp}_task.md 不帶工具名，後寫的直接蓋掉前一份，
+        兩個 agent 拿到同一份工單
+    實測踩到：同一秒派給 gemini 與 codex，兩份工單只活一份。
     """
     base = time.strftime("%Y%m%d-%H%M%S")
     with _STAMP_LOCK:
         for n in range(1, 200):
             stamp = base if n == 1 else f"{base}_{n}"
             try:
-                fd = os.open(str(log_dir / f"{stamp}_{tool}.log"),
+                fd = os.open(str(log_dir / f"{stamp}.id"),
                              os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
                 continue
@@ -1659,7 +1667,7 @@ class Handler(BaseHTTPRequestHandler):
                     lf.close()          # 同上
                 self._reg_append({"id": stamp, "tool": tool, "task": raw_task[:120],
                                   "started": stamp, "pid": proc_pid, "log": str(log_file),
-                                  "mode": "headless"})
+                                  "mode": "headless", "cwd": cwd})
                 return self._json({"ok": True, "tool": tool, "mode": "headless",
                                    "log": str(log_file), "id": stamp, "skills": applied_skills,
                                    "note": f"已派出 {tool} 無頭執行"

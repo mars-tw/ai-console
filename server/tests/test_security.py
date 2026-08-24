@@ -86,9 +86,37 @@ class TestNewStamp(unittest.TestCase):
             t.join()
         self.assertEqual(len(set(got)), 40)
 
-    def test_編號會真的把_log_檔佔下來(self):
+    def test_編號會真的被佔下來(self):
+        """搶的是不帶工具名的佔位檔"""
         st = api._new_stamp(self.d, "codex")
-        self.assertTrue((self.d / f"{st}_codex.log").exists())
+        self.assertTrue((self.d / f"{st}.id").exists())
+
+    def test_不同工具在同一秒也不能撞號(self):
+        """這一條是實測踩到才補的。
+
+        前一版搶的是 {stamp}_{tool}.log —— 同一秒派給兩個不同工具，
+        兩邊都建得起來（檔名不同），於是拿到同一個 stamp。後果不只是
+        id 重複：{stamp}_task.md 不帶工具名，後寫的直接蓋掉前一份，
+        兩個 agent 拿到同一份工單。
+        實測：同時派給 gemini 與 codex，兩份工單只活一份。
+        """
+        got, lock = [], threading.Lock()
+        tools = ["gemini", "codex", "claude", "qwen", "grok", "kimi"]
+
+        def grab(t):
+            st = api._new_stamp(self.d, t)
+            with lock:
+                got.append(st)
+
+        ths = [threading.Thread(target=grab, args=(tools[i % len(tools)],))
+               for i in range(30)]
+        for th in ths:
+            th.start()
+        for th in ths:
+            th.join()
+        self.assertEqual(len(set(got)), 30)
+        # 工單檔名不帶工具名，所以 stamp 必須全域唯一才不會互相覆蓋
+        self.assertEqual(len({f"{s}_task.md" for s in got}), 30)
 
 
 class TestTailText(unittest.TestCase):

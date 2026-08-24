@@ -185,6 +185,14 @@ export default function Adventure({ tools }: Props) {
       const next: Hero = JSON.parse(JSON.stringify(prev))
       fn(next)
       saveHero(next)
+      // heroRef 要當場同步。
+      //
+      // 戰鬥心跳每一拍是「讀 heroRef.current → 收獎勵 → saveHero(h)」，
+      // 而 heroRef 原本只靠 useEffect 更新（下一次 render 之後才生效）。
+      // 玩家在兩拍之間配點或買東西的話，心跳會拿還沒更新的舊快照寫檔，
+      // 剛加的點數與剛買的道具就這樣被蓋掉 —— 而且沒有任何錯誤訊息，
+      // 玩家只會覺得「我明明點了」。
+      heroRef.current = next
       return next
     })
   }, [])
@@ -301,8 +309,14 @@ export default function Adventure({ tools }: Props) {
 
     const b = battleRef.current
     if (!b || b.over) return
-    const keep = b.allies.filter((a) => members.includes(a.art))
-    const have = new Set(keep.map((a) => a.art))
+    // 比對要用同一種東西。members 存的是隊員 id（'knight'、'kimi'），
+    // 而 a.art 是圖示名（人形是 'ally-knight'，AI 龍才剛好等於 id）——
+    // 所以原本的 members.includes(a.art) 對人形夥伴永遠是 false：
+    // 隊伍一動，場上的人形夥伴全部被銷毀重建，血量瞬間回滿、冷卻歸零。
+    // 而 AI 龍剛好對得上，所以這個 bug 只有帶人形夥伴時才看得出來。
+    const idOf = (a: Combatant) => (a.art || '').replace(/^ally-/, '')
+    const keep = b.allies.filter((a) => members.includes(idOf(a)))
+    const have = new Set(keep.map(idOf))
     b.allies = [...keep, ...buildParty(members.filter((k) => !have.has(k)))]
     const nb = { ...b }
     battleRef.current = nb      // 心跳讀的是 ref，只 setBattle 會被下一拍蓋掉
@@ -567,6 +581,13 @@ export default function Adventure({ tools }: Props) {
     for (const s of SLOTS) {
       h.bag.filter((i) => i.slot === s).sort((a, b) => itemScore(b) - itemScore(a))
         .slice(0, 3).forEach((i) => keep.add(i.id))
+    // 彩蛋裝備一律留著，不管分數。
+    //
+    // 它們是六件獨一無二、賣掉就再也拿不回來的東西 —— 而原本的規則只看
+    // itemScore 取每個部位前三名，所以一件沒穿在身上的彩蛋裝，
+    // 只要同部位有三件分數更高的普通裝，就會被當成雜物永久賣掉。
+    // 「清雜物」這個名字讓人以為它只會清沒用的東西，不會清掉稀有品。
+    h.bag.filter((i) => i.unique).forEach((i) => keep.add(i.id))
     }
     const sold = h.bag.filter((i) => !keep.has(i.id))
     return { keep, sold, gold: sold.reduce((n, i) => n + Math.max(1, Math.round(itemScore(i) / 4)), 0) }

@@ -644,11 +644,17 @@ function act(b: Battle, c: Combatant, h: Hero | null, haste: number, skipCd = fa
 
 /** 喝藥水：立刻回復，不佔回合 */
 export function drinkPotion(b: Battle, h: Hero, kind: 'hp' | 'mp'): boolean {
-  b.potionUsed = true
+  // potionUsed 一定要等「真的喝下去」才標記。
+  //
+  // 原本它是第一行、無條件執行 —— 滿血時誤按 H 會走進下面的 return false，
+  // 沒扣藥水、沒回血，但整場已經被標記成喝過藥水，
+  // 「苦行者」彩蛋（不喝藥水通關三次地城）就這樣被一個誤觸廢掉。
+  // 玩家看到藥水數量沒少，根本不會知道發生了什麼。
   if (b.over || h.potions[kind] <= 0) return false
   const c = b.hero
   if (kind === 'hp' && c.hp >= c.hpMax) return false
   if (kind === 'mp' && c.mp >= c.mpMax) return false
+  b.potionUsed = true
   h.potions[kind]--
   const amount = Math.round((kind === 'hp' ? c.hpMax : c.mpMax) * 0.4)
   if (kind === 'hp') {

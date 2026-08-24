@@ -133,7 +133,14 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   }
   const runAudit = () => {
     setAuditBusy(true)
-    fetch('/api/audit').then((r) => r.ok ? r.json() : null)
+    // 非 200 也要講。原本 r.ok 為 false 就回 null 然後靜靜結束 ——
+    // 使用者按了「執行稽核」，按鈕轉幾秒又恢復，沒報告也沒訊息，只能猜是不是壞了。
+    // 實際上多半是 config.json 沒設定稽核腳本（後端回 404）。
+    fetch('/api/audit').then(async (r) => {
+      if (r.ok) return r.json()
+      const d = await r.json().catch(() => null)
+      throw new Error(d?.error || `稽核失敗（HTTP ${r.status}）`)
+    })
       .then((d) => { if (d?.summary) setAudit(d) })
       .catch(() => {})
       .finally(() => setAuditBusy(false))
@@ -292,11 +299,16 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
               value={cmdTool}
               onChange={(e) => setCmdTool(e.target.value)}
             >
+              {/* 這份清單要跟辦公室畫面上的龍一致。原本漏了 gemini／kimi／cursor ——
+                  使用者看得到那三隻在走動，想指名交給它們卻在選單裡找不到。 */}
               <option value="auto">{t('🤖 自動路由')}</option>
               <option value="claude">{t('Claude（無頭）')}</option>
               <option value="codex">{t('Codex（無頭）')}</option>
+              <option value="gemini">{t('ANTIGRAVITY（無頭）')}</option>
               <option value="qwen">{t('Qwen（無頭）')}</option>
+              <option value="kimi">{t('Kimi（終端預填）')}</option>
               <option value="grok">{t('Grok（終端預填）')}</option>
+              <option value="cursor">{t('Cursor（終端預填）')}</option>
               <option value="local">{t('地端（LM Studio）')}</option>
             </select>
             <input
