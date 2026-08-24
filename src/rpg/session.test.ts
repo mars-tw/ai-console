@@ -5,10 +5,10 @@
 // 「怪怎麼掉血這麼快」，不會有任何錯誤訊息，只能靠測試守住。
 import { beforeEach, describe, expect, it } from 'vitest'
 import { newHero, startBattle } from './engine'
-import { loadArena, saveArena, saveBattle, saveHero } from './save'
+import { loadArena, loadRestartIntent, saveArena, saveBattle, saveHero } from './save'
 import {
-  _beatOnce, _reset, _waitBeats, cancelRestart, drainPending,
-  setAuto, setMounted, setRestart, subscribe,
+  _beatOnce, _reset, _waitBeats, armRestart, cancelRestart, drainPending,
+  restartPending, setAuto, setMounted, setRestart, subscribe,
 } from './session'
 import type { Battle } from './engine'
 
@@ -30,6 +30,13 @@ const mem = new Map<string, string>()
 // stepBattle 一跑就炸，而且炸在跟測試意圖無關的地方。
 function mkBattle(): Battle {
   return startBattle(newHero(), 'field', 'meadow', [])
+}
+
+function mkCompletedBattle(): Battle {
+  const b = mkBattle()
+  b.over = true
+  b.result = 'win'
+  return b
 }
 
 describe('掛機心跳', () => {
@@ -158,19 +165,61 @@ describe('打完自動開下一場', () => {
     setRestart((h) => { asked += 1; return startBattle(h, 'field', 'meadow', []) })
     fightToEnd()
     cancelRestart()
+    expect(loadRestartIntent()).toBeNull()
     for (let i = 0; i < 10; i++) _beatOnce()
     expect(asked).toBe(0)
     expect(loadArena()).toBeNull()
   })
 
-  it('畫面回來就把倒數交還給元件，兩邊不會各數各的連開兩場', () => {
-    saveBattle(startBattle(newHero(), 'field', 'meadow', []))
-    setMounted(false)
-    setRestart((h) => startBattle(h, 'field', 'meadow', []))
-    fightToEnd()
-    expect(_waitBeats()).toBeGreaterThan(0)
+  it('看得見的倒數中離場，掛機心跳會接手同一筆意圖', () => {
+    const done = mkCompletedBattle()
+    saveBattle(done)                         // 完成戰鬥照既有規則已從存檔移除
+    expect(mem.get('ac_rpg_battle_v1')).toBeFalsy()
     setMounted(true)
-    expect(_waitBeats()).toBe(0)
+    let asked = 0
+    setRestart((h) => { asked += 1; return startBattle(h, 'field', 'meadow', []) })
+    armRestart(done)                         // Adventure 的可見 3 秒倒數
+    expect(loadRestartIntent()).not.toBeNull()
+
+    setMounted(false)                        // interval 被 unmount 清掉，模組接手
+    for (let i = 0; i < 5; i++) _beatOnce()
+    expect(asked).toBe(1)
+    expect(mem.get('ac_rpg_battle_v1')).toBeTruthy()
+    expect(loadRestartIntent()).toBeNull()
+  })
+
+  it('離場倒數中回到畫面，不會清掉待開意圖，且只能領取一次', () => {
+    const done = mkCompletedBattle()
+    setMounted(false)
+    let asked = 0
+    setRestart((h) => { asked += 1; return startBattle(h, 'field', 'meadow', []) })
+    armRestart(done)
+    _beatOnce()
+    const left = _waitBeats()
+    expect(left).toBeGreaterThan(0)
+
+    setMounted(true)
+    expect(_waitBeats()).toBe(left)
+    expect(loadRestartIntent()).not.toBeNull()
+    expect(restartPending()).not.toBeNull()  // Adventure 接回可見倒數後到點
+    expect(restartPending()).toBeNull()      // 心跳同時到點也不能再開一場
+    expect(asked).toBe(1)
+  })
+
+  it('重新載入會從 localStorage 恢復待開意圖與倒數', () => {
+    const done = mkCompletedBattle()
+    setMounted(true)
+    armRestart(done)
+    expect(loadRestartIntent()).not.toBeNull()
+
+    _reset()                                 // 模擬模組重新載入：只清記憶、不清存檔
+    let asked = 0
+    setRestart((h) => { asked += 1; return startBattle(h, 'field', 'meadow', []) })
+    setMounted(false)
+    expect(_waitBeats()).toBeGreaterThan(0)
+    for (let i = 0; i < 10 && asked === 0; i++) _beatOnce()
+    expect(asked).toBe(1)
+    expect(loadRestartIntent()).toBeNull()
   })
 
   it('關掉自動就不會自動開下一場', () => {
@@ -180,6 +229,8 @@ describe('打完自動開下一場', () => {
     setRestart((h) => { asked += 1; return startBattle(h, 'field', 'meadow', []) })
     fightToEnd()
     setAuto(false)
+    expect(loadRestartIntent()).toBeNull()
+    expect(loadArena()).toBeNull()
     for (let i = 0; i < 10; i++) _beatOnce()
     expect(asked).toBe(0)
   })

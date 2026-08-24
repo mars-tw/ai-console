@@ -14,6 +14,9 @@ import { t } from '@/i18n'
 /** 使用者在 localStorage 設定的開關鍵名（預設開） */
 export const NOTIFY_STORAGE_KEY = 'ac_notify'
 
+/** App 層已做轉移去重；這裡再以派工 id 擋一次重複呼叫或 StrictMode 競態。 */
+const notifiedIds = new Set<string>()
+
 /**
  * 檢查使用者是否啟用了系統通知。
  *
@@ -44,6 +47,8 @@ export function setNotifyEnabled(enabled: boolean): void {
 }
 
 export interface NotifyDoneOptions {
+  /** 派工 id；同一 id 在這次 app 執行期間只會通知一次 */
+  id?: string
   tool: string
   ok: boolean
   summary: string
@@ -63,6 +68,15 @@ interface AcNotifyApi {
 export async function notifyDone(o: NotifyDoneOptions): Promise<boolean> {
   // 開頭先檢查開關：使用者若已明確關閉通知，應立即返回，避免多餘的 IPC 呼叫或跳出權限請求打擾使用者
   if (!isNotifyEnabled()) return false
+  if (o.id) {
+    if (notifiedIds.has(o.id)) return false
+    notifiedIds.add(o.id)
+    // API 只留近期派工；通知去重也不需要無限成長。
+    if (notifiedIds.size > 256) {
+      const oldest = notifiedIds.values().next().value
+      if (oldest) notifiedIds.delete(oldest)
+    }
+  }
 
   const toolName = o.tool ? o.tool.trim() : t('AI')
   const title = o.ok
@@ -77,7 +91,7 @@ export async function notifyDone(o: NotifyDoneOptions): Promise<boolean> {
     if (typeof window !== 'undefined') {
       const ac = (window as unknown as { acNotify?: AcNotifyApi }).acNotify
       if (ac && typeof ac.send === 'function') {
-        const sent = await ac.send({ title, body })
+        const sent = await ac.send({ title, body, id: o.id })
         if (sent) return true
       }
 

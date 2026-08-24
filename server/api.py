@@ -11,6 +11,7 @@ AI 控制台 · 整合伺服器（僅綁定 127.0.0.1，無外部存取）
   POST /api/launch           — 接續對話 / 派工：開一個終端機執行原工具的 resume 指令
                                body: {"id": "<conv_id>", "dryRun": false}
   GET  /api/status           — ai-hub status.json 即時內容
+  GET  /api/conv/tail?id=... — 從 canonical index 安全讀取對話真正尾端
 """
 import contextlib
 import datetime as _dt
@@ -52,6 +53,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import planner   # noqa: E402
 import rules     # noqa: E402
 import schedule  # noqa: E402
+from conversation_tail import ConversationTailError, load_indexed_tail  # noqa: E402
 
 PORT = 5177
 
@@ -237,17 +239,43 @@ def _tail_text(path: Path, limit: int = 64 * 1024) -> str:
 # 是家常便飯，於是每一件成功的派工都被標成紅色失敗。
 # 誤判比沒有這個功能更糟：使用者會開始不相信這個標示，連真的失敗也一起忽略。
 _FAIL_PATTERNS = [
-    re.compile(r'API Error:\s*\d{3}[^"\n]*'),
-    re.compile(r'"terminal_reason"\s*:\s*"(?:api_error|error|timeout)"'),
-    re.compile(r'(?:rate|usage|quota|credit)[ _-]?limits?\s+'
-               r'(?:reached|exceeded|hit)\b[^"\n]{0,60}', re.I),
-    re.compile(r"(?:hit|reached|exceeded)\s+(?:your\s+)?(?:\w+\s+){0,2}"
-               r'(?:rate|usage|quota|credit)[ _-]?limit\b[^"\n]{0,60}', re.I),
-    re.compile(r'\b429\s+Too\s+Many\s+Requests\b', re.I),
-    re.compile(r'\b(?:quota|credits?)\s+exhaust\w*[^"\n]{0,60}', re.I),
+    re.compile(r'(?im)^[ \t]*API Error:\s*\d{3}[^"\r\n]*[ \t\r]*$'),
+    re.compile(r'(?im)^[ \t]*(?:rate|usage|quota|credit)[ _-]?limits?\s+'
+               r'(?:reached|exceeded|hit)\b[^"\r\n]{0,60}[ \t\r]*$'),
+    re.compile(r"(?im)^[ \t]*(?:you(?:'ve| have)\s+)?(?:hit|reached|exceeded)\s+"
+               r'(?:your\s+)?'
+               r'(?:\w+\s+){0,2}(?:rate|usage|quota|credit)[ _-]?limit\b'
+               r'[^"\r\n]{0,60}[ \t\r]*$'),
+    re.compile(r'(?im)^[ \t]*429\s+Too\s+Many\s+Requests\b[^\r\n]*[ \t\r]*$'),
+    re.compile(r'(?im)^[ \t]*(?:quota|credits?)\s+exhaust\w*'
+               r'[^"\r\n]{0,60}[ \t\r]*$'),
 ]
-# 治理層自己回報「我一個檔都沒改」
-_NO_CHANGE_RE = re.compile(r'"changed_files"\s*:\s*\[\s*\]')
+_BENIGN_FAILURE_CONTEXT_RE = re.compile(
+    r'\b(?:historical|past|previous|prior)\s+(?:example|incident|case|attempt)\b|'
+    r'\b(?:example|sample|documentation|docs?|illustration|quoted?|'
+    r'mention(?:ed|s)?)\b|'
+    r'\b(?:not|never)\s+(?:this|the\s+current)\s+(?:run|execution|attempt)\b|'
+    r'\b(?:did|does)\s+not\s+(?:happen|occur|apply)\b|'
+    r'歷史(?:範例|案例|紀錄)|過去(?:範例|案例|紀錄)|先前(?:案例|紀錄|嘗試)|'
+    r'(?:只是|僅是|僅供)?(?:範例|示例|例子|說明)|'
+    r'(?:並非|不是)(?:本次|這次)(?:執行|運行|工作|派工)?|'
+    r'(?:本次|這次)(?:沒有|未)(?:發生|出現)|不代表(?:本次)?失敗|'
+    r'文件(?:中)?(?:提到|引用)', re.I)
+_TRACEBACK_RE = re.compile(r'(?im)^[ \t]*Traceback \(most recent call last\):[ \t\r]*$')
+_TERMINAL_STATUS_RE = re.compile(
+    r'(?im)^[ \t]*(?:STATUS|FINAL(?:_|[ \t]+)STATUS|OUTCOME)[ \t]*:[ \t]*'
+    r'(?P<status>COMPLETE|COMPLETED|OK|PASS|PASSED|SUCCESS|SUCCEEDED|DONE|'
+    r'ERROR|FAILED|FAILURE|BLOCKED|TIMEOUT|PARTIAL|UNAVAILABLE|'
+    r'NO[_ -]?CHANGES?|NO[_ -]?WRITE)[ \t]*[.!]?[ \t\r]*$')
+_TERMINAL_SUCCESS_RE = re.compile(
+    r'(?im)^[ \t]*(?:(?:task|work|implementation)[ \t]+)?'
+    r'(?:completed|succeeded)(?:[ \t]+successfully)?[.!]?[ \t\r]*$|'
+    r'^[ \t]*(?:(?:任務|工作|實作)[：:]?[ \t]*)?已完成[。.!]?[ \t\r]*$')
+_TERMINAL_OK = {"complete", "completed", "ok", "pass", "passed",
+                "success", "succeeded", "done"}
+_TERMINAL_ERROR = {"error", "failed", "failure", "blocked", "timeout",
+                   "partial", "unavailable"}
+_TERMINAL_NO_CHANGE = {"no_change", "no_changes", "no_write"}
 # Claude CLI 的結算 JSON
 _COST_USD_RE = re.compile(r'"total_cost_usd"\s*:\s*([0-9.]+)')
 _MODEL_USAGE_RE = re.compile(
@@ -262,59 +290,351 @@ _LOCAL_STATS_RE = re.compile(
 # 而它其實是這裡最貴的一個。
 _CODEX_TOTAL_RE = re.compile(r'tokens?\s+used\s*[\r\n]+\s*([\d,]+)', re.I)
 
+# 成本要掃完整 log，但不能把幾百 MB 一次讀進記憶體。每次只保留最後 64 KiB
+# 當跨區塊接縫，前面的統計增量寫進 accumulator。Codex 的 tokens used 是同一
+# session 的累積快照，所以取最大值，不把多次畫面重印重複相加。
+_COST_SCAN_CHUNK = 64 * 1024
+_COST_SCAN_OVERLAP = 64 * 1024
+_COST_SCAN_MAX_CARRY = 2 * _COST_SCAN_OVERLAP
+_COST_USD_BYTES_RE = re.compile(br'"total_cost_usd"\s*:\s*([0-9.]+)')
+_MODEL_USAGE_BYTES_RE = re.compile(
+    br'"([a-z0-9][\w.-]*)"\s*:\s*\{[^{}]*?"inputTokens"\s*:\s*(\d+)'
+    br'[^{}]*?"outputTokens"\s*:\s*(\d+)')
+_LOCAL_STATS_BYTES_RE = re.compile(
+    br'"input_tokens"\s*:\s*(\d+)\s*,\s*"total_output_tokens"\s*:\s*(\d+)')
+_CODEX_TOTAL_BYTES_RE = re.compile(
+    br'tokens?\s+used\s*[\r\n]+\s*([\d,]+)', re.I)
+
 # log 不會回頭改寫，所以同一個 (路徑, 大小) 的解析結果可以一直用。
 # 沒有這層的話，/api/dispatches 每 8 秒被打一次、每次重掃 30 份 log 的尾端，
 # 光是正規表示式就會把輪詢本身變成負擔。
 _OUTCOME_CACHE: dict = {}
 _OUTCOME_LOCK = threading.Lock()
+_COST_STREAMS: dict = {}
+_COST_STREAM_LOCK = threading.Lock()
+
+
+def _normalise_terminal_status(value) -> str:
+    return re.sub(r'[- ]+', '_', str(value or '').strip().lower())
+
+
+def _status_signal(value, issue_text: str = ""):
+    """把各家終端狀態字轉成統一結果；未知狀態不是訊號。"""
+    state = _normalise_terminal_status(value)
+    if state in _TERMINAL_ERROR:
+        issue = _ANSI_RE.sub("", issue_text or str(value)).strip()[:160]
+        return "error", issue
+    if state in _TERMINAL_NO_CHANGE:
+        return "no_changes", ""
+    if state in _TERMINAL_OK:
+        return "ok", ""
+    return None
+
+
+def _latest_failure_in(text: str):
+    """回傳一段文字裡最後一個明確失敗訊號，普通名詞不算。"""
+    found = []
+    for pat in _FAIL_PATTERNS:
+        for match in pat.finditer(text):
+            if _benign_failure_context(text, match):
+                continue
+            found.append((match.end(), match.group(0)))
+    if not found:
+        return None
+    _, raw = max(found, key=lambda item: item[0])
+    return _ANSI_RE.sub("", raw).strip()[:160]
+
+
+def _benign_failure_context(text: str, match) -> bool:
+    """錯誤行若明說是範例／歷史／非本次執行，就不是終端結果。"""
+    end = match.end()
+    # 同一行最常見；也看緊接的下一行，涵蓋「錯誤字樣\n這只是範例」。
+    first_newline = text.find("\n", end)
+    if first_newline >= 0:
+        second_newline = text.find("\n", first_newline + 1)
+        end = second_newline if second_newline >= 0 else len(text)
+    return bool(_BENIGN_FAILURE_CONTEXT_RE.search(text[match.start():end]))
+
+
+def _traceback_issue(text: str, start: int) -> str:
+    """Traceback 的最後一行通常才是真正例外；取不到時至少回報標頭。"""
+    lines = [_ANSI_RE.sub("", line).strip()
+             for line in text[start:start + 8000].splitlines()]
+    lines = [line for line in lines if line]
+    for line in reversed(lines[:80]):
+        if re.match(r'^[\w.]+(?:Error|Exception|Interrupt|Exit|Timeout)\b', line):
+            return line[:160]
+    return "Traceback (most recent call last)"
+
+
+def _record_terminal_signal(record: dict):
+    """一個 JSONL 結算物件只產生一個訊號，避免欄位順序互相推翻。"""
+    result = record.get("result")
+    result_text = result if isinstance(result, str) else ""
+    terminal_reason = _normalise_terminal_status(record.get("terminal_reason"))
+
+    statuses = [record.get("outcome"), record.get("final_status"),
+                record.get("status")]
+    failed_status = next((s for s in statuses
+                          if _normalise_terminal_status(s) in _TERMINAL_ERROR), None)
+    explicit_error = (
+        record.get("is_error") is True
+        or record.get("success") is False
+        or terminal_reason in {"api_error", "error", "timeout"}
+        or bool(record.get("api_error_status"))
+        or failed_status is not None
+    )
+    if explicit_error:
+        result_failure = _latest_failure_in(result_text) if result_text else None
+        issue = (result_failure or record.get("issue") or record.get("error")
+                 or record.get("message") or failed_status
+                 or record.get("terminal_reason") or "執行失敗")
+        return "error", _ANSI_RE.sub("", str(issue)).strip()[:160]
+
+    # wrapper 的 success/is_error 只代表 wrapper 自己有正常回傳，不代表包在
+    # result 裡的工作成功。先讀真正的 worker-return；FAILED、NO_CHANGES 與
+    # traceback 都要比 success:true / is_error:false 更有權威。
+    if result_text:
+        embedded = _terminal_signals(result_text)
+        if embedded:
+            _, _, outcome, issue = max(embedded,
+                                       key=lambda item: (item[0], item[1]))
+            return outcome, issue
+    elif isinstance(result, dict):
+        embedded_record = _record_terminal_signal(result)
+        if embedded_record:
+            return embedded_record
+    elif isinstance(result, list):
+        embedded_record = None
+        for item in result:
+            if isinstance(item, dict):
+                candidate = _record_terminal_signal(item)
+            elif isinstance(item, str):
+                nested = _terminal_signals(item)
+                latest = (max(nested, key=lambda signal: (signal[0], signal[1]))
+                          if nested else None)
+                candidate = ((latest[2], latest[3]) if latest else None)
+            else:
+                candidate = None
+            if candidate:
+                embedded_record = candidate
+        if embedded_record:
+            return embedded_record
+
+    explicit = next((sig for sig in (_status_signal(s) for s in statuses)
+                     if sig and sig[0] == "no_changes"), None)
+    if explicit:
+        return explicit
+
+    if "changed_files" in record and isinstance(record["changed_files"], list):
+        return ("ok", "") if record["changed_files"] else ("no_changes", "")
+
+    explicit = next((sig for sig in (_status_signal(s) for s in statuses) if sig), None)
+    if explicit:
+        return explicit
+    if record.get("success") is True:
+        return "ok", ""
+    if record.get("is_error") is False and result is not None:
+        return "ok", ""
+    if terminal_reason in {"success", "succeeded", "complete", "completed", "end_turn"}:
+        return "ok", ""
+    return None
+
+
+def _terminal_signals(text: str) -> list:
+    """依出現順序收集終端訊號；結算 JSON 以整筆物件為一個裁決。"""
+    signals = []
+    serial = 0
+    # CLI 色碼可能包在一整行最前面。換成等長空白可同時保留 match 位置，
+    # 讓「最後訊號」排序正確，也讓行首 terminal pattern 照常命中。
+    clean_text = _ANSI_RE.sub(lambda m: " " * len(m.group(0)), text)
+
+    def add(position: int, signal) -> None:
+        nonlocal serial
+        if signal is None:
+            return
+        serial += 1
+        signals.append((position, serial, signal[0], signal[1]))
+
+    for pat in _FAIL_PATTERNS:
+        for match in pat.finditer(clean_text):
+            if _benign_failure_context(clean_text, match):
+                continue
+            issue = _ANSI_RE.sub("", match.group(0)).strip()[:160]
+            add(match.end(), ("error", issue))
+    for match in _TRACEBACK_RE.finditer(clean_text):
+        add(match.end(), ("error", _traceback_issue(text, match.start())))
+    for match in _TERMINAL_STATUS_RE.finditer(clean_text):
+        add(match.end(), _status_signal(match.group("status"), match.group(0)))
+    for match in _TERMINAL_SUCCESS_RE.finditer(clean_text):
+        add(match.end(), ("ok", ""))
+
+    # JSONL 與 pretty JSON 都從行首的「{」開始。raw_decode 讓多行物件也能
+    # 以整筆判斷，不會因 status 在 changed_files 前面就被欄位順序誤導。
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r'(?m)^[ \t]*(?=\{)', clean_text):
+        start = match.end()
+        try:
+            record, consumed = decoder.raw_decode(clean_text[start:])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(record, dict):
+            add(start + consumed, _record_terminal_signal(record))
+    return signals
+
+
+def _new_cost_accumulator() -> dict:
+    return {"usd": 0.0, "in": 0, "out": 0, "codex_total": 0,
+            "models": set(), "seen": False}
+
+
+def _copy_cost_accumulator(acc: dict) -> dict:
+    copied = dict(acc)
+    copied["models"] = set(acc["models"])
+    return copied
+
+
+def _apply_cost_event(acc: dict, kind: str, values) -> None:
+    try:
+        if kind == "usd":
+            acc["usd"] += float(values[0])
+        elif kind == "usage":
+            model, input_tokens, output_tokens = values
+            acc["in"] += int(input_tokens)
+            acc["out"] += int(output_tokens)
+            acc["models"].add(str(model))
+        elif kind == "local":
+            input_tokens, output_tokens = values
+            acc["in"] += int(input_tokens)
+            acc["out"] += int(output_tokens)
+            acc["models"].add("local")
+        elif kind == "codex":
+            # Codex 會重印同一 session 的累積總數；最大值才是不重複計費的總量。
+            total = int(str(values[0]).replace(",", ""))
+            acc["codex_total"] = max(acc["codex_total"], total)
+            acc["models"].add("codex")
+        else:
+            return
+        acc["seen"] = True
+    except (TypeError, ValueError):
+        return
+
+
+def _text_cost_events(text: str):
+    for match in _COST_USD_RE.finditer(text):
+        yield match.start(), match.end(), "usd", (match.group(1),)
+    for match in _MODEL_USAGE_RE.finditer(text):
+        yield match.start(), match.end(), "usage", match.groups()
+    for match in _LOCAL_STATS_RE.finditer(text):
+        yield match.start(), match.end(), "local", match.groups()
+    for match in _CODEX_TOTAL_RE.finditer(text):
+        yield match.start(), match.end(), "codex", (match.group(1),)
+
+
+def _byte_cost_events(data: bytes):
+    for match in _COST_USD_BYTES_RE.finditer(data):
+        yield match.start(), match.end(), "usd", (match.group(1).decode("ascii"),)
+    for match in _MODEL_USAGE_BYTES_RE.finditer(data):
+        model, input_tokens, output_tokens = match.groups()
+        yield (match.start(), match.end(), "usage",
+               (model.decode("ascii", errors="replace"),
+                input_tokens.decode("ascii"), output_tokens.decode("ascii")))
+    for match in _LOCAL_STATS_BYTES_RE.finditer(data):
+        yield (match.start(), match.end(), "local",
+               tuple(value.decode("ascii") for value in match.groups()))
+    for match in _CODEX_TOTAL_BYTES_RE.finditer(data):
+        yield match.start(), match.end(), "codex", (match.group(1).decode("ascii"),)
+
+
+def _cost_from_accumulator(acc: dict):
+    if not acc["seen"]:
+        return None
+    models = sorted(acc["models"])
+    model = models[0] if len(models) == 1 else ("mixed" if models else "")
+    unattributed = acc["codex_total"]
+    cost = {
+        "usd": round(acc["usd"], 6),
+        "in": acc["in"],
+        "out": acc["out"],
+        "total": acc["in"] + acc["out"] + unattributed,
+        "model": model,
+    }
+    if unattributed:
+        # 這部分只有總數，不能假裝知道輸入／輸出拆分。
+        cost["unattributed"] = unattributed
+    return cost
+
+
+def _parse_cost(text: str):
+    acc = _new_cost_accumulator()
+    for _, _, kind, values in _text_cost_events(text):
+        _apply_cost_event(acc, kind, values)
+    return _cost_from_accumulator(acc)
+
+
+def _advance_cost_stream(state: dict, data: bytes) -> None:
+    combined = state["carry"] + data
+    events = list(_byte_cost_events(combined))
+    cutoff = max(0, len(combined) - _COST_SCAN_OVERLAP)
+    crossing = [start for start, end, _, _ in events
+                if start < cutoff < end]
+    carry_start = min([cutoff, *crossing]) if crossing else cutoff
+
+    # 惡意或壞掉的超長單筆不能讓 carry 無上限成長。完整且跨過強制邊界的
+    # event 現在就結算；不完整且超過 128 KiB 的紀錄則安全略過。
+    forced = len(combined) - carry_start > _COST_SCAN_MAX_CARRY
+    if forced:
+        carry_start = max(0, len(combined) - _COST_SCAN_MAX_CARRY)
+    for start, end, kind, values in events:
+        if (end <= carry_start) or (forced and start < carry_start):
+            _apply_cost_event(state["acc"], kind, values)
+    state["carry"] = combined[carry_start:]
+
+
+def _cost_from_log(log: Path, size: int, fallback_text: str):
+    """增量掃完整 log 的成本；記憶體固定，終端結果仍只看 64 KiB 尾端。"""
+    if not log.is_file():
+        return _parse_cost(fallback_text)
+    key = str(log)
+    with _COST_STREAM_LOCK:
+        state = _COST_STREAMS.get(key)
+        if state is None or size < state["offset"]:
+            state = {"offset": 0, "carry": b"",
+                     "acc": _new_cost_accumulator()}
+            if len(_COST_STREAMS) > 100:
+                _COST_STREAMS.clear()
+            _COST_STREAMS[key] = state
+        try:
+            with open(log, "rb") as handle:
+                handle.seek(state["offset"])
+                remaining = max(0, size - state["offset"])
+                while remaining:
+                    chunk = handle.read(min(_COST_SCAN_CHUNK, remaining))
+                    if not chunk:
+                        break
+                    _advance_cost_stream(state, chunk)
+                    state["offset"] += len(chunk)
+                    remaining -= len(chunk)
+        except OSError:
+            return _parse_cost(fallback_text)
+
+        # carry 尚未封存，因為下一輪可能從中間接著長；用副本算暫時結果，
+        # 不污染 accumulator，也不會在下次輪詢把同一筆重複加一次。
+        current = _copy_cost_accumulator(state["acc"])
+        for _, _, kind, values in _byte_cost_events(state["carry"]):
+            _apply_cost_event(current, kind, values)
+        return _cost_from_accumulator(current)
 
 
 def _parse_outcome(text: str) -> dict:
     """從 log 尾端判斷結果與花費。純字串處理，不碰檔案系統。"""
-    issue = ""
-    for pat in _FAIL_PATTERNS:
-        m = pat.search(text)
-        if m:
-            issue = _ANSI_RE.sub("", m.group(0)).strip()[:160]
-            break
-
-    cost = None
-    usd = _COST_USD_RE.findall(text)
-    mu = _MODEL_USAGE_RE.findall(text)
-    if usd or mu:
-        # 一份 log 可能有好幾段結算（重試、子代理），全部加總才是這一趟的真實花費
-        cost = {
-            "usd": round(sum(float(x) for x in usd), 6),
-            "in": sum(int(i) for _, i, _ in mu),
-            "out": sum(int(o) for _, _, o in mu),
-            "model": mu[-1][0] if mu else "",
-        }
+    signals = _terminal_signals(text)
+    if signals:
+        _, _, outcome, issue = max(signals, key=lambda item: (item[0], item[1]))
     else:
-        loc = _LOCAL_STATS_RE.findall(text)
-        if loc:
-            cost = {"usd": 0.0,
-                    "in": sum(int(i) for i, _ in loc),
-                    "out": sum(int(o) for _, o in loc),
-                    "model": "local"}
-        else:
-            tot = _CODEX_TOTAL_RE.findall(text)
-            if tot:
-                # 只有總數，拆不出輸入／輸出。與其猜一個比例，不如誠實地
-                # 把 in/out 留 0，另外給 total —— 畫面看到 0/0 但有 total 時
-                # 就顯示總數，不會假裝知道它其實不知道的事。
-                cost = {"usd": 0.0, "in": 0, "out": 0,
-                        "total": max(int(x.replace(",", "")) for x in tot),
-                        "model": "codex"}
-    if cost is not None and "total" not in cost:
-        cost["total"] = cost["in"] + cost["out"]
+        outcome, issue = "ok", ""
 
-    if issue:
-        outcome = "error"
-    elif _NO_CHANGE_RE.search(text):
-        outcome = "no_changes"
-    else:
-        outcome = "ok"
-    return {"outcome": outcome, "issue": issue, "cost": cost}
+    return {"outcome": outcome, "issue": issue, "cost": _parse_cost(text)}
 
 
 def _outcome_for(log: Path, size: int, text: str) -> dict:
@@ -324,6 +644,7 @@ def _outcome_for(log: Path, size: int, text: str) -> dict:
         if hit is not None:
             return hit
     got = _parse_outcome(text)
+    got["cost"] = _cost_from_log(log, size, text)
     with _OUTCOME_LOCK:
         # 上限只是防呆：一台機器的派工紀錄本來就只留最近幾十筆
         if len(_OUTCOME_CACHE) > 500:
@@ -376,27 +697,74 @@ def _git_diff(cwd: str) -> dict:
             chunks[cur].append(line)
 
     files, total, truncated = [], 0, False
+
+    def bounded_patch(body: str) -> str:
+        """同時守住單檔與整份上限；截斷提示也算在上限裡。"""
+        nonlocal total, truncated
+        file_note = "\n… （這個檔的差異太長，只顯示前段）"
+        if len(body) > _DIFF_FILE_CAP:
+            keep = max(0, _DIFF_FILE_CAP - len(file_note))
+            body = body[:keep] + file_note[:_DIFF_FILE_CAP - keep]
+            truncated = True
+
+        remaining = max(0, _DIFF_TOTAL_CAP - total)
+        if len(body) > remaining:
+            total_note = "\n… （整份差異太長，只顯示前段）"
+            keep = max(0, remaining - len(total_note))
+            body = body[:keep] + total_note[:remaining - keep]
+            truncated = True
+        total += len(body)
+        return body
+
+    def append_file(path: str, added: str, removed: str, body: str) -> bool:
+        nonlocal truncated
+        if total >= _DIFF_TOTAL_CAP:
+            truncated = True
+            return False
+        body = bounded_patch(body)
+        files.append({
+            "path": path,
+            # 二進位檔 git 給的是 "-"
+            "added": int(added) if added.isdigit() else 0,
+            "removed": int(removed) if removed.isdigit() else 0,
+            "binary": not (added.isdigit() and removed.isdigit()),
+            "patch": body,
+        })
+        if total >= _DIFF_TOTAL_CAP:
+            truncated = True
+            return False
+        return True
+
     for ln in (stat.stdout or "").splitlines():
         parts = ln.split("\t")
         if len(parts) < 3:
             continue
         added, removed, path = parts[0], parts[1], parts[2]
         body = "".join(chunks.get(path, []))
-        if len(body) > _DIFF_FILE_CAP:
-            body = body[:_DIFF_FILE_CAP] + "\n… （這個檔的差異太長，只顯示前段）"
-            truncated = True
-        total += len(body)
-        files.append({
-            "path": path,
-            # 二進位檔 git 給的是 "-"
-            "added": int(added) if added.isdigit() else 0,
-            "removed": int(removed) if removed.isdigit() else 0,
-            "binary": not added.isdigit(),
-            "patch": body,
-        })
-        if total > _DIFF_TOTAL_CAP:
-            truncated = True
+        if not append_file(path, added, removed, body):
             break
+
+    # git diff HEAD 看不到「還沒 git add」的新檔。用 ls-files 只列未追蹤且
+    # 未被 ignore 的檔，再逐檔以 --no-index 與 /dev/null 比較；這條路徑完全
+    # 不碰 index，卻能沿用 git 對文字／二進位與 numstat 的判定。
+    if total < _DIFF_TOTAL_CAP:
+        untracked = git("ls-files", "--others", "--exclude-standard", "-z")
+        paths = [p for p in (untracked.stdout or "").split("\0") if p]
+        for path in paths:
+            one_stat = git("diff", "--no-index", "--numstat", "-z", "--",
+                           "/dev/null", path)
+            match = re.match(r'([^\t]*)\t([^\t]*)\t', one_stat.stdout or "")
+            added, removed = match.groups() if match else ("0", "0")
+
+            one_patch = git("diff", "--no-index", "--patch", "--",
+                            "/dev/null", path)
+            patch_lines = (one_patch.stdout or "").splitlines(keepends=True)
+            if patch_lines and patch_lines[0].startswith("diff --git "):
+                body = "".join(patch_lines[1:])
+            else:
+                body = "".join(patch_lines)
+            if not append_file(path, added, removed, body):
+                break
     return {"ok": True, "cwd": cwd, "isGit": True,
             "files": files, "truncated": truncated}
 
@@ -1169,6 +1537,23 @@ class Handler(BaseHTTPRequestHandler):
                 enrich_installed(data)
                 return self._json(data)
             return self._json({"ok": False, "error": "status.json 不存在"}, 404)
+        if self.path.split("?", 1)[0] == "/api/conv/tail":
+            # 對話內容比「裝了哪些工具」敏感得多，讀取也必須同源。
+            # 查詢只收 id；來源路徑永遠由 canonical index 決定，回應也不回傳路徑。
+            if not self._same_origin():
+                return self._json({"ok": False, "error": "跨來源請求已拒絕"}, 403)
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            want = query.get("id", [""])[0]
+            try:
+                result = load_indexed_tail(INDEX_JSON, want)
+            except ConversationTailError as exc:
+                return self._json({
+                    "ok": False,
+                    "code": exc.code,
+                    "error": str(exc),
+                    "resumeAvailable": exc.resume_available,
+                }, exc.status)
+            return self._json({"ok": True, **result})
         if self.path == "/api/models":
             # 即時代理 LM Studio 的模型清單（自動偵測新模型），過濾未下載完整的
             models = [m for m in lms_models() if model_complete(m)]
@@ -1947,14 +2332,6 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._json({"ok": False, "error": str(e)}, 500)
 
-    # 從 log 尾端認出「跑起來了但失敗」。這些都是實際踩過的訊息，不是猜的。
-    # qwen 的說法是 quota exhausted / insufficient_quota，跟其他家都不一樣 ——
-    # 漏了它就會把「額度用光」誤判成「完成」（實測踩過）。
-    _FAIL_MARKS = ("usage limit", "rate limit", "quota exceeded", "quota exhausted",
-                   "insufficient_quota", "error:",
-                   "traceback (most recent call last)", "is not recognized",
-                   "command not found", "invalid_grant")
-
     def _dispatch_state(self, d: dict, alive: bool) -> str:
         """running / waiting / done / failed / silent
 
@@ -1964,9 +2341,10 @@ class Handler(BaseHTTPRequestHandler):
         """
         if alive:
             return "running"
-        if d.get("mode") == "sync":
-            return "done"
-        log = Path(d.get("log") or "")
+        raw_log = d.get("log") or ""
+        if not raw_log:
+            return "done" if d.get("mode") == "sync" else "silent"
+        log = Path(raw_log)
         try:
             size = log.stat().st_size if log.exists() else 0
         except OSError:
@@ -1977,15 +2355,18 @@ class Handler(BaseHTTPRequestHandler):
             echo = d.get("echo_size")
             if echo is None:
                 # 舊登錄沒有這個欄位，退回保守判斷：只有回音那幾行就算還沒跑
-                return "waiting" if size < 4000 else "done"
-            return "waiting" if size <= echo else "done"
+                if size < 4000:
+                    return "waiting"
+            elif size <= echo:
+                return "waiting"
+        if d.get("mode") == "sync" and size == 0:
+            return "done"
         if size == 0:
             return "silent"          # 無頭跑完但一個字都沒輸出
-        try:
-            tail = log.read_text(encoding="utf-8", errors="ignore")[-4000:].lower()
-        except OSError:
-            return "done"
-        return "failed" if any(m in tail for m in self._FAIL_MARKS) else "done"
+        # state 與 outcome 必須使用同一個終端裁決。舊版在這裡另做一次裸字串
+        # 搜尋，會把已恢復的早期錯誤判成 failed，也會把工單正文的 error: 誤判。
+        terminal = _parse_outcome(_tail_text(log))
+        return "failed" if terminal["outcome"] == "error" else "done"
 
     def _send_followup(self, d: dict, text: str) -> dict:
         """實際送出續談。回傳要寫回登錄的欄位"""

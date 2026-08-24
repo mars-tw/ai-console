@@ -13,7 +13,9 @@ log 裡出現「retry」「rate limit 這個詞被當成一般名詞提到」不
 """
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -93,9 +95,115 @@ class TestParseOutcome(unittest.TestCase):
             "請注意這個工具目前沒有 rate limit 的問題",
             "如果撞到 usage limit 就回報，不要自己重試",
             "檢查 quota 還夠不夠",
+            "文件只是在解釋 Traceback (most recent call last) 的格式",
+            'README 的範例含有 "status":"failed"，不是本次執行結果',
         ):
             with self.subTest(benign=benign):
                 self.assertEqual(api._parse_outcome(benign)["outcome"], "ok")
+
+    def test_先529後成功要以最後終端結果為準(self):
+        """重試成功後，早期 529 仍要算成本，但不能把整件工作留在紅色。"""
+        text = CLAUDE_529 + '\nSTATUS: COMPLETE\n'
+        got = api._parse_outcome(text)
+        self.assertEqual(got["outcome"], "ok")
+        self.assertEqual(got["issue"], "")
+        self.assertAlmostEqual(got["cost"]["usd"], 0.001978, places=6)
+
+    def test_地端候選沒改檔但後段真的改了要算成功(self):
+        final = ('{"status":"COMPLETE",'
+                 '"changed_files":["server/api.py","server/tests/test_outcome.py"]}')
+        got = api._parse_outcome(GOVERNOR_NO_CHANGE + "\n" + final)
+        self.assertEqual(got["outcome"], "ok")
+        self.assertEqual(got["issue"], "")
+
+    def test_早期成功但最後失敗要算失敗(self):
+        success = '{"status":"COMPLETE","changed_files":["server/api.py"]}'
+        got = api._parse_outcome(success + "\n" + CLAUDE_529)
+        self.assertEqual(got["outcome"], "error")
+        self.assertIn("529", got["issue"])
+
+    def test_最後只有traceback也要算失敗(self):
+        text = ("開始執行\n"
+                "Traceback (most recent call last):\n"
+                '  File "worker.py", line 7, in <module>\n'
+                '    raise ValueError("壞資料")\n'
+                "ValueError: 壞資料\n")
+        got = api._parse_outcome(text)
+        self.assertEqual(got["outcome"], "error")
+        self.assertIn("ValueError", got["issue"])
+
+    def test_wrapper正常不等於result裡的工作成功(self):
+        cases = (
+            ({"is_error": False, "result": "STATUS: FAILED"}, "error"),
+            ({"success": True, "result": "STATUS: NO_CHANGES"}, "no_changes"),
+            ({"success": True, "result": {"status": "UNAVAILABLE"}}, "error"),
+            ({"is_error": False, "result": (
+                "Traceback (most recent call last):\n"
+                "  File \"worker.py\", line 1, in <module>\n"
+                "ValueError: result 壞掉")}, "error"),
+        )
+        for record, expected in cases:
+            with self.subTest(expected=expected):
+                got = api._parse_outcome(json.dumps(record, ensure_ascii=False))
+                self.assertEqual(got["outcome"], expected)
+
+    def test_UNAVAILABLE是明確的終端失敗(self):
+        got = api._parse_outcome("STATUS: UNAVAILABLE\n")
+        self.assertEqual(got["outcome"], "error")
+        self.assertIn("UNAVAILABLE", got["issue"])
+
+    def test_正文提到API_Error範例不能變成失敗(self):
+        benign = (
+            "稽核文件提到 API Error: 529 Overloaded 是過去案例，本次沒有發生。\n"
+            "工作仍照原計畫執行。"
+        )
+        self.assertEqual(api._parse_outcome(benign)["outcome"], "ok")
+
+    def test_行首API_Error但明說是範例也不能誤判(self):
+        benign_cases = (
+            "API Error: 529 Overloaded is a historical example, not this run.\n",
+            "API Error: 529 Overloaded 是歷史範例，並非本次執行。\n",
+            "API Error: 529 Overloaded\n這只是歷史範例，並非本次執行。\n",
+        )
+        for text in benign_cases:
+            with self.subTest(text=text):
+                self.assertEqual(api._parse_outcome(text)["outcome"], "ok")
+
+    def test_真正獨立錯誤行與結構化錯誤仍要判失敗(self):
+        for text in (
+            "API Error: 503 Service Unavailable\n",
+            "API Error: 529 Overloaded. This is a server-side issue.\n",
+            json.dumps({
+                "is_error": True,
+                "terminal_reason": "api_error",
+                "api_error_status": 529,
+                "result": "API Error: 529 Overloaded is a historical example",
+            }),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(api._parse_outcome(text)["outcome"], "error")
+
+    def test_不同成本格式同一份log要全部算進去(self):
+        text = (CLAUDE_529 + "\n" + GOVERNOR_NO_CHANGE
+                + "\ntokens used\n500\n")
+        cost = api._parse_outcome(text)["cost"]
+        self.assertAlmostEqual(cost["usd"], 0.001978, places=6)
+        self.assertEqual(cost["in"], 1908 + 810)
+        self.assertEqual(cost["out"], 14 + 1000)
+        self.assertEqual(cost["unattributed"], 500)
+        self.assertEqual(cost["total"], 1908 + 810 + 14 + 1000 + 500)
+        self.assertEqual(cost["model"], "mixed")
+
+    def test_codex累積快照取最大值避免重複計算(self):
+        text = ("tokens used\n100\n"
+                "中途又印一次\n"
+                "tokens used\n250\n"
+                "tokens used\n250\n")
+        cost = api._parse_outcome(text)["cost"]
+        self.assertEqual(cost["in"], 0)
+        self.assertEqual(cost["out"], 0)
+        self.assertEqual(cost["unattributed"], 250)
+        self.assertEqual(cost["total"], 250)
 
     def test_codex只印總數也要算得到(self):
         """codex CLI 收尾只印一個總數、沒有拆輸入輸出、也沒有金額。
@@ -135,6 +243,7 @@ class TestOutcomeCache(unittest.TestCase):
 
     def setUp(self):
         api._OUTCOME_CACHE.clear()
+        api._COST_STREAMS.clear()
 
     def test_同一份log同樣大小只解析一次(self):
         """/api/dispatches 每 8 秒被打一次、一次掃 30 份 log。
@@ -151,6 +260,62 @@ class TestOutcomeCache(unittest.TestCase):
         api._outcome_for(p, 100, "還在跑")
         got = api._outcome_for(p, 200, CLAUDE_529)
         self.assertEqual(got["outcome"], "error")
+
+    def test_終端只看尾端但成本要掃完整log(self):
+        with tempfile.TemporaryDirectory(prefix="accost_") as tmp:
+            log = Path(tmp) / "large.log"
+            log.write_text(
+                GOVERNOR_NO_CHANGE + "\n" + ("一般執行輸出\n" * 12_000)
+                + "STATUS: COMPLETE\n",
+                encoding="utf-8")
+            tail = api._tail_text(log)
+            self.assertNotIn("input_tokens", tail)
+            got = api._outcome_for(log, log.stat().st_size, tail)
+            self.assertEqual(got["outcome"], "ok")
+            self.assertEqual(got["cost"]["in"], 810)
+            self.assertEqual(got["cost"]["out"], 1000)
+            self.assertEqual(got["cost"]["model"], "local")
+
+    def test_log成長時成本增量不能漏算或重複(self):
+        with tempfile.TemporaryDirectory(prefix="accostgrow_") as tmp:
+            log = Path(tmp) / "growing.log"
+            log.write_text(GOVERNOR_NO_CHANGE + "\n", encoding="utf-8")
+            first = api._outcome_for(log, log.stat().st_size, api._tail_text(log))
+            self.assertEqual(first["cost"]["total"], 810 + 1000)
+
+            with log.open("a", encoding="utf-8") as handle:
+                handle.write(("一般執行輸出\n" * 12_000) + CLAUDE_529 + "\n")
+            second = api._outcome_for(log, log.stat().st_size, api._tail_text(log))
+            self.assertEqual(second["cost"]["in"], 810 + 1908)
+            self.assertEqual(second["cost"]["out"], 1000 + 14)
+            self.assertAlmostEqual(second["cost"]["usd"], 0.001978, places=6)
+
+
+class TestDispatchState(unittest.TestCase):
+
+    def _state(self, text: str, *, alive: bool = False, mode: str = "headless",
+               echo_size=None) -> str:
+        with tempfile.TemporaryDirectory(prefix="acstate_") as tmp:
+            log = Path(tmp) / "dispatch.log"
+            log.write_text(text, encoding="utf-8")
+            record = {"log": str(log), "mode": mode}
+            if echo_size is not None:
+                record["echo_size"] = echo_size
+            handler = api.Handler.__new__(api.Handler)
+            return handler._dispatch_state(record, alive)
+
+    def test_state跟outcome共用最後終端結果(self):
+        recovered = CLAUDE_529 + "\nSTATUS: COMPLETE\n"
+        failed = "STATUS: COMPLETE\n" + CLAUDE_529
+        self.assertEqual(self._state(recovered), "done")
+        self.assertEqual(self._state(failed), "failed")
+
+    def test_running_waiting_silent語意不變(self):
+        self.assertEqual(self._state(CLAUDE_529, alive=True), "running")
+        echoed = "工單內提到 API Error: 529，尚未按下執行"
+        self.assertEqual(self._state(echoed, mode="terminal",
+                                     echo_size=len(echoed.encode("utf-8"))), "waiting")
+        self.assertEqual(self._state(""), "silent")
 
 
 if __name__ == "__main__":

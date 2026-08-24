@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
+import {
+  COMPLETION_TERMINAL_HISTORY_LIMIT,
+  completionTransitions,
+  ensureStepIds,
+  mapStepsById,
+  stepIdsForDispatch,
+} from './dispatchLifecycle'
 import { isLive, look, stateOf } from './dispatchState'
 import type { DispatchRecord } from '@/types/data'
 
@@ -63,6 +70,116 @@ describe('isLive 活躍狀態檢驗', () => {
     expect(isLive(mkRecord({ state: 'failed' }))).toBe(false)
     expect(isLive(mkRecord({ state: 'silent' }))).toBe(false)
     expect(isLive(mkRecord({ alive: false, result: '完成' }))).toBe(false)
+  })
+})
+
+// ── Console 步驟身分與選擇 ─────────────────────────────
+
+describe('Console 步驟以穩定 id 派工', () => {
+  it('保留已有的唯一 id，並為缺少或重複 id 的舊資料補新值', () => {
+    const steps = ensureStepIds([
+      { id: 'keep-me', state: 'idle' as const },
+      { state: 'idle' as const },
+      { id: 'keep-me', state: 'failed' as const },
+    ])
+
+    expect(steps[0].id).toBe('keep-me')
+    expect(new Set(steps.map((step) => step.id)).size).toBe(3)
+    expect(steps[1].id).not.toBe('')
+    expect(steps[2].id).not.toBe('keep-me')
+  })
+
+  it('全部派出只選 idle/未設狀態，重派只選 failed', () => {
+    const steps = [
+      { id: 'idle', state: 'idle' as const },
+      { id: 'legacy' },
+      { id: 'sending', state: 'sending' as const },
+      { id: 'sent', state: 'sent' as const },
+      { id: 'failed', state: 'failed' as const },
+    ]
+
+    expect(stepIdsForDispatch(steps)).toEqual(['idle', 'legacy'])
+    expect(stepIdsForDispatch(steps, 'failed')).toEqual(['failed'])
+  })
+
+  it('兩步 task 相同時，單步狀態更新不會連動另一步', () => {
+    const original: { id: string; task: string; state: 'idle' | 'sending' | 'sent' | 'failed' }[] = [
+      { id: 'first', task: '相同任務', state: 'idle' as const },
+      { id: 'second', task: '相同任務', state: 'idle' as const },
+      { id: 'done', task: '其他任務', state: 'sent' as const },
+    ]
+    const updated = mapStepsById(original, new Set(['second']), (step) => ({ ...step, state: 'sending' as const }))
+
+    expect(updated.map((step) => step.state)).toEqual(['idle', 'sending', 'sent'])
+    expect(updated[0]).toBe(original[0])
+    expect(updated[2]).toBe(original[2])
+  })
+})
+
+// ── 全局完成通知轉移 ────────────────────────────────
+
+describe('派工完成轉移追蹤', () => {
+  it('第一次快照只建基線，不通知舊的已結束紀錄', () => {
+    const baseline = completionTransitions(null, [
+      mkRecord({ id: 'old-done', state: 'done' }),
+      mkRecord({ id: 'running', state: 'running' }),
+    ])
+
+    expect(baseline.finished).toEqual([])
+    expect(baseline.seen.get('old-done')).toBe(false)
+    expect(baseline.seen.get('running')).toBe(true)
+  })
+
+  it('找到 running 轉 done 與兩次輪詢間直接完成的新派工', () => {
+    const previous = new Map<string, boolean>([
+      ['running', true],
+      ['already-done', false],
+    ])
+    const transition = completionTransitions(previous, [
+      mkRecord({ id: 'running', state: 'done' }),
+      mkRecord({ id: 'fast-job', state: 'done' }),
+      mkRecord({ id: 'already-done', state: 'done' }),
+    ])
+
+    expect(transition.finished.map((record) => record.id)).toEqual(['running', 'fast-job'])
+    expect(transition.seen.get('running')).toBe(false)
+    expect(transition.seen.get('fast-job')).toBe(false)
+  })
+
+  it('已通知的 terminal id 之後再出現不會重複通知', () => {
+    const first = completionTransitions(new Map([['job', true]]), [mkRecord({ id: 'job', state: 'done' })])
+    const again = completionTransitions(first.seen, [mkRecord({ id: 'job', state: 'done' })])
+
+    expect(first.finished).toHaveLength(1)
+    expect(again.finished).toEqual([])
+  })
+
+  it('只保留有上限的舊 terminal id，但不剪當前或 live id，且近期 id 仍可去重', () => {
+    const previous = new Map<string, boolean>()
+    for (let index = 0; index < COMPLETION_TERMINAL_HISTORY_LIMIT + 12; index += 1) {
+      previous.set(`old-${index}`, false)
+    }
+    previous.set('hidden-live', true)
+
+    const transition = completionTransitions(previous, [
+      mkRecord({ id: 'current-live', state: 'running' }),
+      mkRecord({ id: 'current-done', state: 'done' }),
+    ])
+    const staleTerminals = [...transition.seen].filter(
+      ([id, live]) => !live && id !== 'current-done',
+    )
+
+    expect(staleTerminals).toHaveLength(COMPLETION_TERMINAL_HISTORY_LIMIT)
+    expect(transition.seen.size).toBeLessThanOrEqual(COMPLETION_TERMINAL_HISTORY_LIMIT + 3)
+    expect(transition.seen.has('hidden-live')).toBe(true)
+    expect(transition.seen.has('current-live')).toBe(true)
+    expect(transition.seen.has('current-done')).toBe(true)
+    expect(transition.seen.has('old-0')).toBe(false)
+
+    const recentId = `old-${COMPLETION_TERMINAL_HISTORY_LIMIT + 11}`
+    expect(transition.seen.has(recentId)).toBe(true)
+    const repeated = completionTransitions(transition.seen, [mkRecord({ id: recentId, state: 'done' })])
+    expect(repeated.finished).toEqual([])
   })
 })
 

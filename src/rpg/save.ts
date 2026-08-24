@@ -62,6 +62,7 @@ export function resetHero(): Hero {
   // 場地紀錄也要清。留著的話：重置完角色切去別的分頁，掛機心跳會照著
   // 上一輪的地城把新角色丟進去 —— 一隻 Lv.1 直接被高階地城秒殺。
   localStorage.removeItem(ARENA_KEY)
+  localStorage.removeItem(RESTART_KEY)
   return h
 }
 
@@ -128,6 +129,41 @@ export function loadArena(): Arena | null {
     if (!a || (a.kind !== 'field' && a.kind !== 'dungeon')) return null
     if (typeof a.placeId !== 'string' || !a.placeId) return null
     return a
+  } catch {
+    return null
+  }
+}
+
+// ── 下一場倒數 ──────────────────────────────────────────
+//
+// 結束的戰鬥不會留在 BATTLE_KEY；只存 ARENA_KEY 又分不出「正在打一場」和
+// 「這場打完、正等著重開」。因此倒數意圖要有自己的存檔。用絕對時間而不是
+// 元件內的秒數，切分頁或重新載入後才能接著剩餘時間走，而不是每次都重數三秒。
+const RESTART_KEY = 'ac_rpg_restart_v1'
+
+export interface RestartIntent {
+  dueAt: number
+}
+
+export function saveRestartIntent(intent: RestartIntent | null): void {
+  try {
+    if (!intent) { localStorage.removeItem(RESTART_KEY); return }
+    localStorage.setItem(RESTART_KEY, JSON.stringify(intent))
+  } catch {
+    /* 跟其他存檔一樣：儲存失敗不能讓遊戲中斷 */
+  }
+}
+
+export function loadRestartIntent(): RestartIntent | null {
+  try {
+    const raw = localStorage.getItem(RESTART_KEY)
+    if (!raw) return null
+    const intent = JSON.parse(raw) as RestartIntent
+    if (!intent || !Number.isFinite(intent.dueAt) || intent.dueAt <= 0) {
+      localStorage.removeItem(RESTART_KEY)
+      return null
+    }
+    return intent
   } catch {
     return null
   }

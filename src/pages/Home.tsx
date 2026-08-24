@@ -28,6 +28,24 @@ const PROJ_BADGE: Record<string, { label: string; cls: string }> = {
 
 const WEEK_MS = 7 * 86400 * 1000
 
+const TAIL_ERROR_TEXT: Record<string, string> = {
+  invalid_id: '索引裡找不到這個對話',
+  not_found: '索引裡找不到這個對話',
+  index_missing: '對話索引無法讀取，請重新掃描',
+  index_too_large: '對話索引無法讀取，請重新掃描',
+  index_invalid: '對話索引無法讀取，請重新掃描',
+  source_missing: '對話來源無法安全讀取',
+  unsafe_source: '對話來源無法安全讀取',
+  source_read_failed: '對話來源無法安全讀取',
+  unsupported_format: '這個工具的對話格式目前不支援',
+  unparseable_format: '對話尾端沒有可解析的使用者或助理訊息',
+  incomplete_tail: '對話尾端尚未寫完或超過安全上限',
+}
+
+function tailErrorText(code?: string): string {
+  return t(TAIL_ERROR_TEXT[code || ''] || '無法讀取最新訊息')
+}
+
 function relTime(msOrIso: number | string): string {
   const ms = typeof msOrIso === 'number' ? msOrIso : new Date(msOrIso).getTime()
   if (!ms || Number.isNaN(ms)) return ''
@@ -105,6 +123,8 @@ export default function Home() {
   )
   const [detail, setDetail] = useState<ConversationDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [detailTailState, setDetailTailState] = useState<'none' | 'latest' | 'fallback'>('none')
+  const [detailTailError, setDetailTailError] = useState('')
   const [showAll, setShowAll] = useState<Record<string, boolean>>({})
   const [copied, setCopied] = useState('')
   const [apiOk, setApiOk] = useState(false)
@@ -122,6 +142,10 @@ export default function Home() {
   const [chatSecs, setChatSecs] = useState(0)
   /** 這一次請求的中止把手。放 ref 是因為送出與取消是兩次不同的 render */
   const chatAbort = useRef<AbortController | null>(null)
+  /** 每次送出／換對話都遞增；舊回應即使晚到，也不能寫進新對話。 */
+  const chatRequestSeq = useRef(0)
+  const selectedIdRef = useRef<string | null>(selectedId)
+  selectedIdRef.current = selectedId
   /** 訊息捲動容器，與「使用者是不是往上捲離開底部了」 */
   const msgBoxRef = useRef<HTMLDivElement>(null)
   const [awayFromEnd, setAwayFromEnd] = useState(false)
@@ -133,6 +157,19 @@ export default function Home() {
   useEffect(() => { localStorage.setItem('ac_activeDays', String(activeDays)) }, [activeDays])
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 4000) }
+
+  /** 換對話要當下中止地端請求，並讓任何已經在回程上的舊結果失效。 */
+  const selectConversation = (id: string | null) => {
+    if (id === selectedIdRef.current) return
+    selectedIdRef.current = id
+    chatRequestSeq.current += 1
+    chatAbort.current?.abort()
+    chatAbort.current = null
+    setChatBusy(false)
+    setChatSecs(0)
+    setRouteInfo('')
+    setSelectedId(id)
+  }
 
   useEffect(() => { localStorage.setItem('ac_showSub', showSubagent ? '1' : '0') }, [showSubagent])
   useEffect(() => { localStorage.setItem('ac_showDup', showDup ? '1' : '0') }, [showDup])
@@ -199,7 +236,7 @@ export default function Home() {
       const d = await r.json()
       if (d.ok) {
         setDeleted((s2) => new Set(s2).add(c.id))
-        if (selected?.id === c.id) setSelectedId(null)
+        if (selected?.id === c.id) selectConversation(null)
         showToast(t('已移到回收區'))
       } else showToast(t('刪除失敗：{err}', { err: d.error || '' }))
     } catch { showToast(t('控制 API 無回應')) }
@@ -210,8 +247,13 @@ export default function Home() {
     try {
       const r = await fetch('/api/refresh', { method: 'POST' })
       const d = await r.json()
-      if (d.ok) { reloadIndex(); showToast('已重新掃描全部工具') } else showToast('掃描失敗：' + (d.error || d.out || ''))
-    } catch { showToast('控制 API 無回應') }
+      if (d.ok) {
+        reloadIndex()
+        showToast(t('已重新掃描全部工具'))
+      } else {
+        showToast(t('掃描失敗：{err}', { err: d.error || d.out || '' }))
+      }
+    } catch { showToast(t('控制 API 無回應')) }
     setBusy('')
   }
 
@@ -222,10 +264,14 @@ export default function Home() {
       const d = await r.json()
       if (d.ok) showToast(t('已開啟終端：{cmd}', { cmd: d.cmd }))
       else {
-        if (c.resume) { copy(c.resume, 'resume'); showToast('此工具無法直接啟動，已改為複製接續指令') }
-        else showToast('無法啟動：' + (d.error || ''))
+        if (c.resume) {
+          copy(c.resume, 'resume')
+          showToast(t('此工具無法直接啟動，已改為複製接續指令'))
+        } else {
+          showToast(t('無法啟動：{err}', { err: d.error || '' }))
+        }
       }
-    } catch { showToast('控制 API 無回應') }
+    } catch { showToast(t('控制 API 無回應')) }
     setBusy('')
   }
 
@@ -242,6 +288,8 @@ export default function Home() {
     setChatMsgs(readChatCache(selected?.id))
     setDetail(null)          // 上一個對話的內容不要殘留到新的那一欄
     setDetailLoading(!!selected?.hasMessages)
+    setDetailTailState('none')
+    setDetailTailError('')
   }
 
   const seedChat = () => {
@@ -293,23 +341,14 @@ export default function Home() {
   const sendChat = async () => {
     const text = chatInput.trim()
     if (!text || chatBusy || !chatModel) return
-    // 自動路由：依任務類型 + 系統狀態選模型
-    let useModel = chatModel
-    if (chatModel === 'auto') {
-      try {
-        const rr = await fetch('/api/route?task=' + inferTask())
-        const rd = await rr.json()
-        if (rd.ok && rd.model) {
-          useModel = rd.model
-          setRoutedModel(rd.model)
-          setRouteInfo(t('自動選擇：{model} — {reason}', { model: rd.model, reason: rd.reason }))
-        } else {
-          setRouteInfo(rd.reason || t('自動路由失敗'))
-          setChatBusy(false)
-          return
-        }
-      } catch { setRouteInfo(t('路由 API 無回應')); return }
-    }
+    const conversationId = selected?.id ?? null
+    const requestId = chatRequestSeq.current + 1
+    chatRequestSeq.current = requestId
+    const isCurrent = () => (
+      chatRequestSeq.current === requestId && selectedIdRef.current === conversationId
+    )
+    const ac = new AbortController()
+    chatAbort.current = ac
     const history = chatMsgs.length ? chatMsgs : (detail?.messages?.slice(-8).map((m) => ({
       role: m.role === 'assistant' ? 'assistant' : 'user', text: m.text.slice(0, 1200),
     })) || [])
@@ -318,9 +357,24 @@ export default function Home() {
     setChatInput('')
     setChatBusy(true)
     setChatSecs(0)
-    const ac = new AbortController()
-    chatAbort.current = ac
     try {
+      // 自動路由也是這一次請求的一部分；換對話時要能一起中止。
+      let useModel = chatModel
+      if (chatModel === 'auto') {
+        const rr = await fetch('/api/route?task=' + inferTask(), { signal: ac.signal })
+        const rd = await rr.json()
+        if (!isCurrent()) return
+        if (rd.ok && rd.model) {
+          useModel = rd.model
+          setRoutedModel(rd.model)
+          setRouteInfo(t('自動選擇：{model} — {reason}', { model: rd.model, reason: rd.reason }))
+        } else {
+          setRouteInfo(rd.reason || t('自動路由失敗'))
+          return
+        }
+      }
+      if (!isCurrent()) return
+
       const r = await fetch('/api/chat', {
         method: 'POST',
         signal: ac.signal,
@@ -334,11 +388,14 @@ export default function Home() {
         }),
       })
       const d = await r.json()
+      if (!isCurrent()) return
       const reply = d.ok ? (d.content || d.reasoning || t('（空回應）')) : `⚠️ ${d.error || t('呼叫失敗')}`
       const finalMsgs = [...next, { role: 'assistant', text: reply }]
       setChatMsgs(finalMsgs)
-      if (selected) localStorage.setItem('ac_chat_' + selected.id, JSON.stringify(finalMsgs.slice(-30)))
+      if (conversationId) localStorage.setItem('ac_chat_' + conversationId, JSON.stringify(finalMsgs.slice(-30)))
     } catch (e) {
+      // 換對話造成的 abort 屬於舊對話，不能把「已取消」塞進新對話。
+      if (!isCurrent()) return
       // 自己按「不等了」不是錯誤，不能報成「控制 API 無回應」——
       // 那會讓人以為是後端掛了，然後去重開伺服器找一個不存在的問題。
       if ((e as Error)?.name === 'AbortError') {
@@ -346,9 +403,12 @@ export default function Home() {
       } else {
         setChatMsgs([...next, { role: 'assistant', text: t('⚠️ 控制 API 無回應') }])
       }
+    } finally {
+      if (isCurrent()) {
+        if (chatAbort.current === ac) chatAbort.current = null
+        setChatBusy(false)
+      }
     }
-    chatAbort.current = null
-    setChatBusy(false)
   }
 
   /**
@@ -364,8 +424,13 @@ export default function Home() {
     return () => clearInterval(id)
   }, [chatBusy])
 
-  // 換對話或關掉畫面時把還在跑的請求收掉，不然回應會落到別份對話上
-  useEffect(() => () => chatAbort.current?.abort(), [])
+  // 依賴 selectedId 的 cleanup 是最後一道保險：即使未來有別的入口直接改 id，
+  // 舊請求仍會被中止並失效；元件卸載也走同一條路。
+  useEffect(() => () => {
+    chatRequestSeq.current += 1
+    chatAbort.current?.abort()
+    chatAbort.current = null
+  }, [selectedId])
 
 
   useEffect(() => {
@@ -385,10 +450,60 @@ export default function Home() {
     if (!selected) return
     localStorage.setItem('ac_selected', selected.id)
     if (!selected.hasMessages) return
-    fetch(`/data/conv/${selected.id}.json`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { setDetail(d); setDetailLoading(false) })
-      .catch(() => setDetailLoading(false))
+    const controller = new AbortController()
+    setDetailLoading(true)
+
+    const load = async () => {
+      try {
+        const response = await fetch(`/data/conv/${selected.id}.json`, {
+          signal: controller.signal,
+          cache: 'no-cache',
+        })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const exported = await response.json() as ConversationDetail
+        if (!exported.truncated) {
+          if (!controller.signal.aborted) setDetail(exported)
+          return
+        }
+
+        // 索引匯出檔為了控制大小只留「前 120 則」。直接捲到底仍然不是最新，
+        // 所以長對話改由本機 API 依 canonical index 即時讀來源尾端。
+        try {
+          const tailResponse = await fetch(
+            `/api/conv/tail?id=${encodeURIComponent(selected.id)}`,
+            { signal: controller.signal, cache: 'no-store' },
+          )
+          const latest = await tailResponse.json()
+          if (!tailResponse.ok || !latest?.ok || !Array.isArray(latest.messages)) {
+            throw Object.assign(new Error('tail read failed'), { code: String(latest?.code || '') })
+          }
+          if (!controller.signal.aborted) {
+            setDetail({
+              ...exported,
+              messages: latest.messages,
+              truncated: Boolean(latest.truncated),
+            })
+            setDetailTailState('latest')
+            setDetailTailError('')
+          }
+        } catch (tailFailure) {
+          if ((tailFailure as Error)?.name === 'AbortError' || controller.signal.aborted) return
+          // 不認得的新工具格式不能讓整份對話消失；保留原匯出與原工具接續退路。
+          setDetail(exported)
+          setDetailTailState('fallback')
+          const code = (tailFailure as Error & { code?: string })?.code
+          setDetailTailError(code ? tailErrorText(code) : t('控制 API 無回應'))
+        }
+      } catch (loadFailure) {
+        if ((loadFailure as Error)?.name !== 'AbortError' && !controller.signal.aborted) {
+          setDetail(null)
+        }
+      } finally {
+        if (!controller.signal.aborted) setDetailLoading(false)
+      }
+    }
+    void load()
+    return () => controller.abort()
   }, [selected])
 
   /**
@@ -511,7 +626,7 @@ export default function Home() {
             <div className="max-w-md text-center">
               {error ? (
                 <>
-                  <p className="mb-2 text-sm text-red-600">{t('索引載入失敗：{err}', { err: error })}</p>
+                  <p role="alert" className="mb-2 text-sm text-red-600">{t('索引載入失敗：{err}', { err: error })}</p>
                   <p className="mb-4 text-xs text-zinc-500">{t('第一次使用要先掃描一次，才會有對話清單。其他三個分頁不需要索引，現在就能用。')}</p>
                   <button
                     className="rounded-md border border-zinc-300 px-4 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-40 dark:border-zinc-700 dark:hover:bg-zinc-900"
@@ -522,7 +637,7 @@ export default function Home() {
                   </button>
                 </>
               ) : (
-                <p className="text-sm text-zinc-500">{t('正在掃描全部 AI 對話…')}</p>
+                <p role="status" aria-live="polite" className="text-sm text-zinc-500">{t('正在掃描全部 AI 對話…')}</p>
               )}
             </div>
           </div>
@@ -550,7 +665,7 @@ export default function Home() {
               >
                 {busy === 'refresh' ? t('掃描中…') : t('↻ 重新掃描')}
               </button>
-              {!apiOk && <span className="text-xs text-amber-600">{t('控制 API 離線（檢視模式）')}</span>}
+              {!apiOk && <span role="status" className="text-xs text-amber-600">{t('控制 API 離線（檢視模式）')}</span>}
             </div>
             <input
               className="w-full rounded-md border border-zinc-200 bg-transparent px-3 py-1.5 text-sm outline-none focus:border-zinc-400 dark:border-zinc-700"
@@ -617,7 +732,7 @@ export default function Home() {
           <div className="min-h-0 flex-1 overflow-y-auto">
             {groups.length === 0 && (
               // 過濾條件太緊時整個側欄會是空的，沒有提示的話看起來就像程式壞了
-              <div className="px-3 py-6 text-center text-xs text-zinc-400">
+              <div role="status" aria-live="polite" className="px-3 py-6 text-center text-xs text-zinc-400">
                 <div>{search.trim() ? t('找不到符合的對話') : t('目前的過濾條件下沒有東西')}</div>
                 <div className="mt-1 text-zinc-500">
                   {t('索引裡共有 {n} 份對話', { n: index.conversations.length })}
@@ -659,7 +774,9 @@ export default function Home() {
               // 但搜尋時要強制展開 —— 不然搜完只看到一列「▸ 📁 資料夾 (3)」，
               // 命中的對話全被關在收合的資料夾裡，看起來就是「搜尋壞了／找不到」。
               const open = search.trim() ? true : (openGroups[dir] ?? false)
-              const shown = showAll[dir] ? convs : convs.slice(0, 40)
+              // 搜尋代表使用者已經明確縮小範圍，命中的項目全部自動顯示。
+              // 40 筆上限只保留在一般瀏覽，避免「搜尋有 63 筆、畫面卻只列 40 筆」。
+              const shown = search.trim() ? convs : (showAll[dir] ? convs : convs.slice(0, 40))
               const badge = hub ? PROJ_BADGE[hub.status] : null
               return (
                 <div key={dir} className="border-b border-zinc-100 dark:border-zinc-900">
@@ -712,7 +829,7 @@ export default function Home() {
                       className={`group flex w-full items-start gap-1 px-3 py-1.5 pl-7 hover:bg-zinc-50 dark:hover:bg-zinc-900 ${selected?.id === c.id ? 'bg-zinc-100 dark:bg-zinc-800' : ''}`}
                     >
                       <button
-                        onClick={() => setSelectedId(c.id)}
+                        onClick={() => selectConversation(c.id)}
                         className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
                       >
                         <span className="truncate text-sm">
@@ -737,7 +854,7 @@ export default function Home() {
                       )}
                       {apiOk && (
                         <button
-                          className="flex-none rounded px-1 text-xs text-zinc-300 opacity-0 hover:text-red-500 group-hover:opacity-100 dark:text-zinc-600"
+                          className="flex-none rounded px-1 text-xs text-zinc-300 opacity-0 hover:text-red-500 focus-visible:text-red-500 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 dark:text-zinc-600"
                           title={t('移到回收區')}
                           onClick={(e) => { e.stopPropagation(); void removeConv(c) }}
                         >
@@ -746,7 +863,7 @@ export default function Home() {
                       )}
                     </div>
                   ))}
-                  {open && convs.length > 40 && !showAll[dir] && (
+                  {open && !search.trim() && convs.length > 40 && !showAll[dir] && (
                     <button className="w-full px-3 py-1.5 text-left text-xs text-zinc-400 hover:text-zinc-600" onClick={() => setShowAll((s) => ({ ...s, [dir]: true }))}>
                       {t('顯示全部 {n} 筆…', { n: convs.length })}
                     </button>
@@ -819,7 +936,7 @@ export default function Home() {
                 {!selected.hasMessages ? (
                   <p className="text-zinc-400">此對話檔較大（{fmtSize(selected.size)}），未匯出訊息內容；可用接續指令回原工具查看。</p>
                 ) : detailLoading ? (
-                  <p className="text-zinc-400">載入訊息中…</p>
+                  <p role="status" aria-live="polite" className="text-zinc-400">{t('載入訊息中…')}</p>
                 ) : detail ? (
                   <div className="mx-auto flex max-w-3xl flex-col gap-3">
                     {detail.messages.map((m, i) => (
@@ -828,7 +945,21 @@ export default function Home() {
                         <div className="whitespace-pre-wrap break-words">{m.text}</div>
                       </div>
                     ))}
-                    {detail.truncated && <p className="text-center text-xs text-zinc-400">（訊息過多，僅顯示前段；完整內容請回原工具）</p>}
+                    {detailTailState === 'latest' ? (
+                      <p role="status" className="text-center text-xs text-zinc-400">
+                        {t('已顯示真正最新的 {n} 則訊息；更早內容仍可回原工具查看。', { n: detail.messages.length })}
+                      </p>
+                    ) : detailTailState === 'fallback' ? (
+                      <p role="alert" className="text-center text-xs text-amber-600 dark:text-amber-400">
+                        {selected.resume
+                          ? t('最新訊息載入失敗：{err}。目前顯示索引匯出的前段；仍可用「接續此對話」回原工具查看。', { err: detailTailError })
+                          : t('最新訊息載入失敗：{err}。目前顯示索引匯出的前段；可複製上方檔案路徑回原工具查看。', { err: detailTailError })}
+                      </p>
+                    ) : detail.truncated ? (
+                      <p className="text-center text-xs text-zinc-400">
+                        {t('（訊息過多，目前顯示索引匯出的前段）')}
+                      </p>
+                    ) : null}
                   </div>
                 ) : (
                   <p className="text-zinc-400">找不到匯出的訊息檔。</p>
@@ -877,9 +1008,16 @@ export default function Home() {
                         </button>
                       )}
                     </div>
-                    {routeInfo && <div className="mb-2 text-xs text-amber-600 dark:text-amber-400">{routeInfo}</div>}
+                    {routeInfo && <div role="status" aria-live="polite" className="mb-2 text-xs text-amber-600 dark:text-amber-400">{routeInfo}</div>}
                     {chatMsgs.length > 0 && (
-                      <div className="mb-2 flex max-h-64 flex-col gap-2 overflow-y-auto rounded-md bg-zinc-50 p-3 dark:bg-zinc-900">
+                      <div
+                        role="log"
+                        aria-live="polite"
+                        aria-relevant="additions text"
+                        aria-busy={chatBusy}
+                        aria-label={t('地端續聊訊息')}
+                        className="mb-2 flex max-h-64 flex-col gap-2 overflow-y-auto rounded-md bg-zinc-50 p-3 dark:bg-zinc-900"
+                      >
                         {chatMsgs.map((m, i) => (
                           <div key={i} className={`rounded-lg px-3 py-2 text-sm ${m.role === 'user' ? 'ml-10 bg-white dark:bg-zinc-800' : 'mr-10 border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-950'}`}>
                             <div className="mb-0.5 text-xs text-zinc-400">{m.role === 'user' ? '你' : (chatModel === 'auto' ? (routedModel || '自動') : chatModel)}</div>
@@ -888,7 +1026,10 @@ export default function Home() {
                         ))}
                         {chatBusy && (
                           <div className="flex items-center gap-2 text-xs text-zinc-400">
-                            <span>{t('地端模型思考中… {n} 秒', { n: chatSecs })}</span>
+                            {/* role=log 會在這一列加入時宣告一次；每秒變動的視覺計時
+                                對讀屏器隱藏，避免整段推論期間每秒重複播報。 */}
+                            <span className="sr-only">{t('地端模型開始處理這次訊息')}</span>
+                            <span aria-hidden="true">{t('地端模型思考中… {n} 秒', { n: chatSecs })}</span>
                             {/* 15 秒之前不出現：正常的短回覆本來就會在那之內回來，
                                 太早給取消鈕反而像在暗示「它大概壞了」。 */}
                             {chatSecs >= 15 && (
@@ -929,7 +1070,7 @@ export default function Home() {
 
       {/* ── 底部額度狀態列 ─────────────────────── */}
       {toast && (
-        <div className="fixed bottom-10 left-1/2 z-10 -translate-x-1/2 rounded-lg bg-zinc-900 px-4 py-2 text-sm text-white shadow-lg dark:bg-zinc-100 dark:text-zinc-900">
+        <div role="status" aria-live="polite" aria-atomic="true" className="fixed bottom-10 left-1/2 z-10 -translate-x-1/2 rounded-lg bg-zinc-900 px-4 py-2 text-sm text-white shadow-lg dark:bg-zinc-100 dark:text-zinc-900">
           {toast}
         </div>
       )}

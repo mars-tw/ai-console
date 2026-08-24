@@ -9,12 +9,19 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { t, useLang } from '@/i18n'
+import {
+  ensureStepIds,
+  mapStepsById,
+  stepIdsForDispatch,
+  type StepDispatchMode,
+} from '@/lib/dispatchLifecycle'
 import { isLive, look, stateOf } from '@/lib/dispatchState'
-import { notifyDone } from '@/lib/notify'
 import LiveTerminal from '@/components/LiveTerminal'
 import type { DispatchRecord } from '@/types/data'
 
 interface Step {
+  /** 穩定身分；不能用 task，因為兩步可能有完全相同的文字 */
+  id: string
   tool: string
   task: string
   why?: string
@@ -184,13 +191,32 @@ export default function Console() {
   // 會以為沒派成功而重新拆解再派一次 —— 派出去的是會改檔案的 agent，
   // 重複派工代價不小。
   const [steps, setSteps] = useState<Step[]>(() => {
-    try { return JSON.parse(localStorage.getItem('ac_console_steps') || '[]') } catch { return [] }
+    try {
+      const raw: unknown = JSON.parse(localStorage.getItem('ac_console_steps') || '[]')
+      if (!Array.isArray(raw)) return []
+      const restored = raw
+        .filter((item): item is Partial<Step> => !!item && typeof item === 'object')
+        .filter((item) => typeof item.tool === 'string' && typeof item.task === 'string')
+        .map((item) => ({
+          ...item,
+          tool: item.tool as string,
+          task: item.task as string,
+          state: item.state ?? 'idle',
+        }))
+      return ensureStepIds(restored)
+    } catch { return [] }
   })
   useEffect(() => {
     try { localStorage.setItem('ac_console_steps', JSON.stringify(steps)) } catch { /* 存不了不影響使用 */ }
   }, [steps])
   const [planning, setPlanning] = useState(false)
-  const [note, setNote] = useState('')
+  const [note, setNoteValue] = useState('')
+  const [noteError, setNoteError] = useState(false)
+  /** 訊息嚴重度由呼叫點明確指定，不從文字裡有沒有 ⚠ 猜測。 */
+  const setNote = (message: string, error = false) => {
+    setNoteValue(message)
+    setNoteError(error)
+  }
   const [autoRun, setAutoRun] = useState(false)
   const [dispatches, setDispatches] = useState<ConsoleDispatch[]>([])
   const [showDone, setShowDone] = useState(false)
@@ -279,20 +305,6 @@ export default function Console() {
           // 第一次輪詢時 liveIds 是空的，所以剛開啟主控台不會冒出一堆舊通知
           if (finished.length) {
             setJustDone((q) => [...finished, ...q].slice(0, 4))
-            // 同時發一則系統通知。畫面上的那一條只有「人正在看這個分頁」時才有用，
-            // 而這個程式的核心用法就是派出去之後切去做別的事 ——
-            // 不發系統通知等於要人每隔幾分鐘切回來看一眼，那就不算非同步了。
-            for (const d of finished as ConsoleDispatch[]) {
-              void notifyDone({
-                tool: d.tool,
-                ok: d.outcome !== 'error',
-                summary: d.outcome === 'error'
-                  ? (d.issue?.trim() || t('執行失敗'))
-                  : d.outcome === 'no_changes'
-                    ? t('跑完了但沒有改到任何檔案')
-                    : (d.task || '').slice(0, 80),
-              })
-            }
           }
         })
         .catch(() => {})
@@ -327,12 +339,14 @@ export default function Console() {
       // steps 變空陣列、note 是空字串 —— 按鈕轉一下就沒反應，
       // 使用者只會覺得程式壞了
       if (!r.ok) {
-        setNote(t('拆解失敗（HTTP {code}）', { code: r.status }))
+        setNote(t('拆解失敗（HTTP {code}）', { code: r.status }), true)
         setPlanning(false)
         return
       }
       const d = await r.json()
-      const got: Step[] = (d.steps || []).map((s: Step) => ({ ...s, state: 'idle' as const }))
+      const got: Step[] = ensureStepIds(
+        (d.steps || []).map((s: Omit<Step, 'id'> & { id?: string }) => ({ ...s, state: 'idle' as const })),
+      )
       setSteps(got)
       setHistory((h) => [instruction, ...h.filter((x) => x !== instruction)].slice(0, 8))
       // d.ok === false 代表拆解沒成功，後端退而求其次把整句話當成一件工。
@@ -341,7 +355,7 @@ export default function Console() {
       // 「把舊的清一清」就會照字面直接派給某個會改檔案的 agent。
       // 原本這裡只看 got.length，失敗照樣自動派出去，而且畫面上沒有任何警告。
       if (!d.ok) {
-        setNote(`⚠️ ${d.note || t('拆解失敗')}${autoRun ? t('（已暫停自動派工，請先確認下面這件再送）') : ''}`)
+        setNote(`⚠️ ${d.note || t('拆解失敗')}${autoRun ? t('（已暫停自動派工，請先確認下面這件再送）') : ''}`, true)
       } else {
         setNote(d.note || (got.length ? '' : t('沒有拆解出任何工作，換個說法試試')))
         if (autoRun && got.length) void runAll(got)
@@ -349,7 +363,7 @@ export default function Console() {
     } catch (e) {
       // 使用者自己按「不等了」不是錯誤，不要當成 API 掛掉來報
       if (!(e instanceof DOMException && e.name === 'AbortError')) {
-        setNote(t('控制 API 無回應'))
+        setNote(t('控制 API 無回應'), true)
       }
     }
     planAbort.current = null
@@ -367,7 +381,9 @@ export default function Console() {
     planAbort.current?.abort()
     const task = input.trim()
     if (task) {
-      setSteps([{ tool: 'auto', task, why: t('你選擇不等拆解，整件派工'), state: 'idle' }])
+      setSteps(ensureStepIds([{
+        tool: 'auto', task, why: t('你選擇不等拆解，整件派工'), state: 'idle' as const,
+      }]))
       setNote(t('已停止拆解。下面這一件還沒送出，確認過再按派工。'))
     }
   }
@@ -384,16 +400,18 @@ export default function Console() {
    * 現在整批丟給伺服器，它會等前一件的行程真的結束才派下一件，
    * 跟前端在不在完全無關。
    */
-  const runAll = async (list: Step[]) => {
+  const runAll = async (list: Step[], mode: StepDispatchMode = 'pending') => {
     // 只動這一批真的要派的，不要動整份清單。
     //
     // 原本三個 setSteps 都是 s.map(全部) —— 於是按「只重派失敗的」或
     // 「只派這件」時，畫面上已經成功的工單會一起變回「派工中…」再變「已派出」，
     // 看起來像被重複派了一次。派出去的是會改檔案的 agent，
     // 讓人以為重複派工的代價不小。
-    const inBatch = new Set(list.map((x) => x.task))
+    const inBatch = new Set(stepIdsForDispatch(list, mode))
+    const selected = list.filter((step) => inBatch.has(step.id))
+    if (!selected.length) return
     const only = (fn: (x: Step) => Step) =>
-      setSteps((s) => s.map((x) => (inBatch.has(x.task) ? fn(x) : x)))
+      setSteps((s) => mapStepsById(s, inBatch, fn))
 
     only((x) => ({ ...x, state: 'sending' }))
     try {
@@ -401,15 +419,16 @@ export default function Console() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          steps: list.map((x) => ({ tool: x.tool, task: x.task })),
+          steps: selected.map((x) => ({ tool: x.tool, task: x.task })),
           serial,
           cwd: workDir.trim(),
         }),
       }).then((r) => r.json())
       only((x) => ({ ...x, state: d.ok ? 'sent' : 'failed', note: d.note || d.error || '' }))
-      setNote(d.ok ? (d.note || '') : `⚠️ ${d.error}`)
+      setNote(d.ok ? (d.note || '') : `⚠️ ${d.error}`, !d.ok)
     } catch {
       only((x) => ({ ...x, state: 'failed', note: t('控制 API 無回應') }))
+      setNote(t('⚠️ 控制 API 無回應'), true)
     }
   }
 
@@ -431,7 +450,7 @@ export default function Console() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, text }),
       }).then((x) => x.json())
-      setNote(r.ok ? (r.note || t('已送出')) : `⚠️ ${r.error || t('送出失敗')}`)
+      setNote(r.ok ? (r.note || t('已送出')) : `⚠️ ${r.error || t('送出失敗')}`, !r.ok)
       if (r.ok) {
         setReplyText('')
         setReplyTo(null)
@@ -440,7 +459,7 @@ export default function Console() {
           .then((x) => x?.dispatches && setDispatches(x.dispatches)).catch(() => {})
       }
     } catch {
-      setNote(t('⚠️ 控制 API 無回應'))
+      setNote(t('⚠️ 控制 API 無回應'), true)
     }
     setReplyBusy(false)
   }
@@ -449,7 +468,7 @@ export default function Console() {
     const r = await fetch('/api/schedule/save', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(j),
     }).then((x) => x.json()).catch(() => ({ ok: false, error: t('控制 API 無回應') }))
-    setNote(r.ok ? t('已存好，到時間就會自己跑') : `⚠️ ${r.error}`)
+    setNote(r.ok ? t('已存好，到時間就會自己跑') : `⚠️ ${r.error}`, !r.ok)
     if (r.ok) setDraft(null)
     pullSched()
   }
@@ -467,7 +486,7 @@ export default function Console() {
     const r = await fetch('/api/schedule/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }),
     }).then((x) => x.json()).catch(() => ({ ok: false, error: t('控制 API 無回應') }))
-    setNote(r.ok ? (r.note || t('已派出')) : `⚠️ ${r.error}`)
+    setNote(r.ok ? (r.note || t('已派出')) : `⚠️ ${r.error}`, !r.ok)
     pullSched()
   }
 
@@ -546,18 +565,16 @@ export default function Console() {
     return () => clearInterval(timer)
   }, [openLog, dispatches])
 
-  const editStep = (i: number, patch: Partial<Step>) =>
-    setSteps((s) => s.map((x, j) => (j === i ? { ...x, ...patch } : x)))
+  const editStep = (id: string, patch: Partial<Step>) =>
+    setSteps((s) => mapStepsById(s, new Set([id]), (step) => ({ ...step, ...patch })))
 
-  const pending = steps.some((s) => s.state === 'idle')
+  const pending = stepIdsForDispatch(steps).length > 0
   const running = steps.some((s) => s.state === 'sending')
   const failed = steps.some((s) => s.state === 'failed')
 
-  /** 把失敗的步驟退回可編輯狀態，只重派那幾件（已成功的不會重複派） */
+  /** 只重派 failed 步驟；尚未送的 idle 與已成功步驟都保持原狀 */
   const retryFailed = () => {
-    const next = steps.map((s) => (s.state === 'failed' ? { ...s, state: 'idle' as const, note: '' } : s))
-    setSteps(next)
-    void runAll(next.filter((s) => s.state === 'idle'))
+    void runAll(steps, 'failed')
   }
 
   return (
@@ -606,10 +623,21 @@ export default function Console() {
           <button
             className="rounded bg-ink px-3 py-1 text-xs font-medium text-invink disabled:opacity-60 dark:disabled:opacity-40"
             disabled={!input.trim() || planning}
+            aria-busy={planning}
             onClick={makePlan}
           >
             {planning ? t('拆解中… {n} 秒', { n: planSec }) : t('分析並排程')}
           </button>
+          {planning && (
+            <span
+              className="sr-only"
+              role="progressbar"
+              aria-label={t('任務拆解進度')}
+              aria-valuetext={t('拆解中… {n} 秒', { n: planSec })}
+            >
+              {t('拆解中… {n} 秒', { n: planSec })}
+            </span>
+          )}
           {/* 超過 25 秒才出現。地端模型正常幾秒就回，太早出現只會讓人以為壞了 */}
           <button
             className={`rounded border border-line2 px-2 py-1 text-[11px] text-mute hover:bg-elev ${
@@ -621,7 +649,15 @@ export default function Console() {
             {t('不等了，整件當一件')}
           </button>
           <span className="text-[11px] text-mute3">Ctrl + Enter</span>
-          {note && <span className="text-[11px] text-amber-700 dark:text-amber-400/90">{note}</span>}
+          {note && (
+            <span
+              className="text-[11px] text-amber-700 dark:text-amber-400/90"
+              role={noteError ? 'alert' : 'status'}
+              aria-live={noteError ? 'assertive' : 'polite'}
+            >
+              {note}
+            </span>
+          )}
         </div>
         {history.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1">
@@ -664,22 +700,26 @@ export default function Console() {
             </div>
           </div>
           <div className="flex flex-col gap-2">
-            {steps.map((s, i) => (
-              <div key={i} className="rounded border border-line p-2">
+            {steps.map((s) => (
+              <div key={s.id} className="rounded border border-line p-2">
                 <div className="mb-1 flex items-center gap-2">
                   <select
                     className="rounded border border-line2 bg-panel px-1.5 py-0.5 text-[11px] text-ink2 [&>option]:bg-panel [&>option]:text-ink2"
                     style={{ color: TOOL_COLOR[s.tool] ?? undefined }}
                     value={s.tool}
                     disabled={s.state !== 'idle'}
-                    onChange={(e) => editStep(i, { tool: e.target.value })}
+                    onChange={(e) => editStep(s.id, { tool: e.target.value })}
                   >
                     {TOOLS.map((tl) => (
                       <option key={tl} value={tl}>{tl}</option>
                     ))}
                   </select>
                   {s.why && <span className="truncate text-[11px] text-mute3">{s.why}</span>}
-                  <span className="ml-auto text-[11px]">
+                  <span
+                    className="ml-auto text-[11px]"
+                    role={s.state === 'failed' ? 'alert' : 'status'}
+                    aria-live={s.state === 'failed' ? 'assertive' : 'polite'}
+                  >
                     {s.state === 'sent' && <span className="text-emerald-700 dark:text-emerald-400">{t('已派出')}</span>}
                     {s.state === 'sending' && <span className="text-amber-700 dark:text-amber-400">{t('派工中…')}</span>}
                     {s.state === 'failed' && <span className="text-red-700 dark:text-red-400">{s.note || t('失敗')}</span>}
@@ -696,7 +736,7 @@ export default function Console() {
                   {s.state === 'idle' && (
                     <button
                       className="text-[11px] text-mute3 hover:text-red-400"
-                      onClick={() => setSteps((x) => x.filter((_, j) => j !== i))}
+                      onClick={() => setSteps((x) => x.filter((step) => step.id !== s.id))}
                     >
                       {t('移除')}
                     </button>
@@ -707,7 +747,7 @@ export default function Console() {
                   rows={Math.min(6, Math.ceil(s.task.length / 60) + 1)}
                   value={s.task}
                   disabled={s.state !== 'idle'}
-                  onChange={(e) => editStep(i, { task: e.target.value })}
+                  onChange={(e) => editStep(s.id, { task: e.target.value })}
                 />
               </div>
             ))}
@@ -716,7 +756,15 @@ export default function Console() {
       )}
 
       {batch?.running && (
-        <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] dark:border-amber-700/60 dark:bg-amber-950/40">
+        <div
+          className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] dark:border-amber-700/60 dark:bg-amber-950/40"
+          role="progressbar"
+          aria-label={t('派工佇列進度')}
+          aria-valuemin={0}
+          aria-valuemax={batch.total}
+          aria-valuenow={Math.min(batch.done, batch.total)}
+          aria-valuetext={t('派工佇列：第 {a} / {b} 件', { a: batch.done + 1, b: batch.total })}
+        >
           <div className="flex items-center gap-2">
             <span className="inline-block h-2 w-2 flex-none animate-pulse rounded-full bg-amber-400" />
             <span className="text-amber-700 dark:text-amber-200">
@@ -724,7 +772,7 @@ export default function Console() {
             </span>
             <span className="min-w-0 flex-1 truncate text-mute2">{batch.current}</span>
           </div>
-          <div className="mt-1 h-1 overflow-hidden rounded bg-elev">
+          <div className="mt-1 h-1 overflow-hidden rounded bg-elev" aria-hidden="true">
             <div className="h-full bg-amber-400" style={{ width: `${Math.round((batch.done / Math.max(1, batch.total)) * 100)}%` }} />
           </div>
         </div>
@@ -869,7 +917,9 @@ export default function Console() {
         <div className="mb-2 flex items-center gap-2">
           <span className="text-xs font-medium tracking-widest text-mute">{t('🛰️ 派工')}</span>
           {live.length > 0 && (
-            <span className="rounded bg-amber-100 dark:bg-amber-400/15 px-1.5 text-[10px] text-amber-700 dark:text-amber-300">
+            <span
+              className="rounded bg-amber-100 dark:bg-amber-400/15 px-1.5 text-[10px] text-amber-700 dark:text-amber-300"
+            >
               {t('{n} 件進行中', { n: live.length })}
             </span>
           )}
@@ -889,7 +939,7 @@ export default function Console() {
             )}
           </div>
         </div>
-        {/* 剛跑完的講一聲。不自己消失 —— 使用者可能正好離開座位 */}
+        {/* 剛跑完的視覺記錄不自己消失；無障礙 live announcement 由 App 單一負責。 */}
         {justDone.map((d) => {
           const notice = d.outcome === 'error'
             ? 'error'

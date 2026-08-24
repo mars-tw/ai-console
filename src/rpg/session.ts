@@ -17,20 +17,18 @@
 // 畫面要不要在場，它不在乎。
 import { collect, stepBattle, stepTurn } from './engine'
 import type { Battle } from './engine'
-import { loadArena, loadBattle, loadHero, saveArena, saveBattle, saveHero } from './save'
+import {
+  loadArena, loadBattle, loadHero, loadRestartIntent,
+  saveArena, saveBattle, saveHero, saveRestartIntent,
+} from './save'
 import type { Hero } from './types'
 
 /** 自動模式一拍推進一整個回合；手動模式的結算間隔在元件那側控制 */
 const TICK_MS = 900
 
-/**
- * 打完一場到自動開下一場之間要等幾拍（900ms × 4 ≈ 3.6 秒）。
- *
- * 為什麼不是零：結算那一瞬間會結算獎勵、升級、彩蛋解鎖，
- * 立刻開下一場的話玩家切回來永遠看不到自己剛剛拿到什麼。
- * 元件在場時的倒數是 3 秒，這裡取相近的值，兩邊節奏才不會差太多。
- */
-const RESTART_BEATS = 4
+/** 畫面內外共用同一個 3 秒截止點；離場心跳每 900ms 檢查一次。 */
+const RESTART_DELAY_MS = 3_000
+const RESTART_BEATS = Math.ceil(RESTART_DELAY_MS / TICK_MS)
 
 type Listener = () => void
 
@@ -66,10 +64,51 @@ function notify() {
   for (const fn of listeners) fn()
 }
 
-/** 這一場結束了：記下場地，開始倒數下一場 */
-function armRestart(b: Battle) {
+function beatsUntil(dueAt: number): number {
+  return Math.max(0, Math.ceil((dueAt - Date.now()) / TICK_MS))
+}
+
+/**
+ * 這一場結束了：記下場地，持久化下一場的截止時間。
+ *
+ * 重複呼叫不會重數三秒。Adventure 與離場心跳可能在生命週期交界都看到
+ * 同一個結算；沿用第一筆意圖才能避免切分頁把倒數延長，亦避免開兩場。
+ */
+export function armRestart(b: Battle): void {
   saveArena({ kind: b.kind, placeId: b.placeId })
+  if (!autoOn) return
+  const existing = loadRestartIntent()
+  if (existing) {
+    if (waitBeats <= 0) waitBeats = beatsUntil(existing.dueAt)
+    return
+  }
+  const intent = { dueAt: Date.now() + RESTART_DELAY_MS }
+  saveRestartIntent(intent)
   waitBeats = RESTART_BEATS
+}
+
+/** 畫面上的倒數與重新載入都從同一筆持久化意圖取得剩餘秒數。 */
+export function restartRemainingSeconds(): number | null {
+  const intent = loadRestartIntent()
+  return intent ? Math.max(0, Math.ceil((intent.dueAt - Date.now()) / 1_000)) : null
+}
+
+/**
+ * 領取待開場次並建立戰鬥。先清意圖再發布戰鬥，讓畫面計時器與離場心跳
+ * 即使同時抵達截止點，也只有第一個呼叫能成功。
+ */
+export function restartPending(): Battle | null {
+  if (!autoOn || !loadRestartIntent()) return null
+  const a = loadArena()
+  if (!a || !restartFn) return null
+  const nb = restartFn(loadHero())
+  if (!nb) return null
+  saveRestartIntent(null)
+  waitBeats = 0
+  saveBattle(nb)
+  pending.push('⚔️ 自動開了下一場')
+  notify()
+  return nb
 }
 
 /**
@@ -82,15 +121,12 @@ function armRestart(b: Battle) {
  *   等於掛機功能只在你盯著它看的時候有效。
  */
 function maybeRestart() {
-  if (waitBeats <= 0) return
-  if (--waitBeats > 0) return
-  const a = loadArena()
-  if (!a || !restartFn) return
-  const nb = restartFn(loadHero())
-  if (!nb) return
-  saveBattle(nb)
-  pending.push('⚔️ 自動開了下一場')
-  notify()
+  const intent = loadRestartIntent()
+  if (!intent) { waitBeats = 0; return }
+  if (Date.now() >= intent.dueAt) waitBeats = 0
+  else if (waitBeats <= 0) waitBeats = beatsUntil(intent.dueAt)
+  if (waitBeats > 0 && --waitBeats > 0) return
+  restartPending()
 }
 
 /**
@@ -142,14 +178,24 @@ export function stopSession(): void {
 /** 畫面掛上／卸下。卸下之後這裡才會接手推進 */
 export function setMounted(v: boolean): void {
   mounted = v
-  // 畫面回來了就把倒數交還給元件（它有看得見的秒數與取消鈕）。
-  // 不清掉的話兩邊各數各的，可能連開兩場。
-  if (v) waitBeats = 0
-  else startSession()
+  // 回來時不能清掉待開意圖：結束的戰鬥已從 saveBattle 刪除，清掉後畫面
+  // 與心跳都沒有東西可接。畫面計時器會領取同一筆意圖，領取動作本身防重。
+  if (waitBeats <= 0) {
+    const intent = loadRestartIntent()
+    if (intent) waitBeats = beatsUntil(intent.dueAt)
+  }
+  if (!v) startSession()
 }
 
 export function setAuto(v: boolean): void {
   autoOn = v
+  // 手動模式不應在重新載入後又被預設自動模式復活。待開意圖與它綁定的
+  // 場地一起清掉；若玩家再切回自動，Adventure 會從仍在畫面上的結算戰鬥重排。
+  if (!v) {
+    waitBeats = 0
+    saveRestartIntent(null)
+    saveArena(null)
+  }
 }
 
 /**
@@ -163,6 +209,7 @@ export function setRestart(fn: Restart | null): void {
 /** 玩家按了取消／返回：這一場就到此為止，不要再自動開下去 */
 export function cancelRestart(): void {
   waitBeats = 0
+  saveRestartIntent(null)
   saveArena(null)
 }
 

@@ -25,7 +25,8 @@ import {
 import { SECRETS } from '@/rpg/secrets'
 import { loadArena, loadBattle, loadHero, resetHero, saveArena, saveBattle, saveHero } from '@/rpg/save'
 import {
-  cancelRestart, drainPending, setAuto as setSessionAuto, setMounted, setRestart, startSession,
+  armRestart, cancelRestart, drainPending, restartPending, restartRemainingSeconds,
+  setAuto as setSessionAuto, setMounted, setRestart, startSession,
 } from '@/rpg/session'
 import { commitOrder, guard, setFocus, stepTurn, drinkPotion, petXpForLevel } from '@/rpg/engine'
 import {
@@ -184,7 +185,7 @@ export default function Adventure({ tools }: Props) {
   const [notice, setNotice] = useState('')
   /** 抽卡結果：最近一次的清單，抽完停在畫面上，不然十連刷過去什麼都看不到 */
   const [pulls, setPulls] = useState<{ label: string; color: string; note?: string }[]>([])
-  const [autoRestartSeconds, setAutoRestartSeconds] = useState<number | null>(null)
+  const [autoRestartSeconds, setAutoRestartSeconds] = useState<number | null>(() => restartRemainingSeconds())
   const [autoRestartCancelled, setAutoRestartCancelled] = useState(false)
   const heroRef = useRef(hero)
   const battleRef = useRef(battle)
@@ -373,6 +374,9 @@ export default function Adventure({ tools }: Props) {
    * 它會推進舊的那一場再 setBattle 蓋回去 —— 表現出來就是「按了新地圖沒有換」。
    */
   const launch = (b: Battle, zoneId: string) => {
+    // 玩家選地圖與倒數自動開場都走這裡。先清掉上一筆待開意圖，否則舊倒數
+    // 稍後到點會再蓋掉剛開始的戰鬥；接著立刻存回這一場的場地。
+    cancelRestart()
     battleRef.current = b
     setBattle(b)
     saveBattle(b)
@@ -413,12 +417,15 @@ export default function Adventure({ tools }: Props) {
   })
 
   /** 倒數到 0 要做的事放在 ref：不然它會把 buildParty／launch 拖進 dep，每次 render 重數一次 */
-  const startNextRef = useRef(() => {})
+  const startNextRef = useRef<() => boolean>(() => false)
   useEffect(() => {
     startNextRef.current = () => {
-      const b = battleRef.current
-      if (!b) return
-      launch(nextBattle(heroRef.current, b.kind, b.placeId), b.placeId)
+      // restartPending 會先領走持久化意圖；畫面計時器與離場心跳即使同時
+      // 到點，第二個呼叫也只會拿到 null，不會連開兩場。
+      const next = restartPending()
+      if (!next) return false
+      launch(next, next.placeId)
+      return true
     }
   })
 
@@ -443,20 +450,40 @@ export default function Adventure({ tools }: Props) {
    */
   useEffect(() => {
     if (!battleOver || !auto || autoRestartCancelled) {
-      setAutoRestartSeconds(null)
-      return
+      // 重新載入或從別的分頁回來時，結束的 Battle 已被 saveBattle 刪掉，
+      // 但持久化的倒數仍要接著走，因此「沒有 battleOver」不能直接當作沒意圖。
+      if (!auto || autoRestartCancelled || restartRemainingSeconds() === null) {
+        setAutoRestartSeconds(null)
+        return
+      }
     }
 
-    setAutoRestartSeconds(3)
-    let remaining = 3
-    const timer = window.setInterval(() => {
-      remaining -= 1
-      if (remaining <= 0) {
-        window.clearInterval(timer)
+    const completed = battleRef.current
+    if (completed?.over) armRestart(completed)
+
+    const tickRestart = (): boolean => {
+      const remaining = restartRemainingSeconds()
+      if (remaining === null) {
         setAutoRestartSeconds(null)
-        startNextRef.current()
-      } else {
+        return true
+      }
+      if (remaining > 0) {
         setAutoRestartSeconds(remaining)
+        return false
+      }
+      if (!startNextRef.current()) {
+        // 組隊函式尚未登記時保留 0 秒意圖，下一拍再試，不丟掉可恢復狀態。
+        setAutoRestartSeconds(0)
+        return false
+      }
+      setAutoRestartSeconds(null)
+      return true
+    }
+
+    if (tickRestart()) return
+    const timer = window.setInterval(() => {
+      if (tickRestart()) {
+        window.clearInterval(timer)
       }
     }, 1000)
 
@@ -989,7 +1016,23 @@ export default function Adventure({ tools }: Props) {
           </div>
 
           {!battle && (
-            <div className="py-6 text-center text-xs text-mute2">{t('選一個地方出發，或先去配點與換裝')}</div>
+            <div className="py-6 text-center text-xs text-mute2">
+              {autoRestartSeconds === null ? (
+                t('選一個地方出發，或先去配點與換裝')
+              ) : (
+                <span className="inline-flex items-center gap-2">
+                  <span className="text-amber-700 dark:text-amber-300">
+                    {t('{n} 秒後自動開下一場', { n: autoRestartSeconds })}
+                  </span>
+                  <button
+                    className="rounded border border-line2 px-2 py-0.5 text-mute hover:bg-elev"
+                    onClick={() => { setAutoRestartCancelled(true); cancelRestart() }}
+                  >
+                    {t('取消')}
+                  </button>
+                </span>
+              )}
+            </div>
           )}
 
           {battle && (

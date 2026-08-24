@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import PixelOffice from '@/components/PixelOffice'
 import { SKINS } from '@/pixel/sprites'
 import { t, useLang } from '@/i18n'
@@ -89,6 +89,11 @@ interface AuditReport {
   dispatch_logs: { errors: string[] }[]
 }
 
+function isAbortError(error: unknown): boolean {
+  return (error instanceof DOMException && error.name === 'AbortError')
+    || (error instanceof Error && error.name === 'AbortError')
+}
+
 export default function Office({ tools, projects, conversations, onDispatch, busyId }: Props) {
   useLang()
   const tone = useReadable()   // 語言一換就重繪
@@ -103,6 +108,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   }, [agentMsgs])
   const [agentInput, setAgentInput] = useState('')
   const [chatBusy, setChatBusy] = useState(false)
+  const chatAbort = useRef<AbortController | null>(null)
   // 地端模型一句話可能要等一分鐘。只寫「思考中…」看起來跟當掉一樣，
   // 秒數會跳才知道它還活著。
   const [chatSec, setChatSec] = useState(0)
@@ -116,12 +122,26 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   const [cmdTool, setCmdTool] = useState('auto')
   const [cmdInput, setCmdInput] = useState('')
   const [cmdBusy, setCmdBusy] = useState(false)
+  const [cmdSec, setCmdSec] = useState(0)
+  const cmdAbort = useRef<AbortController | null>(null)
   const [cmdLog, setCmdLog] = useState<string[]>([])
   const [toolMap, setToolMap] = useState<ToolMap | null>(null)
   const [showMap, setShowMap] = useState(false)
   const [dispatches, setDispatches] = useState<DispatchRecord[]>([])
   const [audit, setAudit] = useState<AuditReport | null>(null)
   const [auditBusy, setAuditBusy] = useState(false)
+  const [auditError, setAuditError] = useState('')
+
+  useEffect(() => {
+    if (!cmdBusy) return
+    const timer = setInterval(() => setCmdSec((n) => n + 1), 1000)
+    return () => clearInterval(timer)
+  }, [cmdBusy])
+
+  useEffect(() => () => {
+    chatAbort.current?.abort()
+    cmdAbort.current?.abort()
+  }, [])
 
   // 只有還沒結束的才算「現在正在發生」。整份歷史攤在這裡的話，
   // 辦公室永遠看起來很忙，實際上可能一件都沒在跑。
@@ -131,19 +151,26 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
     fetch('/api/dispatches').then((r) => r.ok ? r.json() : null)
       .then((d) => d?.ok && setDispatches(d.dispatches)).catch(() => {})
   }
-  const runAudit = () => {
+  const runAudit = async () => {
+    if (auditBusy) return
     setAuditBusy(true)
+    setAudit(null)
+    setAuditError('')
     // 非 200 也要講。原本 r.ok 為 false 就回 null 然後靜靜結束 ——
     // 使用者按了「執行稽核」，按鈕轉幾秒又恢復，沒報告也沒訊息，只能猜是不是壞了。
     // 實際上多半是 config.json 沒設定稽核腳本（後端回 404）。
-    fetch('/api/audit').then(async (r) => {
-      if (r.ok) return r.json()
-      const d = await r.json().catch(() => null)
-      throw new Error(d?.error || `稽核失敗（HTTP ${r.status}）`)
-    })
-      .then((d) => { if (d?.summary) setAudit(d) })
-      .catch(() => {})
-      .finally(() => setAuditBusy(false))
+    try {
+      const response = await fetch('/api/audit')
+      const data = await response.json().catch(() => null)
+      if (!response.ok) throw new Error(data?.error || `稽核失敗（HTTP ${response.status}）`)
+      if (!data?.summary) throw new Error(t('稽核回應缺少摘要'))
+      setAudit(data)
+    } catch (error) {
+      setAudit(null)
+      setAuditError(error instanceof Error && error.message ? error.message : t('稽核失敗'))
+    } finally {
+      setAuditBusy(false)
+    }
   }
 
   useEffect(() => {
@@ -162,17 +189,20 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   const sendAgentChat = async () => {
     const text = agentInput.trim()
     if (!text || !chatWith || chatBusy) return
-    const sys = persona(chatWith)
-    const history = agentMsgs[chatWith] || []
+    const target = chatWith
+    const sys = persona(target)
+    const history = agentMsgs[target] || []
     const next = [...history, { role: 'user', text }]
-    setAgentMsgs((m) => ({ ...m, [chatWith]: next }))
+    setAgentMsgs((m) => ({ ...m, [target]: next }))
     setAgentInput('')
     setChatBusy(true)
     setChatSec(0)
+    const abort = new AbortController()
+    chatAbort.current = abort
     try {
       let model = routed
       if (!model) {
-        const rr = await fetch('/api/route?task=general')
+        const rr = await fetch('/api/route?task=general', { signal: abort.signal })
         const rd = await rr.json()
         model = rd.ok ? rd.model : ''
         if (model) setRouted(model)
@@ -183,14 +213,20 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
           model,
           messages: [{ role: 'system', content: sys }, ...next.map((m) => ({ role: m.role, content: m.text }))],
         }),
+        signal: abort.signal,
       })
       const d = await r.json()
       const reply = d.ok ? (d.content || d.reasoning || t('（空回應）')) : `⚠️ ${d.error || t('失敗')}`
-      setAgentMsgs((m) => ({ ...m, [chatWith]: [...next, { role: 'assistant', text: reply }] }))
-    } catch {
-      setAgentMsgs((m) => ({ ...m, [chatWith]: [...next, { role: 'assistant', text: t('⚠️ API 無回應') }] }))
+      setAgentMsgs((m) => ({ ...m, [target]: [...next, { role: 'assistant', text: reply }] }))
+    } catch (error) {
+      const message = isAbortError(error)
+        ? t('⏹️ 已停止等待；後端工作可能仍在執行')
+        : t('⚠️ API 無回應')
+      setAgentMsgs((m) => ({ ...m, [target]: [...next, { role: 'assistant', text: message }] }))
+    } finally {
+      if (chatAbort.current === abort) chatAbort.current = null
+      setChatBusy(false)
     }
-    setChatBusy(false)
   }
 
   /**
@@ -207,43 +243,64 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   const dispatchToAgent = async () => {
     const text = agentInput.trim()
     if (!text || !chatWith || chatBusy) return
-    const name = CHARS[chatWith].name
+    const target = chatWith
+    const name = CHARS[target].name
     setAgentMsgs((m) => ({
-      ...m, [chatWith]: [...(m[chatWith] || []), { role: 'user', text }],
+      ...m, [target]: [...(m[target] || []), { role: 'user', text }],
     }))
     setAgentInput('')
     setChatBusy(true)
     setChatSec(0)
+    const abort = new AbortController()
+    chatAbort.current = abort
     try {
       const d = await fetch('/api/dispatch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool: chatWith, task: text }),
+        body: JSON.stringify({ tool: target, task: text }),
+        signal: abort.signal,
       }).then((r) => r.json())
       const note = d.ok
         ? `⚡ ${d.note || t('已派給 {name}', { name })}`
         : `⚠️ ${d.error || t('派工失敗')}`
       setAgentMsgs((m) => ({
-        ...m, [chatWith]: [...(m[chatWith] || []), { role: 'assistant', text: note }],
+        ...m, [target]: [...(m[target] || []), { role: 'assistant', text: note }],
       }))
-    } catch {
+    } catch (error) {
       setAgentMsgs((m) => ({
-        ...m, [chatWith]: [...(m[chatWith] || []), { role: 'assistant', text: t('⚠️ 控制 API 無回應') }],
+        ...m,
+        [target]: [
+          ...(m[target] || []),
+          {
+            role: 'assistant',
+            text: isAbortError(error)
+              ? t('⏹️ 已停止等待；派工可能仍在執行，請看派工清單')
+              : t('⚠️ 控制 API 無回應'),
+          },
+        ],
       }))
+    } finally {
+      if (chatAbort.current === abort) chatAbort.current = null
+      setChatBusy(false)
     }
-    setChatBusy(false)
   }
+
+  const cancelChat = () => chatAbort.current?.abort()
 
   // ── 中控派工 ──
   const sendCommand = async () => {
     const text = cmdInput.trim()
     if (!text || cmdBusy) return
     setCmdBusy(true)
+    setCmdSec(0)
     setCmdLog((l) => [...l, `> [${cmdTool === 'auto' ? t('自動') : cmdTool}] ${text}`])
     setCmdInput('')
+    const abort = new AbortController()
+    cmdAbort.current = abort
     try {
       const r = await fetch('/api/dispatch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tool: cmdTool, task: text }),
+        signal: abort.signal,
       })
       const d = await r.json()
       if (d.ok) {
@@ -253,11 +310,20 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
         setCmdLog((l) => [...l, `⚠️ ${d.error || t('失敗')}`])
       }
       refreshDispatches()
-    } catch {
-      setCmdLog((l) => [...l, t('⚠️ API 無回應')])
+    } catch (error) {
+      setCmdLog((l) => [
+        ...l,
+        isAbortError(error)
+          ? t('⏹️ 已停止等待；派工可能仍在執行，請看派工清單')
+          : t('⚠️ API 無回應'),
+      ])
+    } finally {
+      if (cmdAbort.current === abort) cmdAbort.current = null
+      setCmdBusy(false)
     }
-    setCmdBusy(false)
   }
+
+  const cancelCommand = () => cmdAbort.current?.abort()
 
   const legend: [string, string, string][] = [
     ['#34d399', t('工作中'), t('坐在位子上瘋狂打電腦，偶爾找同事辯論')],
@@ -288,10 +354,25 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
         {/* 中控對話框 */}
         <div className="min-w-72 flex-1 rounded border border-line2 bg-elev p-3">
           <div className="mb-2 text-xs font-medium tracking-widest text-mute">{t('🎛️ 中控指揮台')}</div>
-          <div className="mb-2 max-h-36 overflow-y-auto rounded bg-app p-2 font-mono text-xs leading-5 text-ink3">
+          <div
+            className="mb-2 max-h-36 overflow-y-auto rounded bg-app p-2 font-mono text-xs leading-5 text-ink3"
+            role="log"
+            aria-live="polite"
+            aria-relevant="additions"
+            aria-busy={cmdBusy}
+          >
             {cmdLog.length === 0 && <span className="text-mute3">{t('下指令給全體或指定夥伴，例如「整理今天的工作進度」…')}</span>}
             {cmdLog.map((l, i) => <div key={i} className="whitespace-pre-wrap break-all">{l}</div>)}
-            {cmdBusy && <div className="text-mute2">{t('派工中…')}</div>}
+            {cmdBusy && (
+              <div
+                className="text-mute2"
+                role="progressbar"
+                aria-label={t('中控指令派工進度')}
+                aria-valuetext={t('派工中… {n} 秒', { n: cmdSec })}
+              >
+                {t('派工中… {n} 秒', { n: cmdSec })}
+              </div>
+            )}
           </div>
           <div className="flex gap-2">
             <select
@@ -315,6 +396,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
               className="min-w-0 flex-1 rounded border border-line3 bg-panel px-3 py-1.5 text-sm text-ink outline-none focus:border-line4"
               placeholder={t('輸入指令，Enter 派出…')}
               value={cmdInput}
+              disabled={cmdBusy}
               onChange={(e) => setCmdInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') sendCommand() }}
             />
@@ -325,11 +407,23 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
             >
               {t('派出')}
             </button>
+            {cmdBusy && (
+              <button
+                className="rounded border border-red-300 px-2 py-1.5 text-xs text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-300 dark:hover:bg-red-950/40"
+                title={t('只停止畫面等待；已送到後端的派工可能繼續執行')}
+                onClick={cancelCommand}
+              >
+                {t('不等了')}
+              </button>
+            )}
           </div>
           {/* 派工追蹤：只列還沒結束的。結束的留在主控台分頁看，
               這裡是「現在辦公室裡在發生什麼」，不是歷史紀錄 */}
           {liveDispatches.length > 0 && (
-            <div className="mt-2 flex max-h-32 flex-col gap-1 overflow-y-auto">
+            <div
+              className="mt-2 flex max-h-32 flex-col gap-1 overflow-y-auto"
+              aria-label={t('目前 {n} 件進行中派工', { n: liveDispatches.length })}
+            >
               {liveDispatches.map((d) => {
                 const lk = look(stateOf(d))
                 return (
@@ -337,7 +431,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
                     <span className={`inline-block h-2 w-2 flex-none rounded-full ${lk.dot}`} />
                     <span className="flex-none font-medium text-ink3">{d.tool}</span>
                     <span className="min-w-0 flex-1 truncate text-mute2">{d.task}</span>
-                    <span className={`flex-none ${lk.tone}`}>{lk.label}</span>
+                    <span className={`flex-none ${lk.tone}`} aria-label={`${d.tool} ${lk.label}`}>{lk.label}</span>
                   </div>
                 )
               })}
@@ -353,12 +447,23 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
             <button
               className="rounded border border-line3 px-2 py-1 text-ink3 hover:bg-elev2 disabled:opacity-60 dark:disabled:opacity-40"
               disabled={auditBusy}
+              aria-busy={auditBusy}
               onClick={runAudit}
             >
               {auditBusy ? t('稽核中…') : t('🔍 執行稽核')}
             </button>
+            {auditBusy && (
+              <span role="progressbar" aria-label={t('稽核進度')} aria-valuetext={t('稽核中…')} className="sr-only">
+                {t('稽核中…')}
+              </span>
+            )}
+            {auditError && (
+              <span role="alert" aria-live="assertive" className="text-red-700 dark:text-red-300">
+                ⚠️ {auditError}
+              </span>
+            )}
             {audit && (
-              <span className="text-mute">
+              <span className="text-mute" role="status" aria-live="polite">
                 {t('站點')} ✅{audit.summary.sites_ok} / ⚠️{audit.summary.sites_partial} / ❌{audit.summary.sites_empty}
                 ・{t('文章')} {audit.summary.articles}/{audit.summary.expected_articles}
                 ・{t('{n} 字', { n: audit.summary.words.toLocaleString() })}
@@ -371,7 +476,13 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
         <div className="min-w-72 flex-1 rounded border border-line2 bg-elev p-3">
           <div className="mb-2 text-xs font-medium tracking-widest text-mute">{t('📋 任務排程區')}</div>
           {queue.length === 0 && <div className="text-xs text-mute2">{t('目前沒有進行中的工作 🎉')}</div>}
-          <div className="flex max-h-44 flex-col gap-1.5 overflow-y-auto">
+          <div className="sr-only" role="status" aria-live="polite">
+            {t('任務排程區有 {n} 件待處理工作', { n: queue.length })}
+          </div>
+          <div
+            className="flex max-h-44 flex-col gap-1.5 overflow-y-auto"
+            aria-label={t('任務排程區有 {n} 件待處理工作', { n: queue.length })}
+          >
             {queue.map((p) => {
               const conv = findConvFor(p.project_id)
               return (
@@ -441,12 +552,23 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
 
       {/* ── 角色對話框（浮動） ── */}
       {chatWith && (
-        <div className="fixed bottom-4 right-4 z-50 flex h-96 w-80 flex-col rounded-lg border border-line2 bg-panel shadow-2xl">
+        <div
+          className="fixed bottom-4 right-4 z-50 flex h-96 w-80 flex-col rounded-lg border border-line2 bg-panel shadow-2xl"
+          role="dialog"
+          aria-label={t('與 {name} 對話', { name: CHARS[chatWith].name })}
+        >
           <div className="flex flex-none items-center gap-2 rounded-t-lg px-3 py-2" style={{ background: CHARS[chatWith].color }}>
             <DragonFace agent={chatWith} size={32} />
             <span className="text-sm font-bold text-white">{CHARS[chatWith].name}</span>
             <span className="text-xs text-white/70">{tools[chatWith]?.status === 'rate_limited' ? '額度用畢，地端代答' : '地端模型驅動'}</span>
-            <button className="ml-auto text-white/70 hover:text-white" onClick={() => setChatWith(null)}>✕</button>
+            <button
+              className="ml-auto text-white/70 hover:text-white"
+              aria-label={t('關閉對話')}
+              onClick={() => {
+                if (chatBusy) cancelChat()
+                setChatWith(null)
+              }}
+            >✕</button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto p-3">
             {(agentMsgs[chatWith] || []).length === 0 && (
@@ -458,14 +580,19 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
                    { tool: chatWith })}
               </p>
             )}
-            <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-2" role="log" aria-live="polite" aria-relevant="additions" aria-busy={chatBusy}>
               {(agentMsgs[chatWith] || []).map((m, i) => (
                 <div key={i} className={`rounded-lg px-3 py-2 text-sm ${m.role === 'user' ? 'ml-8 bg-elev2 text-ink' : 'mr-8 bg-elev text-ink2 border border-line2'}`}>
                   {m.text}
                 </div>
               ))}
               {chatBusy && (
-                <div className="text-xs text-mute2">
+                <div
+                  className="text-xs text-mute2"
+                  role="progressbar"
+                  aria-label={t('{name} 對話進度', { name: CHARS[chatWith].name })}
+                  aria-valuetext={t('{name} 思考中… {n} 秒', { name: CHARS[chatWith].name, n: chatSec })}
+                >
                   {t('{name} 思考中… {n} 秒', { name: CHARS[chatWith].name, n: chatSec })}
                   {chatSec > 20 && (
                     <span className="ml-1 text-mute3">{t('（地端模型比較慢，還在跑）')}</span>
@@ -479,6 +606,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
               className="min-w-0 flex-1 rounded border border-line3 bg-app px-2 py-1.5 text-sm text-ink outline-none"
               placeholder="說點什麼…"
               value={agentInput}
+              disabled={chatBusy}
               onChange={(e) => setAgentInput(e.target.value)}
               // Enter 走聊天、Ctrl+Enter 才派工。
               // 反過來的話手一快就會派出一個會改檔案的 agent。
@@ -488,6 +616,15 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
                 else void sendAgentChat()
               }}
             />
+            {chatBusy && (
+              <button
+                className="flex-none rounded border border-red-300 px-2 text-xs text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-300 dark:hover:bg-red-950/40"
+                title={t('只停止畫面等待；已送到後端的工作可能繼續執行')}
+                onClick={cancelChat}
+              >
+                {t('不等了')}
+              </button>
+            )}
             <button
               className="flex-none rounded border border-line3 px-2 text-xs text-mute hover:bg-elev disabled:opacity-40"
               disabled={chatBusy || !agentInput.trim()}
