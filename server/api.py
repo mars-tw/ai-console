@@ -12,6 +12,7 @@ AI 控制台 · 整合伺服器（僅綁定 127.0.0.1，無外部存取）
                                body: {"id": "<conv_id>", "dryRun": false}
   GET  /api/status           — ai-hub status.json 即時內容
 """
+import contextlib
 import datetime as _dt
 import json
 import mimetypes
@@ -45,6 +46,8 @@ INDEXER = Path(_CFG.get("indexer", str(APP_ROOT / "tools" / "indexer.py")))
 STATUS_JSON = Path(_CFG.get("status_json", str(Path.home() / "ai-hub" / "status.json")))
 LMS_MODELS_DIR = Path.home() / ".lmstudio" / "models"
 LMS_BIN = Path.home() / ".lmstudio" / "bin" / "lms.exe"
+# 地端模型的把關腳本（載入前 / 載入後各問一次），路徑可由 config.json 覆蓋
+LOCAL_GATE = Path(_CFG.get("local_gate", str(Path.home() / "ai-hub" / "tools" / "local_gate.py")))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import planner   # noqa: E402
 import rules     # noqa: E402
@@ -100,6 +103,17 @@ _ANSI_RE = re.compile(chr(92) + 'x1b' + chr(92) + '[[0-9;?]*[ -/]*[@-~]')
 def _run(argv, **kw):
     """跑一個子行程，不要在畫面上閃視窗"""
     return subprocess.run(argv, **_NO_WINDOW, **kw)
+
+
+def _lms_run(argv, **kw):
+    """LM Studio CLI 固定輸出 UTF-8，不要讓 Windows 依 CP950 解碼。
+
+    實機 smoke test 抓到：``text=True`` 會用系統 ANSI code page，lms 的進度
+    符號一出現，subprocess reader thread 就丟 UnicodeDecodeError，stdout 變成空值。
+    只收斂 lms 呼叫；tasklist 等系統工具仍沿用本機 code page。
+    """
+    kw.pop("text", None)
+    return _run(argv, text=True, encoding="utf-8", errors="replace", **kw)
 
 
 # 一整批 pid 的存活狀態，快取幾秒。
@@ -313,21 +327,74 @@ def drop_index_conv(conv_id: str) -> None:
         pass
 
 
-def lms_models():
-    """LM Studio /v1/models 的清單"""
+def lms_installed_models():
+    """磁碟上已安裝、而且路由表認得的模型（回傳 lms 給的 modelKey 原字串）
+
+    「已安裝」「已載入」「API 伺服器開著」是三件不同的事，要分開問。
+    實測踩到的故障：lms ls --llm --json 明明列得出完整的模型，但
+    lms ps 是空的、lms server status 回 running=false —— 整個介面於是說
+    「找不到可用模型（LM Studio 未啟動或無完整模型）」，其實模型好好地
+    躺在磁碟上，只是沒有人去開伺服器。lms ls 是純讀取（不連伺服器、
+    不下載也不安裝任何東西），拿來當清單的後備正好。
+
+    只留路由表認得的 modelKey：這份清單之後同時是「允許載入什麼」的白名單，
+    寧可漏掉沒登錄過的模型，也不要讓任意字串走到 lms load 的參數裡。
+    """
+    if not LMS_BIN.exists():
+        return []
     try:
-        import urllib.request
-        resp = json.loads(urllib.request.urlopen("http://127.0.0.1:1234/v1/models", timeout=8).read())
-        return [m.get("id") for m in resp.get("data", []) if m.get("id")]
+        r = _lms_run([str(LMS_BIN), "ls", "--llm", "--json"],
+                     capture_output=True, timeout=20)
+        data = json.loads(r.stdout or "[]")
     except Exception:
         return []
+    if isinstance(data, dict):                       # 有些版本包在 {"models": [...]}
+        data = data.get("models") or data.get("data") or []
+    if not isinstance(data, list):
+        return []
+    out, seen = [], set()
+    for m in data:
+        if not isinstance(m, dict):
+            continue
+        key = m.get("modelKey")
+        if not isinstance(key, str) or not key or key in seen:
+            continue
+        rule = next((t for t in MODEL_TABLE if t["match"].lower() in key.lower()), None)
+        if not rule:
+            continue
+        size = m.get("sizeBytes")
+        try:
+            size = int(size)
+        except (TypeError, ValueError):
+            size = 0
+        if size > 0:
+            if size < rule["min_gb"] * (1024 ** 3) * 0.9:
+                continue
+        elif not model_complete(key):
+            # 舊版 lms 不一定回 sizeBytes；缺欄位時改用既有的磁碟門檻驗證，
+            # 兩邊都驗不出完整檔案就 fail closed，不把半套模型放進白名單。
+            continue
+        seen.add(key)
+        out.append(key)                              # 原字串，不重組也不改寫
+    return out
+
+
+def lms_models():
+    """可用的模型清單固定回傳磁碟上的完整 modelKey。
+
+    /v1/models 回的是已載入實例的 identifier；它可能叫 ``copy-line``，
+    不是可交給 ``lms load`` 的 modelKey。若把兩種名字混在同一個下拉選單，
+    使用者選到的值會被後端白名單拒絕。因此這裡永遠以唯讀的 ``lms ls``
+    為準；API 伺服器開沒開不再影響模型是否「存在」。
+    """
+    return lms_installed_models()
 
 
 def _lms_ps():
     if not LMS_BIN.exists():
         return []
     try:
-        r = _run([str(LMS_BIN), "ps", "--json"], capture_output=True, text=True, timeout=15)
+        r = _lms_run([str(LMS_BIN), "ps", "--json"], capture_output=True, timeout=15)
         data = json.loads(r.stdout or "[]")
         return [m for m in data if isinstance(m, dict)]
     except Exception:
@@ -354,6 +421,217 @@ def lms_loaded_keys():
         if k:
             out.append(k)
     return out
+
+
+# ── 地端模型生命週期：只有明確的 POST /api/chat 會走到這一段 ──────────
+#
+# 這裡是整份檔案唯一會改變 LM Studio 狀態的地方（開伺服器、載模型）。
+# 所有 GET 端點一律維持唯讀 —— 一個惡意網頁的
+# <img src="http://127.0.0.1:5177/api/models"> 不該在使用者機器上載起一個 27B。
+LMS_RUNTIME = "llama.cpp-win-x86_64-avx2@2.24.0"
+_LIFECYCLE_MUTEX = "Local" + chr(92) + "CodexLocalModelLifecycleV1"
+_LIFECYCLE_WAIT_S = 5.0
+_LIFECYCLE_FALLBACK = threading.Lock()
+_IDENT_BAD_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+@contextlib.contextmanager
+def _lifecycle_lock():
+    """載入/卸載期間的互斥鎖，最多等 5 秒
+
+    要跨行程，所以不能只用 threading.Lock：ai-hub 的其他流程也會載模型，
+    只鎖住自己這個行程等於沒鎖 —— 兩邊同時看到「什麼都沒載入」，
+    於是同時去載，後到的那個把先到的踢掉。Windows 的具名 mutex 是所有
+    參與者都看得到的同一把鎖，名字必須跟既有流程用的一致。
+
+    等不到就放棄，不排隊：使用者按的是「送出對話」，等超過幾秒還沒輪到
+    就該回一句話說明，而不是把 HTTP 連線一直掛著。
+    """
+    if os.name == "nt":
+        handle = None
+        try:
+            import ctypes
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
+            k32.CreateMutexW.restype = ctypes.c_void_p
+            k32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+            k32.WaitForSingleObject.restype = ctypes.c_uint32
+            k32.ReleaseMutex.argtypes = (ctypes.c_void_p,)
+            k32.CloseHandle.argtypes = (ctypes.c_void_p,)
+            handle = k32.CreateMutexW(None, 0, _LIFECYCLE_MUTEX)
+        except Exception:
+            handle = None                # 建不起來就退回行程內的鎖，至少擋住自己
+        if handle:
+            # 0 = 拿到；0x80（WAIT_ABANDONED）= 上一個持有者沒釋放就結束了，這裡接手
+            rc = k32.WaitForSingleObject(handle, int(_LIFECYCLE_WAIT_S * 1000))
+            if rc not in (0, 0x80):
+                k32.CloseHandle(handle)
+                raise RuntimeError("另一個流程正在處理地端模型，等 5 秒仍未輪到")
+            try:
+                yield
+            finally:
+                k32.ReleaseMutex(handle)
+                k32.CloseHandle(handle)
+            return
+    if not _LIFECYCLE_FALLBACK.acquire(timeout=_LIFECYCLE_WAIT_S):
+        raise RuntimeError("另一個流程正在處理地端模型，等 5 秒仍未輪到")
+    try:
+        yield
+    finally:
+        _LIFECYCLE_FALLBACK.release()
+
+
+def _lms_server_status() -> dict:
+    """回傳 lms server status；探測失敗視為未執行。"""
+    if not LMS_BIN.exists():
+        return {"running": False, "port": None}
+    try:
+        r = _lms_run([str(LMS_BIN), "server", "status", "--json"],
+                     capture_output=True, timeout=15)
+        data = json.loads(r.stdout or "{}")
+    except Exception:
+        return {"running": False, "port": None}
+    if isinstance(data, list):
+        data = next((d for d in data if isinstance(d, dict)), {})
+    return data if isinstance(data, dict) else {"running": False, "port": None}
+
+
+def _lms_server_running() -> bool:
+    return bool(_lms_server_status().get("running"))
+
+
+def _lms_server_start() -> None:
+    """把 API 伺服器開起來（已經開著就什麼都不做）"""
+    status = _lms_server_status()
+    if status.get("running"):
+        try:
+            port = int(status.get("port"))
+        except (TypeError, ValueError):
+            port = 0
+        if port != 1234:
+            raise RuntimeError(f"LM Studio API 已在其他連接埠執行（{port or '未知'}），不會停止或重啟它")
+        return
+    try:
+        r = _lms_run([str(LMS_BIN), "server", "start", "--port", "1234",
+                      "--bind", "127.0.0.1"],
+                     capture_output=True, timeout=90)
+    except Exception as e:
+        raise RuntimeError(f"啟動 LM Studio API 伺服器失敗：{e}")
+    if r.returncode != 0:
+        raise RuntimeError("啟動 LM Studio API 伺服器失敗："
+                           + ((r.stderr or r.stdout) or "").strip()[-300:])
+    status = _lms_server_status()
+    if not status.get("running") or int(status.get("port") or 0) != 1234:
+        raise RuntimeError("LM Studio API 啟動後未在 127.0.0.1:1234 就緒")
+
+
+def _lms_runtime_select() -> None:
+    """指定 CPU 推論環境；失敗就停止，不以 --gpu off 當成唯一保險。"""
+    try:
+        r = _lms_run([str(LMS_BIN), "runtime", "select", LMS_RUNTIME],
+                     capture_output=True, timeout=60)
+    except Exception as e:
+        raise RuntimeError(f"選擇 CPU 推論環境失敗：{e}")
+    if r.returncode != 0:
+        raise RuntimeError("選擇 CPU 推論環境失敗："
+                           + ((r.stderr or r.stdout) or "").strip()[-300:])
+
+
+def _run_gate(*extra):
+    """跑地端把關腳本，回傳 (是否放行, 說明)
+
+    退出碼沿用 ai-hub 的約定：0 / 1 放行（1 是「有意見但不擋」），2 是擋下。
+    其他退出碼一律當成擋下 —— 把關腳本自己壞掉的時候，
+    「先不要載」比「當作沒事照樣載」安全。找不到腳本同理。
+    """
+    if not LOCAL_GATE.exists():
+        return False, (f"找不到把關腳本 {LOCAL_GATE}"
+                       "（可在 server/config.json 以 local_gate 指定路徑）")
+    try:
+        r = _run([sys.executable, str(LOCAL_GATE), *extra],
+                 capture_output=True, text=True, encoding="utf-8", errors="replace",
+                 timeout=120)
+    except Exception as e:
+        return False, f"把關腳本執行失敗：{e}"
+    msg = ((r.stdout or "") + (r.stderr or "")).strip()[-400:]
+    if r.returncode in (0, 1):
+        return True, msg
+    if r.returncode == 2:
+        return False, msg or "把關腳本擋下這次載入"
+    return False, f"把關腳本以非預期的退出碼 {r.returncode} 結束：{msg}"
+
+
+def _owned_identifier(model: str) -> str:
+    """自己載入的實例取一個看得出來源的名字 —— 之後只卸載這一個"""
+    key = _IDENT_BAD_RE.sub("-", model).strip("-")[:48] or "model"
+    return f"ai-console-{key}"
+
+
+def ensure_lms_chat_model(model: str) -> str:
+    """把地端對話要用的模型準備好，回傳真正要送進 payload 的名字
+
+    只有明確的 POST /api/chat 會呼叫這裡。三條路，只有最後一條會動到機器：
+
+      · 已載入的正是這個模型 → 沿用它現有的識別碼（伺服器沒開就只開伺服器）
+      · 載入的是別的模型     → 直接報錯。絕不卸載、絕不取代：那可能是影片
+                              管線或另一個專案花好幾分鐘載進去的，而這台
+                              機器載一個 20～28 GB 的模型要 30～55 秒。
+      · 什麼都沒載入         → 過了把關腳本才自己載一個，並記住識別碼
+
+    模型名一定要跟已安裝清單完全相等才往下走 —— 這個字串會變成 lms load
+    的參數，不做白名單就等於把命令列參數交給呼叫端決定。
+    """
+    if not LMS_BIN.exists():
+        raise RuntimeError(f"找不到 lms 執行檔（{LMS_BIN}）")
+    installed = lms_installed_models()
+    if not installed:
+        raise RuntimeError("lms ls 列不出任何已登錄的模型")
+    if model not in installed:
+        raise ValueError(f"模型不在本機已安裝清單內，拒絕載入：{str(model)[:80]!r}")
+
+    with _lifecycle_lock():
+        # 鎖外面看到的狀態可能已經過期（別的流程剛載完或剛卸載），重問一次
+        loaded = _lms_ps()
+        mine = [m for m in loaded if m.get("modelKey") == model]
+        others = [m for m in loaded if m.get("modelKey") != model]
+        if others or len(mine) > 1:
+            names = "、".join(str(m.get("identifier") or m.get("modelKey") or "未知實例")
+                              for m in loaded[:3])
+            raise RuntimeError(
+                f"LM Studio 目前是混合或其他模型狀態（{names}）。這裡不會卸載或取代它")
+        if len(mine) == 1:
+            _lms_server_start()
+            # 識別碼優先：載入時可以用 --identifier 取任意名字，
+            # 拿模型名去打 /v1 會找不到那個實例。
+            return mine[0].get("identifier") or model
+        ok, note = _run_gate()
+        if not ok:
+            raise RuntimeError(f"地端把關未放行：{note}")
+
+        _lms_runtime_select()
+        _lms_server_start()
+        ident = _owned_identifier(model)
+        try:
+            # --ttl 300：閒置五分鐘自動釋放，不會讓這次對話永久佔住記憶體
+            r = _lms_run([str(LMS_BIN), "load", model, "-y", "--gpu", "off",
+                          "-c", "8192", "--ttl", "300", "--identifier", ident],
+                         capture_output=True, timeout=300)
+        except Exception as e:
+            raise RuntimeError(f"載入模型失敗：{e}")
+        if r.returncode != 0:
+            raise RuntimeError("載入模型失敗：" + ((r.stderr or r.stdout) or "").strip()[-300:])
+
+        ok, note = _run_gate("--post-load-identifier", ident)
+        if not ok:
+            # 只卸載自己剛剛載的那一個。這裡絕不會出現 --all：
+            # 同一時間可能有別的流程也載了東西，全卸等於砸別人的場。
+            try:
+                _lms_run([str(LMS_BIN), "unload", ident],
+                         capture_output=True, timeout=60)
+            except Exception:
+                pass
+            raise RuntimeError(f"載入後把關未放行，已卸載自己載入的實例：{note}")
+        return ident
 
 
 def model_complete(model_id: str) -> bool:
@@ -903,11 +1181,18 @@ class Handler(BaseHTTPRequestHandler):
             messages = body.get("messages", [])
             if not model or not isinstance(messages, list) or not messages:
                 return self._json({"ok": False, "error": "需要 model 與 messages"}, 400)
-            # 只接受本機 LM Studio 已載入/存在的模型，避免任意字串注入
+            # 只接受本機 LM Studio 已安裝的模型，避免任意字串注入。
+            # 需要的話也在這裡（而且只有這裡）把伺服器與模型準備好 ——
+            # 原本直接打 /v1/chat/completions，伺服器沒開就一路失敗到底。
             try:
-                import urllib.request
+                resolved = ensure_lms_chat_model(model)
+            except ValueError as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
+            except Exception as e:
+                return self._json({"ok": False, "error": f"地端模型無法使用：{e}"}, 502)
+            try:
                 payload = json.dumps({
-                    "model": model,
+                    "model": resolved,
                     "messages": [{"role": m.get("role", "user"), "content": str(m.get("content", ""))[:4000]}
                                  for m in messages[-14:] if m.get("role") in ("user", "assistant", "system")],
                     "max_tokens": int(body.get("max_tokens", 1024)),
@@ -923,6 +1208,7 @@ class Handler(BaseHTTPRequestHandler):
                     "content": msg.get("content") or "",
                     "reasoning": msg.get("reasoning_content") or "",
                     "usage": resp.get("usage"),
+                    "model": resolved,      # 實際用到的實例（可能是識別碼，不是模型名）
                 })
             except Exception as e:
                 return self._json({"ok": False, "error": f"地端模型呼叫失敗：{e}"}, 502)

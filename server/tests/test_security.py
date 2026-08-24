@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -165,7 +167,157 @@ class TestFasterModelHintBoundary(unittest.TestCase):
     def test_空輸入不會炸(self):
         self.assertEqual(api.faster_model_hint("", []), "")
         self.assertEqual(api.faster_model_hint("", ["x-a3b"]), "　建議在 LM Studio 改載 x-a3b"
-                                                               "（MoE，只啟用 3B，同樣的拆解快很多）。")
+                                                                "（MoE，只啟用 3B，同樣的拆解快很多）。")
+
+
+class TestLocalModelLifecycle(unittest.TestCase):
+    """模型在磁碟上但 API 沒開時，續聊要能安全地自己準備好 CPU 實例。"""
+
+    MODEL = "qwen/qwen3.5-4b"
+
+    @staticmethod
+    def _cp(stdout="", stderr="", returncode=0):
+        return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+    def setUp(self):
+        # 用一定存在的檔案代替 lms.exe，避免單元測試依賴每台機器的安裝位置。
+        self._lms = mock.patch.object(api, "LMS_BIN", Path(__file__))
+        self._lms.start()
+
+    def tearDown(self):
+        self._lms.stop()
+
+    def test_磁碟清單只收完整且已知的模型(self):
+        rows = [
+            {"modelKey": self.MODEL, "sizeBytes": 3 * 1024 ** 3},
+            {"modelKey": "qwen3-coder-next", "sizeBytes": 2 * 1024 ** 3},
+            {"modelKey": "not-in-model-table", "sizeBytes": 99 * 1024 ** 3},
+            {"modelKey": "qwen3.8-27b"},
+        ]
+        with mock.patch.object(api, "_lms_run", return_value=self._cp(json.dumps(rows))), \
+             mock.patch.object(api, "model_complete", return_value=False):
+            self.assertEqual(api.lms_installed_models(), [self.MODEL])
+
+    def test_模型清單永遠回_modelKey_不回自訂_identifier(self):
+        with mock.patch.object(api, "lms_installed_models", return_value=[self.MODEL]), \
+             mock.patch.object(api.urllib.request, "urlopen",
+                               side_effect=AssertionError("不該再查 /v1/models")):
+            self.assertEqual(api.lms_models(), [self.MODEL])
+
+    def test_未安裝的任意模型名會在拿鎖前被拒絕(self):
+        with mock.patch.object(api, "lms_installed_models", return_value=[self.MODEL]), \
+             mock.patch.object(api, "_lifecycle_lock") as lock:
+            with self.assertRaises(ValueError):
+                api.ensure_lms_chat_model("copy-line")
+            lock.assert_not_called()
+
+    def test_恰好一個相符模型會沿用它的_identifier(self):
+        loaded = [{"modelKey": self.MODEL, "identifier": "copy-line"}]
+        with mock.patch.object(api, "lms_installed_models", return_value=[self.MODEL]), \
+             mock.patch.object(api, "_lifecycle_lock",
+                               return_value=api.contextlib.nullcontext()), \
+             mock.patch.object(api, "_lms_ps", return_value=loaded), \
+             mock.patch.object(api, "_lms_server_start") as start, \
+             mock.patch.object(api, "_run_gate") as gate:
+            self.assertEqual(api.ensure_lms_chat_model(self.MODEL), "copy-line")
+            start.assert_called_once_with()
+            gate.assert_not_called()
+
+    def test_外來或混合載入狀態一律不互踢(self):
+        cases = [
+            [{"modelKey": "qwen3.8-27b", "identifier": "foreign"}],
+            [{"modelKey": self.MODEL, "identifier": "mine"},
+             {"modelKey": "qwen3.8-27b", "identifier": "foreign"}],
+            [{"modelKey": self.MODEL, "identifier": "a"},
+             {"modelKey": self.MODEL, "identifier": "b"}],
+        ]
+        for loaded in cases:
+            with self.subTest(loaded=loaded), \
+                 mock.patch.object(api, "lms_installed_models", return_value=[self.MODEL]), \
+                 mock.patch.object(api, "_lifecycle_lock",
+                                   return_value=api.contextlib.nullcontext()), \
+                 mock.patch.object(api, "_lms_ps", return_value=loaded), \
+                 mock.patch.object(api, "_run_gate") as gate, \
+                 mock.patch.object(api, "_lms_run") as runner:
+                with self.assertRaises(RuntimeError):
+                    api.ensure_lms_chat_model(self.MODEL)
+                gate.assert_not_called()
+                runner.assert_not_called()
+
+    def test_CPU_runtime_選擇失敗就停止(self):
+        with mock.patch.object(api, "_lms_run", return_value=self._cp(stderr="bad", returncode=1)) as runner:
+            with self.assertRaises(RuntimeError):
+                api._lms_runtime_select()
+        self.assertEqual(runner.call_args.args[0],
+                         [str(api.LMS_BIN), "runtime", "select", api.LMS_RUNTIME])
+
+    def test_伺服器固定啟動在_loopback_1234(self):
+        statuses = [{"running": False, "port": 1234}, {"running": True, "port": 1234}]
+        with mock.patch.object(api, "_lms_server_status", side_effect=statuses), \
+             mock.patch.object(api, "_lms_run", return_value=self._cp()) as runner:
+            api._lms_server_start()
+        self.assertEqual(runner.call_args.args[0],
+                         [str(api.LMS_BIN), "server", "start", "--port", "1234",
+                          "--bind", "127.0.0.1"])
+
+    def test_已在其他連接埠執行就不停止或重啟(self):
+        with mock.patch.object(api, "_lms_server_status",
+                               return_value={"running": True, "port": 4321}), \
+             mock.patch.object(api, "_lms_run") as runner:
+            with self.assertRaises(RuntimeError):
+                api._lms_server_start()
+            runner.assert_not_called()
+
+    def test_新載入完整帶入_CPU_參數與前後把關(self):
+        ident = api._owned_identifier(self.MODEL)
+        with mock.patch.object(api, "lms_installed_models", return_value=[self.MODEL]), \
+             mock.patch.object(api, "_lifecycle_lock",
+                               return_value=api.contextlib.nullcontext()), \
+             mock.patch.object(api, "_lms_ps", return_value=[]), \
+             mock.patch.object(api, "_run_gate",
+                               side_effect=[(True, "pre"), (True, "post")]) as gate, \
+             mock.patch.object(api, "_lms_runtime_select") as runtime, \
+             mock.patch.object(api, "_lms_server_start") as server, \
+             mock.patch.object(api, "_lms_run", return_value=self._cp()) as runner:
+            self.assertEqual(api.ensure_lms_chat_model(self.MODEL), ident)
+        runtime.assert_called_once_with()
+        server.assert_called_once_with()
+        self.assertEqual(gate.call_args_list,
+                         [mock.call(), mock.call("--post-load-identifier", ident)])
+        self.assertEqual(runner.call_args.args[0],
+                         [str(api.LMS_BIN), "load", self.MODEL, "-y", "--gpu", "off",
+                          "-c", "8192", "--ttl", "300", "--identifier", ident])
+        self.assertEqual(runner.call_args.kwargs["timeout"], 300)
+
+    def test_載入前把關未放行就完全不載(self):
+        with mock.patch.object(api, "lms_installed_models", return_value=[self.MODEL]), \
+             mock.patch.object(api, "_lifecycle_lock",
+                               return_value=api.contextlib.nullcontext()), \
+             mock.patch.object(api, "_lms_ps", return_value=[]), \
+             mock.patch.object(api, "_run_gate", return_value=(False, "blocked")), \
+             mock.patch.object(api, "_lms_runtime_select") as runtime, \
+             mock.patch.object(api, "_lms_run") as runner:
+            with self.assertRaises(RuntimeError):
+                api.ensure_lms_chat_model(self.MODEL)
+            runtime.assert_not_called()
+            runner.assert_not_called()
+
+    def test_載入後把關失敗只卸載_owned_identifier(self):
+        ident = api._owned_identifier(self.MODEL)
+        with mock.patch.object(api, "lms_installed_models", return_value=[self.MODEL]), \
+             mock.patch.object(api, "_lifecycle_lock",
+                               return_value=api.contextlib.nullcontext()), \
+             mock.patch.object(api, "_lms_ps", return_value=[]), \
+             mock.patch.object(api, "_run_gate",
+                               side_effect=[(True, "pre"), (False, "blocked")]), \
+             mock.patch.object(api, "_lms_runtime_select"), \
+             mock.patch.object(api, "_lms_server_start"), \
+             mock.patch.object(api, "_lms_run", return_value=self._cp()) as runner:
+            with self.assertRaises(RuntimeError):
+                api.ensure_lms_chat_model(self.MODEL)
+        self.assertEqual(runner.call_args_list[-1].args[0],
+                         [str(api.LMS_BIN), "unload", ident])
+        self.assertNotIn("--all", [str(x) for c in runner.call_args_list for x in c.args[0]])
 
 
 class TestLimits(unittest.TestCase):
