@@ -19,7 +19,8 @@ import { ALLY_BY_ID, recruitById, recruitCombatant, recruitXpForLevel } from '@/
 import { ALLY_PULL_GOLD, GEAR_PULL_GOLD, TEN, floorAt, pullAlly, pullGear, tenCost } from '@/rpg/gacha'
 import { MAX_PLUS, enhance, enhanceCost, odds } from '@/rpg/enhance'
 import { SECRETS } from '@/rpg/secrets'
-import { loadHero, resetHero, saveHero } from '@/rpg/save'
+import { loadBattle, loadHero, resetHero, saveBattle, saveHero } from '@/rpg/save'
+import { drainPending, setAuto as setSessionAuto, setMounted, startSession } from '@/rpg/session'
 import { commitOrder, guard, setFocus, stepTurn, drinkPotion, petXpForLevel } from '@/rpg/engine'
 import {
   AFFIX_NAME, AFFIX_PCT, ALLY_CAT_NAME, ALLY_ROLE_COLOR, ALLY_ROLE_NAME,
@@ -130,7 +131,10 @@ export default function Adventure({ tools }: Props) {
   // 資料驅動的色票是照深底挑的，亮色主題下要壓暗才讀得清楚
   const tone = useReadable()
   const [hero, setHero] = useState<Hero>(() => loadHero())
-  const [battle, setBattle] = useState<Battle | null>(null)
+  // 從存檔還原上一場。切分頁會讓這個元件 unmount，沒有這一步戰鬥就消失了；
+  // 而離場期間 session 的心跳會繼續推進並寫回存檔，所以這裡讀到的
+  // 已經是「你不在的時候打到哪」的最新進度。
+  const [battle, setBattle] = useState<Battle | null>(() => loadBattle())
   const [auto, setAuto] = useState(true)
   const [party, setPartyState] = useState<string[]>(() => hero.party ?? [])
   const [tab, setTab] = useState<'skills' | 'gear' | 'bag' | 'shop' | 'gacha' | 'secret'>('skills')
@@ -149,6 +153,23 @@ export default function Adventure({ tools }: Props) {
   // ref 只在 effect 裡更新，不在 render 期間寫
   const autoRef = useRef(auto)
   useEffect(() => { autoRef.current = auto }, [auto])
+  // 掛機開關要讓模組心跳也知道 —— 離場後由它接手推進
+  useEffect(() => { setSessionAuto(auto) }, [auto])
+  /**
+   * 跟模組心跳交接。
+   *
+   * 這個分頁是條件渲染，切走就 unmount。在場時由底下那顆 useEffect 心跳
+   * 負責節奏（手動下令要即時反應）；離場後 setMounted(false) 讓
+   * src/rpg/session.ts 的模組層心跳接手，戰鬥才會真的繼續打。
+   * 回來時把離場期間的事件補報一次。
+   */
+  useEffect(() => {
+    startSession()
+    setMounted(true)
+    const missed = drainPending()
+    if (missed.length) setTimeout(() => flash(missed.join('；')), 0)
+    return () => setMounted(false)
+  }, [])
   useEffect(() => { heroRef.current = hero }, [hero])
   useEffect(() => { battleRef.current = battle }, [battle])
 
@@ -221,6 +242,9 @@ export default function Adventure({ tools }: Props) {
       const next = { ...b }
       battleRef.current = next        // 立刻同步，不等 React 的 effect
       setBattle(next)
+      // 每一拍都寫回。切分頁是隨時可能發生的，沒有「存檔時機」可以挑。
+      // 結束的那一場 saveBattle 會自己清掉，不會殘留。
+      saveBattle(next)
       timer = window.setTimeout(beat, gap)
     }
     timer = window.setTimeout(beat, TICK_MS)
@@ -283,6 +307,7 @@ export default function Adventure({ tools }: Props) {
     const nb = { ...b }
     battleRef.current = nb      // 心跳讀的是 ref，只 setBattle 會被下一拍蓋掉
     setBattle(nb)
+    saveBattle(nb)
   }
 
   /**
@@ -295,6 +320,7 @@ export default function Adventure({ tools }: Props) {
   const launch = (b: Battle, zoneId: string) => {
     battleRef.current = b
     setBattle(b)
+    saveBattle(b)
     update((h) => { h.zone = zoneId })
   }
 
