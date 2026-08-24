@@ -97,6 +97,19 @@ class TestParseOutcome(unittest.TestCase):
             with self.subTest(benign=benign):
                 self.assertEqual(api._parse_outcome(benign)["outcome"], "ok")
 
+    def test_codex只印總數也要算得到(self):
+        """codex CLI 收尾只印一個總數、沒有拆輸入輸出、也沒有金額。
+        不認得的話它每一趟都顯示成「沒有用量」—— 而它是這裡最貴的一個。"""
+        got = api._parse_outcome("已完成三項修改。\ntokens used\n371,555\n")
+        self.assertEqual(got["cost"]["total"], 371555)
+        self.assertEqual(got["cost"]["in"], 0)
+        self.assertEqual(got["cost"]["model"], "codex")
+
+    def test_有拆輸入輸出時total是兩者相加(self):
+        """畫面用同一個欄位顯示總量，不該讓它去分辨資料是哪一種格式來的。"""
+        got = api._parse_outcome(CLAUDE_529)
+        self.assertEqual(got["cost"]["total"], 1908 + 14)
+
     def test_真的撞牆還是要認得出來(self):
         """收緊誤判之後，真正的限流訊息不能跟著漏掉 ——
         那才是使用者最需要知道的一種失敗（等一下再派就好，不用查程式）。"""

@@ -17,7 +17,11 @@ import {
 import { SHOP, type BuyResult, type ShopEntry } from '@/rpg/shop'
 import { ALLY_BY_ID, recruitById, recruitCombatant, recruitXpForLevel } from '@/rpg/allies'
 import { ALLY_PULL_GOLD, GEAR_PULL_GOLD, TEN, floorAt, pullAlly, pullGear, tenCost } from '@/rpg/gacha'
-import { MAX_PLUS, enhance, enhanceCost, odds } from '@/rpg/enhance'
+import { HITSTOP, shake } from '@/rpg/battleFx'
+import {
+  ENHANCE_FX_MS, MAX_PLUS, drawEnhAlarm, drawEnhPop, drawEnhShards, drawEnhSparks,
+  enhance, enhanceCost, odds, type EnhanceOutcome,
+} from '@/rpg/enhance'
 import { SECRETS } from '@/rpg/secrets'
 import { loadArena, loadBattle, loadHero, resetHero, saveArena, saveBattle, saveHero } from '@/rpg/save'
 import {
@@ -640,12 +644,40 @@ export default function Adventure({ tools }: Props) {
   }
 
   /**
+   * 強化特效狀態。非 null＝有一個強化結果正在播放。
+   *
+   * 播放期間所有強化按鈕都鎖定：不鎖的話連點會讓特效疊在一起，
+   * 而且玩家會在看不清上一把結果的情況下直接再賭一次。
+   * rect 在點擊當下就鎖死 —— 碎裝的列會在結果出來的那次 render 就從
+   * DOM 移除，事後才量位置就錨不到了。
+   */
+  const [enhFx, setEnhFx] = useState<{
+    id: string
+    outcome: EnhanceOutcome
+    /** 成功後的新強化度，給 +N 跳字用 */
+    plus: number
+    rect: { x: number; y: number; w: number; h: number }
+    reduced: boolean
+  } | null>(null)
+  const bagListRef = useRef<HTMLDivElement>(null)
+  const enhFxCanvasRef = useRef<HTMLCanvasElement>(null)
+  const enhancing = enhFx !== null
+  /** 特效畫布範圍：以該列為中心外擴一圈，火花與碎片要有地方飛。
+   * 用 useMemo 鎖住身份，否則播放期間任何重繪都會重啟整段動畫。 */
+  const enhFxArea = useMemo(() => !enhFx ? null : {
+    x: enhFx.rect.x - 56,
+    y: enhFx.rect.y - 84,
+    w: enhFx.rect.w + 112,
+    h: enhFx.rect.h + 128,
+  }, [enhFx])
+
+  /**
    * 強化一件裝備。
    *
    * 會爆的段位一定先問過 —— 這是遊戲裡唯一會讓玩家永久失去東西的操作，
    * 手滑點掉一件 +9 主手的體驗，比任何數值調整都傷。
    */
-  const doEnhance = (it: Item, protect: boolean) => {
+  const doEnhance = (it: Item, protect: boolean, el?: HTMLElement) => {
     const cost = enhanceCost(it)
     if ((it.plus ?? 0) >= MAX_PLUS) return flash(t('已經強化到頂了'))
     if (hero.gold < cost) return flash(t('金幣不夠，還差 {n}', { n: cost - hero.gold }))
@@ -655,6 +687,9 @@ export default function Adventure({ tools }: Props) {
       '{name} 目前 +{p}。成功率 {s}%，失敗有 {d}% 會直接碎掉。要繼續嗎？',
       { name: itemLabel(it.name), p: it.plus ?? 0, s: Math.round(o.success * 100), d: Math.round(o.destroy * 100) },
     ))) return
+    const rect = el?.closest('[data-enh-row]')?.getBoundingClientRect()
+    let outcome: EnhanceOutcome = 'stay'
+    let newPlus = it.plus ?? 0
     let msg = ''
     update((h) => {
       const target = h.bag.find((x) => x.id === it.id)
@@ -669,10 +704,100 @@ export default function Adventure({ tools }: Props) {
         h.bag = h.bag.filter((x) => x.id !== target.id)
         for (const l of h.loadouts) for (const sl of SLOTS) if (l.equipped[sl] === target.id) delete l.equipped[sl]
       }
+      outcome = r.outcome
+      newPlus = target.plus ?? 0
       msg = t(r.msg, r.params)
     })
-    setTimeout(() => flash(msg), 0)
+    // update 的 fn 在 render 階段才執行，所以結果要等下一個宏任務才讀得到
+    //（跟底下 flash 同一套既有寫法）
+    setTimeout(() => {
+      flash(msg)
+      if (outcome !== 'stay' && rect) {
+        setEnhFx({
+          id: it.id,
+          outcome,
+          plus: newPlus,
+          rect: { x: rect.left, y: rect.top, w: rect.width, h: rect.height },
+          reduced: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+        })
+      }
+    }, 0)
   }
+
+  /**
+   * 播放強化特效：同一個 rAF 同時驅動畫布粒子與清單震動。
+   *
+   * setTimeout 是保險絲：分頁不可見時瀏覽器會暫停 rAF，
+   * 只靠動畫迴圈收尾的話，按鈕會一直鎖到使用者回來才恢復。
+   * 整個效果以 enhFx 的身份為鍵 —— 萬一播放中被新狀態取代，
+   * cleanup 會先收掉舊的計時器與迴圈，動畫直接換場、不會疊加。
+   */
+  useEffect(() => {
+    if (!enhFx || !enhFxArea) return
+    const fx = enhFx
+    const area = enhFxArea
+    const dur = ENHANCE_FX_MS[fx.outcome]
+    const timer = setTimeout(() => setEnhFx(null), dur)
+    // 減少動態偏好：不震動、不粒子，只剩列的色調與提示文字
+    if (fx.reduced) return () => clearTimeout(timer)
+
+    const list = bagListRef.current
+    const canvas = enhFxCanvasRef.current
+    const ctx = canvas?.getContext('2d') ?? null
+    const dpr = Math.min(window.devicePixelRatio || 1, 2)
+    if (canvas && ctx) {
+      canvas.width = Math.round(area.w * dpr)
+      canvas.height = Math.round(area.h * dpr)
+    }
+    const cx = fx.rect.x + fx.rect.w / 2 - area.x
+    const cy = fx.rect.y + fx.rect.h / 2 - area.y
+    // 碎裂先頓一拍再炸：命中頓幀是重量的來源（battleFx.HITSTOP 同一招）。
+    // 退級不頓 —— 那是挫敗，不是重擊，頓了反而像卡住。
+    // 震動時長拉長時要把時間軸縮放進 shake：它的衰減寫死 0.22 秒，
+    // 不縮放的話碎裂的 0.6 秒震動只有前 0.22 秒在動。
+    const shakeOpt = fx.outcome === 'destroy'
+      ? { delay: HITSTOP, dur: 0.6, power: 9 }
+      : fx.outcome === 'down'
+        ? { delay: 0, dur: 0.26, power: 4.5 }
+        : null
+
+    const t0 = performance.now()
+    let raf = 0
+    const loop = () => {
+      const age = (performance.now() - t0) / 1000
+      if (list && shakeOpt) {
+        const sa = age - shakeOpt.delay
+        if (sa >= 0 && sa < shakeOpt.dur) {
+          const [dx, dy] = shake(sa * (0.22 / shakeOpt.dur), shakeOpt.power)
+          list.style.transform = `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px)`
+        } else {
+          list.style.transform = ''
+        }
+      }
+      if (ctx) {
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+        ctx.clearRect(0, 0, area.w, area.h)
+        if (fx.outcome === 'up') {
+          drawEnhSparks(ctx, cx, cy, age / 0.6)
+          drawEnhPop(ctx, cx, cy - 8, age / 0.55, fx.plus)
+        } else if (fx.outcome === 'destroy') {
+          drawEnhAlarm(ctx, fx.rect.x - area.x, fx.rect.y - area.y, fx.rect.w, fx.rect.h, age / 0.55)
+          drawEnhShards(ctx, cx, cy, (age - HITSTOP) / 0.8)
+        }
+      }
+      if (age * 1000 < dur) raf = requestAnimationFrame(loop)
+      else {
+        if (list) list.style.transform = ''
+        setEnhFx(null)
+      }
+    }
+    raf = requestAnimationFrame(loop)
+    return () => {
+      clearTimeout(timer)
+      cancelAnimationFrame(raf)
+      if (list) list.style.transform = ''
+    }
+  }, [enhFx, enhFxArea])
 
   const equip = (it: Item) => update((h) => { h.loadouts[h.active].equipped[it.slot] = it.id })
   const unequip = (s: Slot) => update((h) => { delete h.loadouts[h.active].equipped[s] })
@@ -1286,7 +1411,7 @@ export default function Adventure({ tools }: Props) {
               </button>
             </div>
 
-            <div className="flex max-h-72 flex-col gap-1 overflow-y-auto">
+            <div ref={bagListRef} className="flex max-h-72 flex-col gap-1 overflow-y-auto">
               {hero.bag.length === 0 && <div className="text-xs text-mute2">{t('背包空空的，去打點怪吧')}</div>}
               {hero.bag.length > 0 && bagView.length === 0 && (
                 <div className="text-xs text-mute2">{t('沒有符合篩選條件的裝備')}</div>
@@ -1294,8 +1419,17 @@ export default function Adventure({ tools }: Props) {
               {bagView.map((it) => {
                 const equipped = Object.values(lo.equipped).includes(it.id)
                 const better = !equipped && isUpgrade(hero, it)
+                // 強化結果的色調：減少動態模式下震動與粒子都不出現，
+                // 顏色是那種模式裡唯一看得見結果的線索
+                const fxTone = enhFx?.id === it.id
+                  ? enhFx.outcome === 'up'
+                    ? 'border-amber-400 bg-amber-400/10 dark:border-amber-500/70'
+                    : enhFx.outcome === 'down'
+                      ? 'border-sky-400 bg-sky-400/10 dark:border-sky-500/70'
+                      : 'border-line'
+                  : 'border-line'
                 return (
-                  <div key={it.id} className="flex items-center gap-2 rounded border border-line px-2 py-1 text-xs">
+                  <div key={it.id} data-enh-row className={`flex items-center gap-2 rounded border px-2 py-1 text-xs ${fxTone}`}>
                     <ItemIcon it={it} />
                     <span className="w-12 flex-none text-mute2">{t(SLOT_NAME[it.slot])}</span>
                     <div className="min-w-0 flex-1 truncate"><ItemLine it={it} dim={equipped} /></div>
@@ -1303,20 +1437,21 @@ export default function Adventure({ tools }: Props) {
                     <span className="flex-none text-mute3">{itemScore(it)}</span>
                     <button
                       className="flex-none text-amber-700 dark:text-amber-400/90 hover:text-amber-300 disabled:opacity-50 dark:disabled:opacity-30"
-                      disabled={(it.plus ?? 0) >= MAX_PLUS}
+                      disabled={enhancing || (it.plus ?? 0) >= MAX_PLUS}
                       title={t('強化到 +{p}：成功 {s}%，碎裂 {d}%，費用 {g} 金', {
                         p: (it.plus ?? 0) + 1,
                         s: Math.round(odds(it.plus ?? 0, hero).success * 100),
                         d: Math.round(odds(it.plus ?? 0, hero).destroy * 100),
                         g: enhanceCost(it),
                       })}
-                      onClick={() => doEnhance(it, false)}
+                      onClick={(e) => doEnhance(it, false, e.currentTarget)}
                     >⚒</button>
                     {!!(hero.tickets?.protect ?? 0) && odds(it.plus ?? 0, hero).destroy > 0 && (
                       <button
-                        className="flex-none text-sky-700 dark:text-sky-400/90 hover:text-sky-300"
+                        className="flex-none text-sky-700 dark:text-sky-400/90 hover:text-sky-300 disabled:opacity-50 dark:disabled:opacity-30"
+                        disabled={enhancing}
                         title={t('用一張保護符強化：失敗也不會碎（剩 {n} 張）', { n: hero.tickets?.protect ?? 0 })}
-                        onClick={() => doEnhance(it, true)}
+                        onClick={(e) => doEnhance(it, true, e.currentTarget)}
                       >🛡️</button>
                     )}
                     {!equipped && <button className="flex-none text-emerald-700 dark:text-emerald-400 hover:text-emerald-300" onClick={() => equip(it)}>{t('裝備')}</button>}
@@ -1326,6 +1461,27 @@ export default function Adventure({ tools }: Props) {
                 )
               })}
             </div>
+
+            {/* 強化特效層。畫在清單外面、用點擊當下的螢幕座標定位：
+                碎裝的列會立刻從清單裡消失，特效不能掛在列裡面跟著死。
+                退級只震動不上粒子，不需要畫布。 */}
+            {enhFx && enhFxArea && !enhFx.reduced && enhFx.outcome !== 'down' && (
+              <canvas
+                ref={enhFxCanvasRef}
+                aria-hidden
+                className="pointer-events-none fixed z-50"
+                style={{ left: enhFxArea.x, top: enhFxArea.y, width: enhFxArea.w, height: enhFxArea.h }}
+              />
+            )}
+            {/* 減少動態模式的碎裂：不閃不炸，只把紅框留在原地一下，
+                讓「東西沒了」至少有個顏色上的交代 */}
+            {enhFx && enhFx.reduced && enhFx.outcome === 'destroy' && (
+              <div
+                aria-hidden
+                className="pointer-events-none fixed z-50 rounded border-2 border-red-500/70 bg-red-500/15"
+                style={{ left: enhFx.rect.x - 2, top: enhFx.rect.y - 2, width: enhFx.rect.w + 4, height: enhFx.rect.h + 4 }}
+              />
+            )}
           </>
         )}
 

@@ -10,6 +10,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { t, useLang } from '@/i18n'
 import { isLive, look, stateOf } from '@/lib/dispatchState'
+import { notifyDone } from '@/lib/notify'
 import LiveTerminal from '@/components/LiveTerminal'
 import type { DispatchRecord } from '@/types/data'
 
@@ -27,7 +28,23 @@ interface DispatchCost {
   usd: number
   in: number
   out: number
+  /** 總量。有些 CLI（codex）只印總數，拆不出輸入／輸出 */
+  total?: number
   model: string
+}
+
+/**
+ * 用量文字。拆得出輸入／輸出就分開講，只有總數就講總數。
+ *
+ * 不要在只知道總數時硬填一個 0/0 —— 那看起來像「這一趟沒用到 token」，
+ * 而 codex 往往是這裡最貴的一個。寧可少講，不要講錯。
+ */
+function tokenText(c: DispatchCost): string {
+  const n = (v: number) => TOKEN_FORMAT.format(Math.max(0, Math.round(v || 0)))
+  if (c.in > 0 || c.out > 0) {
+    return t('{input} 輸入 / {output} 輸出 tokens', { input: n(c.in), output: n(c.out) })
+  }
+  return c.total ? t('{n} tokens', { n: n(c.total) }) : ''
 }
 
 type ConsoleDispatch = DispatchRecord & {
@@ -96,7 +113,7 @@ function outcomeLook(d: ConsoleDispatch): { label: string; tone: string } {
 }
 
 function patchLineTone(line: string): string {
-  if (line.startsWith('@@')) return 'text-zinc-600 dark:text-zinc-300'
+  if (line.startsWith('@@')) return 'text-mute2'
   if (line.startsWith('+')) return 'text-emerald-700 dark:text-emerald-300'
   if (line.startsWith('-')) return 'text-red-700 dark:text-red-300'
   return 'text-ink3'
@@ -183,6 +200,15 @@ export default function Console() {
   const [replyBusy, setReplyBusy] = useState(false)
   /** 一件跑完才派下一件。預設開著 —— 多個 agent 同時改同一批檔案會互相蓋掉 */
   const [serial, setSerial] = useState(() => localStorage.getItem('ac_serial') !== '0')
+  /**
+   * 這批工單在哪個目錄裡做事。空的＝家目錄（原本的行為）。
+   *
+   * 沒有這一欄的話，無頭派工一律從家目錄啟動，agent 得自己 cd 過去；
+   * 而且派工紀錄的 cwd 永遠是家目錄，「📝 看改了什麼」就永遠回
+   * 「這個工作目錄不是 git 專案」—— 一個看得到但永遠沒東西的功能。
+   */
+  const [workDir, setWorkDir] = useState(() => localStorage.getItem('ac_workdir') || '')
+  useEffect(() => { localStorage.setItem('ac_workdir', workDir) }, [workDir])
   const [batch, setBatch] = useState<{ total: number; done: number; running: boolean; current: string } | null>(null)
   const [jobs, setJobs] = useState<SchedJob[]>([])
   const [showSched, setShowSched] = useState(false)
@@ -251,7 +277,23 @@ export default function Console() {
           )
           LIVE_IDS.current = nowLive
           // 第一次輪詢時 liveIds 是空的，所以剛開啟主控台不會冒出一堆舊通知
-          if (finished.length) setJustDone((q) => [...finished, ...q].slice(0, 4))
+          if (finished.length) {
+            setJustDone((q) => [...finished, ...q].slice(0, 4))
+            // 同時發一則系統通知。畫面上的那一條只有「人正在看這個分頁」時才有用，
+            // 而這個程式的核心用法就是派出去之後切去做別的事 ——
+            // 不發系統通知等於要人每隔幾分鐘切回來看一眼，那就不算非同步了。
+            for (const d of finished as ConsoleDispatch[]) {
+              void notifyDone({
+                tool: d.tool,
+                ok: d.outcome !== 'error',
+                summary: d.outcome === 'error'
+                  ? (d.issue?.trim() || t('執行失敗'))
+                  : d.outcome === 'no_changes'
+                    ? t('跑完了但沒有改到任何檔案')
+                    : (d.task || '').slice(0, 80),
+              })
+            }
+          }
         })
         .catch(() => {})
       fetch('/api/dispatch/batch').then((r) => (r.ok ? r.json() : null))
@@ -358,7 +400,11 @@ export default function Console() {
       const d = await fetch('/api/dispatch/batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ steps: list.map((x) => ({ tool: x.tool, task: x.task })), serial }),
+        body: JSON.stringify({
+          steps: list.map((x) => ({ tool: x.tool, task: x.task })),
+          serial,
+          cwd: workDir.trim(),
+        }),
       }).then((r) => r.json())
       only((x) => ({ ...x, state: d.ok ? 'sent' : 'failed', note: d.note || d.error || '' }))
       setNote(d.ok ? (d.note || '') : `⚠️ ${d.error}`)
@@ -455,7 +501,7 @@ export default function Console() {
     }
     setDiffFor(id)
     setOpenPatch(null)
-    if (Object.prototype.hasOwnProperty.call(diffData, id)) return
+    if (Object.prototype.hasOwnProperty.call(diffData, id) || diffLoading[id]) return
 
     setDiffLoading((m) => ({ ...m, [id]: true }))
     try {
@@ -533,6 +579,19 @@ export default function Console() {
             {t('一件一件跑')}
           </label>
         </div>
+        {/* 工作目錄。空的就照舊從家目錄跑，所以不填也不會壞掉。
+            填了才有意義的是：agent 不用自己 cd，而且「📝 看改了什麼」
+            才問得到 git 差異 —— 家目錄不是 git 專案，那裡永遠沒東西可看。 */}
+        <label className="mb-2 flex items-center gap-2 text-[11px] text-mute2">
+          <span className="flex-none">{t('工作目錄')}</span>
+          <input
+            className="min-w-0 flex-1 rounded border border-line2 bg-transparent px-2 py-1 font-mono text-[11px] outline-none focus:border-line4"
+            placeholder={t('留空＝家目錄。填專案路徑才看得到這批派工改了什麼')}
+            value={workDir}
+            onChange={(e) => setWorkDir(e.target.value)}
+            spellCheck={false}
+          />
+        </label>
         <textarea
           ref={boxRef}
           className="min-h-16 w-full resize-y rounded border border-line2 bg-transparent px-3 py-2 text-sm outline-none focus:border-line4"
@@ -814,34 +873,53 @@ export default function Console() {
               {t('{n} 件進行中', { n: live.length })}
             </span>
           )}
-          {done.length > 0 && (
-            <button
-              className="ml-auto text-[10px] text-mute2 hover:text-ink3"
-              onClick={() => setShowDone((v) => !v)}
-            >
-              {showDone ? t('收起已結束（{n}）', { n: done.length }) : t('看已結束（{n}）', { n: done.length })}
-            </button>
-          )}
+          <div className="ml-auto flex items-center gap-2">
+            {sessionUsd > 0 && (
+              <span className="text-[10px] text-mute2">
+                {t('本次累計 {amount}', { amount: formatUsd(sessionUsd) })}
+              </span>
+            )}
+            {done.length > 0 && (
+              <button
+                className="text-[10px] text-mute2 hover:text-ink3"
+                onClick={() => setShowDone((v) => !v)}
+              >
+                {showDone ? t('收起已結束（{n}）', { n: done.length }) : t('看已結束（{n}）', { n: done.length })}
+              </button>
+            )}
+          </div>
         </div>
         {/* 剛跑完的講一聲。不自己消失 —— 使用者可能正好離開座位 */}
         {justDone.map((d) => {
-          const bad = stateOf(d) === 'failed'
+          const notice = d.outcome === 'error'
+            ? 'error'
+            : d.outcome === 'no_changes'
+              ? 'no_changes'
+              : d.outcome === 'ok' || stateOf(d) !== 'failed' ? 'ok' : 'error'
+          const status = outcomeLook(d)
           return (
             <div
               key={d.id}
               className={`mb-1 flex items-center gap-2 rounded border px-2 py-1 text-[11px] ${
-                bad
+                notice === 'error'
                   ? 'border-red-300 bg-red-50 dark:border-red-800/60 dark:bg-red-950/40'
-                  : 'border-emerald-300 bg-emerald-50 dark:border-emerald-800/60 dark:bg-emerald-950/40'
+                  : notice === 'no_changes'
+                    ? 'border-amber-300 bg-amber-50 dark:border-amber-800/60 dark:bg-amber-950/40'
+                    : 'border-emerald-300 bg-emerald-50 dark:border-emerald-800/60 dark:bg-emerald-950/40'
               }`}
             >
-              <span className="flex-none">{bad ? '⚠️' : '✅'}</span>
+              <span className="flex-none">{notice === 'ok' ? '✅' : '⚠️'}</span>
               <span className="w-14 flex-none font-medium" style={{ color: TOOL_COLOR[d.tool] ?? undefined }}>
                 {d.tool}
               </span>
               <span className="min-w-0 flex-1 truncate text-mute" title={d.task}>{d.task}</span>
-              <span className={`flex-none ${bad ? 'text-red-600 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'}`}>
-                {bad ? t('失敗') : t('完成')}
+              {notice === 'error' && (
+                <span className="max-w-48 truncate text-red-700 dark:text-red-300">
+                  {d.issue?.trim() || t('沒有提供錯誤原因')}
+                </span>
+              )}
+              <span className={`flex-none ${status.tone}`}>
+                {status.label}
               </span>
               <button
                 className="flex-none rounded border border-line2 px-1.5 text-mute hover:bg-elev"
@@ -870,8 +948,12 @@ export default function Console() {
           <div className="text-xs text-mute3">{t('沒有進行中的派工')}</div>
         )}
         <div className="flex flex-col gap-1">
-          {(showDone ? [...live, ...done] : live).slice(0, 12).map((d) => (
-            <div key={d.id}>
+          {(showDone ? [...live, ...done] : live).slice(0, 12).map((d) => {
+            const status = outcomeLook(d)
+            const diff = diffData[d.id]
+            const diffOpen = diffFor === d.id
+            return (
+              <div key={d.id}>
               <button
                 onClick={() => loadLog(d.id)}
                 className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-[11px] hover:bg-elev"
@@ -882,10 +964,21 @@ export default function Console() {
                   {d.tool}
                 </span>
                 <span className="min-w-0 flex-1 truncate text-mute" title={d.task}>{d.task}</span>
-                <span className={`flex-none ${look(stateOf(d)).tone}`}>
-                  {look(stateOf(d)).label}
+                {d.cost && (
+                  <span className="flex-none text-[10px] text-mute2" title={d.cost.model}>
+                    {formatUsd(d.cost.usd) && `${formatUsd(d.cost.usd)} · `}
+                    {tokenText(d.cost)}
+                  </span>
+                )}
+                <span className={`flex-none ${status.tone}`}>
+                  {status.label}
                 </span>
               </button>
+              {d.outcome === 'error' && !isLive(d) && (
+                <div className="ml-6 mt-0.5 text-[10px] text-red-700 dark:text-red-300">
+                  {d.issue?.trim() || t('沒有提供錯誤原因')}
+                </div>
+              )}
               {stateOf(d) === 'running' && (
                 <div className="ml-6 flex items-center gap-2 text-[10px] text-mute3">
                   <span className="inline-block h-1.5 w-1.5 flex-none animate-pulse rounded-full bg-amber-400" />
@@ -898,8 +991,17 @@ export default function Console() {
                   {t('已排隊 {n} 句，這一輪結束後送出', { n: d.pending.length })}
                 </div>
               )}
+              {!isLive(d) && (
+                <button
+                  className="ml-6 text-[10px] text-mute2 hover:text-ink3"
+                  aria-expanded={diffOpen}
+                  onClick={() => void toggleDiff(d.id)}
+                >
+                  {diffOpen ? t('收起改動') : t('📝 看改了什麼')}
+                </button>
+              )}
               <button
-                className="ml-6 text-[10px] text-mute2 hover:text-ink3"
+                className={`${isLive(d) ? 'ml-6' : 'ml-2'} text-[10px] text-mute2 hover:text-ink3`}
                 title={t('工作跑歪了可以在這裡補一句。還在跑的話會排隊，結束後自動送出')}
                 onClick={() => { setReplyTo(replyTo === d.id ? null : d.id); setReplyText('') }}
               >
@@ -947,6 +1049,54 @@ export default function Console() {
                   </button>
                 </div>
               )}
+              {diffOpen && (
+                <div className="mx-4 my-1 rounded border border-line2 bg-panel p-2 text-[11px] text-ink2">
+                  {diffLoading[d.id] && <div className="text-mute2">{t('讀取改動中…')}</div>}
+                  {!diffLoading[d.id] && diff && !diff.ok && (
+                    <div className="text-mute2">
+                      {t('讀取改動失敗：{error}', { error: diff.error || t('未知錯誤') })}
+                    </div>
+                  )}
+                  {!diffLoading[d.id] && diff?.ok && !diff.isGit && (
+                    <div className="text-mute2">
+                      {t('這個工作目錄不是 git 專案，看不到改動')}
+                    </div>
+                  )}
+                  {!diffLoading[d.id] && diff?.ok && diff.isGit && diff.files.length === 0 && (
+                    <div className="text-mute2">{t('這次沒有可顯示的檔案改動')}</div>
+                  )}
+                  {!diffLoading[d.id] && diff?.ok && diff.isGit && diff.files.length > 0 && (
+                    <div className="flex flex-col gap-1">
+                      {diff.files.map((file) => {
+                        const patchKey = `${d.id}\u0000${file.path}`
+                        const expanded = openPatch === patchKey
+                        return (
+                          <div key={file.path}>
+                            <button
+                              className="flex w-full items-center gap-2 rounded border border-line2 bg-panel px-2 py-1 text-left hover:bg-elev"
+                              aria-expanded={expanded}
+                              title={expanded
+                                ? t('收起 {path} 的 patch', { path: file.path })
+                                : t('展開 {path} 的 patch', { path: file.path })}
+                              onClick={() => setOpenPatch(expanded ? null : patchKey)}
+                            >
+                              <span className="w-3 flex-none text-mute3">{expanded ? '▾' : '▸'}</span>
+                              <span className="min-w-0 flex-1 truncate font-mono text-ink3">{file.path}</span>
+                              <span className="flex-none text-emerald-700 dark:text-emerald-300">+{file.added}</span>
+                              <span className="flex-none text-mute3">/</span>
+                              <span className="flex-none text-red-700 dark:text-red-300">−{file.removed}</span>
+                            </button>
+                            {expanded && <PatchLines patch={file.patch} />}
+                          </div>
+                        )
+                      })}
+                      {diff.truncated && (
+                        <div className="text-mute2">{t('改動內容太長，只顯示一部分')}</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
               {openLog === d.id && (
                 <pre
                   // 還在跑的就自動捲到底，跟 tail -f 一樣。
@@ -967,8 +1117,9 @@ export default function Console() {
                   )}
                 </pre>
               )}
-            </div>
-          ))}
+              </div>
+            )
+          })}
         </div>
       </div>
     </div>

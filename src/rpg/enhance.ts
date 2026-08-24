@@ -8,6 +8,7 @@
 // 學到的不是「風險管理」而是「別碰這個系統」。
 
 import type { Hero, Item } from './types'
+import { easeOut } from './battleFx'
 
 export const MAX_PLUS = 15
 /** 每一級加多少（乘在基礎 atk/def 上） */
@@ -90,4 +91,109 @@ export function enhance(h: Hero, it: Item, protect: boolean): EnhanceResult {
     }
   }
   return { outcome: 'stay', msg: '強化失敗，但沒有損失', usedProtect: protect }
+}
+
+// ── 強化手感層 ──
+// 戰鬥的手感在 battleFx.ts，這裡是強化的對應物，分工相同：
+// 邏輯層只骰出「發生了什麼」，這一層把它變成看得見的回饋。
+// 繪製函式一律收正規化進度 t: 0..1，時長由呼叫端決定 ——
+// 跟戰鬥同一套協議，兩邊特效才能用同一個 rAF 迴圈驅動。
+//
+// 為什麼要有這層：三種結果原本只跳同一顆灰色提示，+15 碎裝跟 +1 成功
+// 看起來一模一樣。玩家不是不怕風險，是根本看不到風險發生了。
+
+/** 各結果的特效時長（毫秒）。
+ * 最重的碎裂壓在 900：強化是會連做幾十次的操作，再長第三次就開始煩。
+ * stay 是 0 —— 失敗但沒損失沒有值得一看的東西，不必鎖按鈕。 */
+export const ENHANCE_FX_MS: Record<EnhanceOutcome, number> = {
+  up: 650,
+  down: 500,
+  destroy: 900,
+  stay: 0,
+}
+
+/** 取小數部分。跟 battleFx.shake 同一招的偽亂數：
+ * 特效每幀重畫，用 Math.random 每次擲出不同方向，會閃成雜訊而不是粒子。 */
+const frac = (v: number) => v - Math.floor(v)
+
+/** 成功：往上炸的金色火花。
+ * 不沿用 battleFx.drawSparks —— 那是整圈放射，是「被打」的語彙；
+ * 強化成功要有明確的「往上」方向，否則讀起來像升上去的只是灰塵。 */
+export function drawEnhSparks(c: CanvasRenderingContext2D, x: number, y: number, t: number) {
+  if (t >= 1) return
+  const n = 9
+  const reach = 34 * easeOut(t)
+  const lift = 16 * t
+  c.save()
+  c.globalAlpha = Math.max(0, 1 - t)
+  c.strokeStyle = '#fbbf24'
+  c.lineWidth = 2
+  c.lineCap = 'round'
+  for (let i = 0; i < n; i++) {
+    // 上半圓扇形＋每支火花固定的小偏角，做出參差感
+    const a = -Math.PI / 2 + (i / (n - 1) - 0.5) * 2.6 + Math.sin(i * 12.9) * 0.1
+    const dx = Math.cos(a)
+    const dy = Math.sin(a)
+    c.beginPath()
+    c.moveTo(x + dx * reach * 0.45, y + dy * reach * 0.45 - lift * 0.4)
+    c.lineTo(x + dx * reach, y + dy * reach - lift)
+    c.stroke()
+  }
+  c.restore()
+}
+
+/** 成功的 +N 跳字：先放大、再上浮淡出。
+ * 描邊＋填充跟戰鬥跳字同一套畫法，兩種數字才像同一個遊戲生的。 */
+export function drawEnhPop(c: CanvasRenderingContext2D, x: number, y: number, t: number, plus: number) {
+  if (t >= 1) return
+  const scale = 1 + 0.55 * easeOut(Math.min(1, t / 0.45))
+  const alpha = t < 0.55 ? 1 : 1 - (t - 0.55) / 0.45
+  c.save()
+  c.translate(x, y - t * 16)
+  c.scale(scale, scale)
+  c.globalAlpha = Math.max(0, alpha)
+  c.font = 'bold 14px ui-sans-serif, system-ui, sans-serif'
+  c.textAlign = 'center'
+  c.lineWidth = 3
+  c.strokeStyle = 'rgba(0,0,0,0.65)'
+  c.fillStyle = '#fbbf24'
+  c.strokeText(`+${plus}`, 0, 0)
+  c.fillText(`+${plus}`, 0, 0)
+  c.restore()
+}
+
+/** 碎裂的紅色警示閃爍。
+ * 碎裂開場有一段頓幀，那瞬間畫面是靜止的 —— 沒有這層閃爍，
+ * 最重的一擊在前 60 毫秒反而什麼都看不見。 */
+export function drawEnhAlarm(
+  c: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, t: number,
+) {
+  if (t >= 1) return
+  c.save()
+  c.globalAlpha = 0.3 * Math.abs(Math.sin(t * Math.PI * 3)) * (1 - t * 0.5)
+  c.fillStyle = '#ef4444'
+  c.fillRect(x, y, w, h)
+  c.restore()
+}
+
+/** 碎裂：碎片往外炸、接著受重力下落。
+ * 碎塊畫成像素方塊而不是圓點 —— 整個遊戲是像素風，圓粒子會像別的遊戲混進來。 */
+export function drawEnhShards(c: CanvasRenderingContext2D, x: number, y: number, t: number) {
+  if (t <= 0 || t >= 1) return
+  const n = 14
+  c.save()
+  c.globalAlpha = Math.max(0, 1 - t * t)
+  for (let i = 0; i < n; i++) {
+    const r1 = frac(Math.sin(i * 127.1) * 43758.5453)
+    const r2 = frac(Math.sin(i * 311.7) * 12543.853)
+    const a = r1 * Math.PI * 2
+    const spd = (16 + r2 * 30) * easeOut(t)
+    // 外炸後疊重力項，碎片走拋物線，墜落感才出得來
+    const px = x + Math.cos(a) * spd
+    const py = y + Math.sin(a) * spd * 0.7 + 52 * t * t
+    const s = 1.5 + r2 * 2.5
+    c.fillStyle = i % 3 === 0 ? '#f87171' : '#cbd5e1'
+    c.fillRect(Math.round(px - s / 2), Math.round(py - s / 2), Math.round(s), Math.round(s))
+  }
+  c.restore()
 }

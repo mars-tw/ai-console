@@ -255,6 +255,12 @@ _MODEL_USAGE_RE = re.compile(
 # 地端治理層的結算 JSON（沒有金額，地端不花錢，但有 token 數）
 _LOCAL_STATS_RE = re.compile(
     r'"input_tokens"\s*:\s*(\d+)\s*,\s*"total_output_tokens"\s*:\s*(\d+)')
+# codex CLI 收尾時只印一個總數，沒有拆輸入／輸出，也沒有金額：
+#     tokens used
+#     371,555
+# 只認得前面兩種格式的話，codex 的每一趟都會顯示成「沒有用量」——
+# 而它其實是這裡最貴的一個。
+_CODEX_TOTAL_RE = re.compile(r'tokens?\s+used\s*[\r\n]+\s*([\d,]+)', re.I)
 
 # log 不會回頭改寫，所以同一個 (路徑, 大小) 的解析結果可以一直用。
 # 沒有這層的話，/api/dispatches 每 8 秒被打一次、每次重掃 30 份 log 的尾端，
@@ -290,6 +296,17 @@ def _parse_outcome(text: str) -> dict:
                     "in": sum(int(i) for i, _ in loc),
                     "out": sum(int(o) for _, o in loc),
                     "model": "local"}
+        else:
+            tot = _CODEX_TOTAL_RE.findall(text)
+            if tot:
+                # 只有總數，拆不出輸入／輸出。與其猜一個比例，不如誠實地
+                # 把 in/out 留 0，另外給 total —— 畫面看到 0/0 但有 total 時
+                # 就顯示總數，不會假裝知道它其實不知道的事。
+                cost = {"usd": 0.0, "in": 0, "out": 0,
+                        "total": max(int(x.replace(",", "")) for x in tot),
+                        "model": "codex"}
+    if cost is not None and "total" not in cost:
+        cost["total"] = cost["in"] + cost["out"]
 
     if issue:
         outcome = "error"
@@ -313,6 +330,75 @@ def _outcome_for(log: Path, size: int, text: str) -> dict:
             _OUTCOME_CACHE.clear()
         _OUTCOME_CACHE[key] = got
     return got
+
+
+# 單檔與整份的上限。一個被格式化工具掃過的檔可以有幾萬行 diff，
+# 整份送到瀏覽器只會讓畫面卡住 —— 那不是「看得到改動」，是當機。
+_DIFF_FILE_CAP = 200_000
+_DIFF_TOTAL_CAP = 2_000_000
+
+
+def _git_diff(cwd: str) -> dict:
+    """某個目錄現在有什麼未提交的改動，逐檔給 +/− 行數與 patch。
+
+    encoding="utf-8" 是這個函式的關鍵，不是可選的講究。
+
+    這個坑 _lms_run 的註解裡已經寫過一次，實作這個功能時還是踩了：
+    在 Windows 上 text=True 會用系統 ANSI code page（這台是 CP950）解碼，
+    而這個專案的原始碼註解全是中文 —— patch 內容一進來就 UnicodeDecodeError，
+    subprocess 的 reader thread 直接死掉，stdout 變成空字串。
+    沒有例外、沒有錯誤碼，畫面上就是「每個檔都有 +25 −2，但點開 patch 是空的」。
+    --numstat 逃過一劫只是因為它的輸出是純 ASCII。
+
+    core.quotepath=false：否則非 ASCII 檔名會被 git 轉成 "\\346\\226\\207"
+    這種八進位跳脫，跟 numstat 的路徑對不起來，patch 就配不到檔案。
+    """
+    def git(*args):
+        return _run(["git", "-C", cwd, "-c", "core.quotepath=false", *args],
+                    capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=30)
+
+    if git("rev-parse", "--show-toplevel").returncode != 0:
+        return {"ok": True, "cwd": cwd, "isGit": False, "files": []}
+    # --numstat 拿增減行數，--patch 拿內容。分兩次呼叫比解析合併輸出可靠得多。
+    stat = git("diff", "--numstat", "HEAD")
+    patch = git("diff", "--patch", "HEAD")
+
+    # 依檔案切開 patch。git 每個檔案一定以 "diff --git " 開頭。
+    chunks: dict = {}
+    cur = None
+    for line in (patch.stdout or "").splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            # "diff --git a/x b/x" —— 取 b/ 那一側，改名時它才是新名字
+            cur = line.rstrip("\n").split(" b/", 1)[-1]
+            chunks[cur] = []
+        elif cur is not None:
+            chunks[cur].append(line)
+
+    files, total, truncated = [], 0, False
+    for ln in (stat.stdout or "").splitlines():
+        parts = ln.split("\t")
+        if len(parts) < 3:
+            continue
+        added, removed, path = parts[0], parts[1], parts[2]
+        body = "".join(chunks.get(path, []))
+        if len(body) > _DIFF_FILE_CAP:
+            body = body[:_DIFF_FILE_CAP] + "\n… （這個檔的差異太長，只顯示前段）"
+            truncated = True
+        total += len(body)
+        files.append({
+            "path": path,
+            # 二進位檔 git 給的是 "-"
+            "added": int(added) if added.isdigit() else 0,
+            "removed": int(removed) if removed.isdigit() else 0,
+            "binary": not added.isdigit(),
+            "patch": body,
+        })
+        if total > _DIFF_TOTAL_CAP:
+            truncated = True
+            break
+    return {"ok": True, "cwd": cwd, "isGit": True,
+            "files": files, "truncated": truncated}
 
 
 def _find_bin(tool: str) -> str:
@@ -2014,6 +2100,9 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
         steps = body.get("steps") or []
         serial = bool(body.get("serial", True))
+        # 整批共用一個工作目錄。逐件指定沒有意義 —— 一批工單本來就是
+        # 針對同一件事拆出來的，散在不同專案的話 serial 也保護不了什麼。
+        batch_cwd = str(body.get("cwd") or "").strip()
         if not isinstance(steps, list) or not steps:
             return self._json({"ok": False, "error": "需要 steps"}, 400)
         if len(steps) > self.MAX_STEPS:
@@ -2029,8 +2118,11 @@ class Handler(BaseHTTPRequestHandler):
                 continue            # [null] 這種進來不該讓整個請求執行緒死掉
             task = str(x.get("task") or "").strip()
             if task:
-                jobs.append({"tool": str(x.get("tool") or "auto"),
-                             "task": task[:self.MAX_TASK]})
+                job = {"tool": str(x.get("tool") or "auto"),
+                       "task": task[:self.MAX_TASK]}
+                if batch_cwd:
+                    job["cwd"] = batch_cwd
+                jobs.append(job)
         if not jobs:
             return self._json({"ok": False, "error": "工單內容都是空的"}, 400)
 
@@ -2155,57 +2247,21 @@ class Handler(BaseHTTPRequestHandler):
         cwd = rec.get("cwd") or ""
         if not cwd or not Path(cwd).is_dir():
             return self._json({"ok": True, "cwd": cwd, "isGit": False, "files": []})
+        # 一定要指定 encoding="utf-8"。
+        #
+        # 這個坑 _lms_run 的註解裡已經寫過一次，我還是踩了：
+        # 在 Windows 上 text=True 會用系統 ANSI code page（這台是 CP950）解碼，
+        # 而這個專案的原始碼註解全是中文 —— patch 內容一進來就 UnicodeDecodeError，
+        # subprocess 的 reader thread 直接死掉，stdout 變成空字串。
+        # 沒有例外、沒有錯誤碼，畫面上就是「每個檔都有 +25 −2，但點開 patch 是空的」。
+        # --numstat 逃過一劫只是因為它的輸出是純 ASCII。
+        #
+        # core.quotepath=false：否則非 ASCII 檔名會被 git 轉成 "\346\226\207"
+        # 這種八進位跳脫，跟 numstat 的路徑對不起來，patch 就配不到檔案。
         try:
-            top = _run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
-                       capture_output=True, text=True, timeout=15)
-            if top.returncode != 0:
-                return self._json({"ok": True, "cwd": cwd, "isGit": False, "files": []})
-            # --numstat 拿增減行數，--patch 拿內容。分兩次呼叫比解析合併輸出可靠得多。
-            stat = _run(["git", "-C", cwd, "diff", "--numstat", "HEAD"],
-                        capture_output=True, text=True, timeout=30)
-            patch = _run(["git", "-C", cwd, "diff", "--patch", "HEAD"],
-                         capture_output=True, text=True, timeout=30)
+            return self._json(_git_diff(cwd))
         except Exception as e:
             return self._json({"ok": False, "error": str(e)}, 500)
-
-        # 依檔案切開 patch。git 每個檔案一定以 "diff --git " 開頭。
-        chunks: dict = {}
-        cur = None
-        for line in (patch.stdout or "").splitlines(keepends=True):
-            if line.startswith("diff --git "):
-                # "diff --git a/x b/x" —— 取 b/ 那一側，改名時它才是新名字
-                cur = line.rstrip("\n").split(" b/", 1)[-1]
-                chunks[cur] = []
-            elif cur is not None:
-                chunks[cur].append(line)
-
-        files, total = [], 0
-        truncated = False
-        for ln in (stat.stdout or "").splitlines():
-            parts = ln.split("\t")
-            if len(parts) < 3:
-                continue
-            added, removed, path = parts[0], parts[1], parts[2]
-            body = "".join(chunks.get(path, []))
-            # 單檔上限。一個被格式化工具掃過的檔可以有幾萬行 diff，
-            # 整份送到瀏覽器只會讓畫面卡住 —— 那不是「看得到改動」，是當機。
-            if len(body) > 200_000:
-                body = body[:200_000] + "\n… （這個檔的差異太長，只顯示前段）"
-                truncated = True
-            total += len(body)
-            files.append({
-                "path": path,
-                # 二進位檔 git 給的是 "-"
-                "added": int(added) if added.isdigit() else 0,
-                "removed": int(removed) if removed.isdigit() else 0,
-                "binary": not added.isdigit(),
-                "patch": body,
-            })
-            if total > 2_000_000:
-                truncated = True
-                break
-        return self._json({"ok": True, "cwd": cwd, "isGit": True,
-                           "files": files, "truncated": truncated})
 
     def do_dispatches(self):
         """派工追蹤：列出登錄的派工，判斷真正的狀態，附 log 尾端預覽"""
