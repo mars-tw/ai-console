@@ -59,6 +59,9 @@ export function resetHero(): Hero {
   const h = newHero()
   saveHero(h)
   localStorage.removeItem(BATTLE_KEY)   // 重來就不要留著上一輪的戰鬥
+  // 場地紀錄也要清。留著的話：重置完角色切去別的分頁，掛機心跳會照著
+  // 上一輪的地城把新角色丟進去 —— 一隻 Lv.1 直接被高階地城秒殺。
+  localStorage.removeItem(ARENA_KEY)
   return h
 }
 
@@ -88,6 +91,45 @@ export function saveBattle(b: Battle | null): void {
     localStorage.setItem(BATTLE_KEY, JSON.stringify(slim))
   } catch {
     /* 存檔失敗不該讓戰鬥中斷 */
+  }
+}
+
+// ── 上一場在哪裡打 ──────────────────────────────────────
+//
+// 為什麼要另外存一筆：
+//   saveBattle() 在 b.over 時是「刪檔」，不是「存一份結束了的戰鬥」。
+//   所以戰鬥一結束，kind 與 placeId 就跟著消失了。
+//   掛機心跳（session.ts）醒來想自動開下一場時，手上什麼都沒有，
+//   連「剛剛在哪個地圖」都不知道 —— 只能停住，掛機就等於只打一場。
+//
+// 這筆紀錄很小（兩個欄位），跟戰鬥本身分開存，
+// 所以重新載入頁面之後也還接得回去。
+const ARENA_KEY = 'ac_rpg_arena_v1'
+
+export interface Arena {
+  kind: 'field' | 'dungeon'
+  placeId: string
+}
+
+export function saveArena(a: Arena | null): void {
+  try {
+    if (!a) { localStorage.removeItem(ARENA_KEY); return }
+    localStorage.setItem(ARENA_KEY, JSON.stringify(a))
+  } catch {
+    /* 跟 saveBattle 一樣：存檔失敗不該讓戰鬥中斷 */
+  }
+}
+
+export function loadArena(): Arena | null {
+  try {
+    const raw = localStorage.getItem(ARENA_KEY)
+    if (!raw) return null
+    const a = JSON.parse(raw) as Arena
+    if (!a || (a.kind !== 'field' && a.kind !== 'dungeon')) return null
+    if (typeof a.placeId !== 'string' || !a.placeId) return null
+    return a
+  } catch {
+    return null
   }
 }
 

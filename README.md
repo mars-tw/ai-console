@@ -98,12 +98,18 @@ python server/api.py       # 啟動整合伺服器 → http://127.0.0.1:5177/
 開發模式（熱更新）：`npm run dev`（會同時啟動 API + vite）。
 
 ```bash
-npm test                   # 前後端測試一起跑（211 個）
-npm run test:web           # 只跑前端（vitest，137 個）
-npm run test:py            # 只跑後端（unittest，74 個，純標準庫）
-npx tsc --noEmit -p tsconfig.app.json   # 型別檢查
-npx eslint .               # 靜態檢查（零警告）
+npm run verify             # 型別 + 靜態檢查 + 前後端測試，一次跑完
+npm test                   # 前後端測試一起跑（244 個）
+npm run test:web           # 只跑前端（vitest，158 個）
+npm run test:py            # 只跑後端（unittest，86 個，純標準庫）
+npm run typecheck          # 型別檢查（等同 tsc -b）
+npm run lint               # 靜態檢查（零警告）
 ```
+
+> **不要用 `npx tsc --noEmit`。** 根 `tsconfig.json` 是 `"files": []` 的
+> references 容器，那道指令會掃 0 個檔案然後回傳 0 —— 看起來過了，其實什麼都沒檢查。
+> 少一個 import 都抓不到，直到 `npm run build` 才炸。要嘛 `npm run typecheck`，
+> 要嘛 `npx tsc --noEmit -p tsconfig.app.json`（指定專案）。
 
 後端測試刻意用標準庫的 `unittest` 而不是 pytest —— Python 這一側沒有任何
 pip 依賴，測試不該是第一個引進的。覆蓋的重點是「看程式碼看不出來、

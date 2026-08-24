@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ConversationDetail, ConversationSummary, IndexData } from '@/types/data'
 import Adventure from '@/components/Adventure'
 import Console from '@/components/Console'
@@ -118,6 +118,13 @@ export default function Home() {
   const [chatMsgs, setChatMsgs] = useState<{ role: string; text: string }[]>([])
   const [chatInput, setChatInput] = useState('')
   const [chatBusy, setChatBusy] = useState(false)
+  /** 地端推論已經等了幾秒。沒有這個數字，畫面只有一行不會動的「思考中…」 */
+  const [chatSecs, setChatSecs] = useState(0)
+  /** 這一次請求的中止把手。放 ref 是因為送出與取消是兩次不同的 render */
+  const chatAbort = useRef<AbortController | null>(null)
+  /** 訊息捲動容器，與「使用者是不是往上捲離開底部了」 */
+  const msgBoxRef = useRef<HTMLDivElement>(null)
+  const [awayFromEnd, setAwayFromEnd] = useState(false)
   const [viewMode, setViewMode] = useState<'list' | 'console' | 'office' | 'rpg'>('list')
   // 只顯示最近幾天有活動的資料夾。142 個資料夾裡今天只用過 25 個，
   // 全部列出來等於什麼都找不到。0 = 不限。
@@ -254,6 +261,35 @@ export default function Home() {
     return /code|程式|代码|python|api|bug|wp|wordpress|網站|函数|爬蟲|爬虫|deploy|腳本|脚本/i.test(hay) ? 'coding' : 'general'
   }
 
+  /**
+   * 打開一份對話就停在最新的一則。
+   *
+   * 打開對話最常見的目的是「看最近聊到哪」，但捲動容器一律從 scrollTop 0 開始，
+   * 於是每次都要手動往下捲幾萬像素才看得到重點 —— 一份長對話捲到底要好幾秒。
+   */
+  const scrollMsgsToEnd = (behavior: ScrollBehavior = 'auto') => {
+    const box = msgBoxRef.current
+    if (!box) return
+    box.scrollTo({ top: box.scrollHeight, behavior })
+    setAwayFromEnd(false)
+  }
+
+  const onMsgScroll = () => {
+    const box = msgBoxRef.current
+    if (!box) return
+    // 40px 的容差：捲到底時瀏覽器的小數誤差會讓等式差個零點幾，
+    // 抓死等於的話按鈕會在底部一直閃。
+    setAwayFromEnd(box.scrollHeight - box.scrollTop - box.clientHeight > 40)
+  }
+
+  // 訊息載入完成才捲得動 —— 內容還沒進 DOM 的時候 scrollHeight 是 0。
+  useEffect(() => {
+    if (!detail || detailLoading) return
+    // 讓瀏覽器先把訊息排版完再捲，不然捲到的是排版前的舊高度
+    const id = requestAnimationFrame(() => scrollMsgsToEnd())
+    return () => cancelAnimationFrame(id)
+  }, [detail, detailLoading])
+
   const sendChat = async () => {
     const text = chatInput.trim()
     if (!text || chatBusy || !chatModel) return
@@ -281,9 +317,13 @@ export default function Home() {
     setChatMsgs(next)
     setChatInput('')
     setChatBusy(true)
+    setChatSecs(0)
+    const ac = new AbortController()
+    chatAbort.current = ac
     try {
       const r = await fetch('/api/chat', {
         method: 'POST',
+        signal: ac.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: useModel,
@@ -298,11 +338,34 @@ export default function Home() {
       const finalMsgs = [...next, { role: 'assistant', text: reply }]
       setChatMsgs(finalMsgs)
       if (selected) localStorage.setItem('ac_chat_' + selected.id, JSON.stringify(finalMsgs.slice(-30)))
-    } catch {
-      setChatMsgs([...next, { role: 'assistant', text: t('⚠️ 控制 API 無回應') }])
+    } catch (e) {
+      // 自己按「不等了」不是錯誤，不能報成「控制 API 無回應」——
+      // 那會讓人以為是後端掛了，然後去重開伺服器找一個不存在的問題。
+      if ((e as Error)?.name === 'AbortError') {
+        setChatMsgs([...next, { role: 'assistant', text: t('（已取消，沒有等這一次的回覆）') }])
+      } else {
+        setChatMsgs([...next, { role: 'assistant', text: t('⚠️ 控制 API 無回應') }])
+      }
     }
+    chatAbort.current = null
     setChatBusy(false)
   }
+
+  /**
+   * 地端推論的等待計時。
+   *
+   * 地端跑一次常常 20~60 秒，而畫面上只有一行不會動的「思考中…」。
+   * 沒有秒數的話使用者會以為當機而重新整理 —— 那一次的推論就白跑了，
+   * 而且它還會在背景把 GPU 佔著跑完。
+   */
+  useEffect(() => {
+    if (!chatBusy) return
+    const id = setInterval(() => setChatSecs((s) => s + 1), 1000)
+    return () => clearInterval(id)
+  }, [chatBusy])
+
+  // 換對話或關掉畫面時把還在跑的請求收掉，不然回應會落到別份對話上
+  useEffect(() => () => chatAbort.current?.abort(), [])
 
 
   useEffect(() => {
@@ -407,8 +470,66 @@ export default function Home() {
     setTimeout(() => setCopied(''), 1500)
   }
 
-  if (error) return <div className="p-8 text-red-600">{t('索引載入失敗：{err}（請先執行 tools/indexer.py）', { err: error })}</div>
-  if (!index) return <div className="p-8 text-zinc-500">{t('正在掃描全部 AI 對話…')}</div>
+  /**
+   * 分頁列。抽出來是因為「沒有索引」的畫面也要有它。
+   *
+   * 原本這裡是 `if (error) return <一行紅字>` 直接把整頁換掉，
+   * 連導覽列一起擋死 —— 第一次打開（還沒跑過 indexer）的人只看到一行紅字，
+   * 主控台、辦公室、冒險三個分頁全部進不去，看起來就是整個程式壞了。
+   * 但那三個分頁根本不需要索引。
+   */
+  const tabs = (
+    <div className="flex flex-none items-center gap-1 border-b border-zinc-200 px-3 py-1.5 dark:border-zinc-800">
+      {([
+        ['list', t('📋 對話')], ['console', t('🎙️ 主控台')],
+        ['office', t('🎮 辦公室')], ['rpg', t('⚔️ 冒險')],
+      ] as const).map(([m, label]) => (
+        <button
+          key={m}
+          className={`rounded-md px-3 py-1 text-xs ${viewMode === m ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900' : 'text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800'}`}
+          onClick={() => setViewMode(m)}
+        >
+          {label}
+        </button>
+      ))}
+      <LangSwitch />
+    </div>
+  )
+
+  if (!index) return (
+    <div className="flex h-screen flex-col bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
+      <main className="flex min-w-0 flex-1 flex-col">
+        {tabs}
+        {viewMode === 'console' ? (
+          <Console />
+        ) : viewMode === 'office' ? (
+          <Office tools={liveTools ?? {}} projects={[]} conversations={[]} onDispatch={launch} busyId={busy} />
+        ) : viewMode === 'rpg' ? (
+          <Adventure tools={liveTools ?? {}} />
+        ) : (
+          <div className="flex flex-1 items-center justify-center p-8">
+            <div className="max-w-md text-center">
+              {error ? (
+                <>
+                  <p className="mb-2 text-sm text-red-600">{t('索引載入失敗：{err}', { err: error })}</p>
+                  <p className="mb-4 text-xs text-zinc-500">{t('第一次使用要先掃描一次，才會有對話清單。其他三個分頁不需要索引，現在就能用。')}</p>
+                  <button
+                    className="rounded-md border border-zinc-300 px-4 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-40 dark:border-zinc-700 dark:hover:bg-zinc-900"
+                    disabled={busy === 'refresh'}
+                    onClick={refresh}
+                  >
+                    {busy === 'refresh' ? t('掃描中…') : t('掃描建立索引')}
+                  </button>
+                </>
+              ) : (
+                <p className="text-sm text-zinc-500">{t('正在掃描全部 AI 對話…')}</p>
+              )}
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  )
 
   return (
     <div className="flex h-screen flex-col bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
@@ -501,6 +622,22 @@ export default function Home() {
                 <div className="mt-1 text-zinc-500">
                   {t('索引裡共有 {n} 份對話', { n: index.conversations.length })}
                 </div>
+                {/* 「只顯示有中文的對話」是預設開啟的，而它正是最容易把清單清空的那一個。
+                    不點名的話，對話多為英文的人只會看到「沒有東西」+ 索引有幾百份，
+                    兩句互相矛盾，然後去懷疑掃描器 —— 實際上只是一個過濾器開著。 */}
+                {onlyCJK && !search.trim() && (
+                  <div className="mt-2">
+                    <div className="text-amber-600 dark:text-amber-400">
+                      {t('已套用「只顯示有中文的對話」過濾')}
+                    </div>
+                    <button
+                      className="mt-1 rounded border border-zinc-300 px-2 py-0.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                      onClick={() => setOnlyCJK(false)}
+                    >
+                      {t('關掉這個過濾')}
+                    </button>
+                  </div>
+                )}
                 <button
                   className="mt-3 rounded border border-zinc-300 px-3 py-1 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
                   onClick={() => {
@@ -518,42 +655,50 @@ export default function Home() {
             )}
             {groups.map(({ dir, line, convs }) => {
               const hub = hubProjects.get(line)
-              // 專案分組預設收合：一台機器上動輒上百個專案，全展開要滾很久
-              const open = openGroups[dir] ?? false
+              // 專案分組預設收合：一台機器上動輒上百個專案，全展開要滾很久。
+              // 但搜尋時要強制展開 —— 不然搜完只看到一列「▸ 📁 資料夾 (3)」，
+              // 命中的對話全被關在收合的資料夾裡，看起來就是「搜尋壞了／找不到」。
+              const open = search.trim() ? true : (openGroups[dir] ?? false)
               const shown = showAll[dir] ? convs : convs.slice(0, 40)
               const badge = hub ? PROJ_BADGE[hub.status] : null
               return (
                 <div key={dir} className="border-b border-zinc-100 dark:border-zinc-900">
-                  <button
-                    className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-zinc-50 dark:hover:bg-zinc-900"
-                    onClick={() => setOpenGroups((s) => ({ ...s, [dir]: !open }))}
-                    title={dir}
-                  >
-                    <span className="text-xs text-zinc-400">{open ? '▾' : '▸'}</span>
-                    <span className="min-w-0 flex-1 truncate text-sm font-medium">📁 {folderName(dir)}</span>
-                    {line !== 'other' && (
-                      <span className="flex-none rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
-                        {index.projectTitles[line] || line}
-                      </span>
-                    )}
-                    {badge && <span className={`flex-none rounded-full px-2 py-0.5 text-xs ${badge.cls}`}>{badge.label}</span>}
-                    {hub?.needs_handoff && <span className="flex-none rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-950 dark:text-amber-300">{t('待接力')}</span>}
-                    <span className="flex-none text-xs text-zinc-400">{convs.length}</span>
+                  {/* 外層是 div，不是 button。
+                      原本折疊鈕是 <button>，裡面又塞一個 <span role="button">（▶ 派工）——
+                      HTML 不准按鈕巢狀，而且那個 span 沒有 tabIndex 也沒有鍵盤處理，
+                      用鍵盤操作的人永遠 Tab 不到「派工」。
+                      改成兩顆並排的原生 <button>，Tab 與 Enter/Space 就自動正確。 */}
+                  <div className="flex w-full items-center gap-2 px-3 py-2 hover:bg-zinc-50 dark:hover:bg-zinc-900">
+                    <button
+                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                      onClick={() => setOpenGroups((s) => ({ ...s, [dir]: !open }))}
+                      aria-expanded={open}
+                      title={dir}
+                    >
+                      <span className="text-xs text-zinc-400">{open ? '▾' : '▸'}</span>
+                      <span className="min-w-0 flex-1 truncate text-sm font-medium">📁 {folderName(dir)}</span>
+                      {line !== 'other' && (
+                        <span className="flex-none rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                          {index.projectTitles[line] || line}
+                        </span>
+                      )}
+                      {badge && <span className={`flex-none rounded-full px-2 py-0.5 text-xs ${badge.cls}`}>{badge.label}</span>}
+                      {hub?.needs_handoff && <span className="flex-none rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-950 dark:text-amber-300">{t('待接力')}</span>}
+                      <span className="flex-none text-xs text-zinc-400">{convs.length}</span>
+                    </button>
                     {apiOk && convs.some((c) => c.resume) && (
-                      <span
-                        role="button"
+                      <button
                         className="flex-none rounded border border-zinc-200 px-1.5 py-0.5 text-xs hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
                         title={t('派工：接續此資料夾最新的對話')}
-                        onClick={(e) => {
-                          e.stopPropagation()
+                        onClick={() => {
                           const target = convs.find((c) => c.resume)
                           if (target) launch(target)
                         }}
                       >
                         {busy && convs.some((c) => c.id === busy) ? '…' : t('▶ 派工')}
-                      </span>
+                      </button>
                     )}
-                  </button>
+                  </div>
                   {open && hub?.next_step && (
                     <div className="mx-3 mb-2 rounded-md bg-zinc-50 px-2 py-1.5 text-xs text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
                       {t('下一步：')}{hub.next_step}
@@ -613,34 +758,10 @@ export default function Home() {
         </aside>
 
         {/* ── 主內容 ─────────────────────────── */}
-        <main className="flex min-w-0 flex-1 flex-col">
-          <div className="flex flex-none items-center gap-1 border-b border-zinc-200 px-3 py-1.5 dark:border-zinc-800">
-            <button
-              className={`rounded-md px-3 py-1 text-xs ${viewMode === 'list' ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900' : 'text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800'}`}
-              onClick={() => setViewMode('list')}
-            >
-              {t('📋 對話')}
-            </button>
-            <button
-              className={`rounded-md px-3 py-1 text-xs ${viewMode === 'console' ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900' : 'text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800'}`}
-              onClick={() => setViewMode('console')}
-            >
-              {t('🎙️ 主控台')}
-            </button>
-            <button
-              className={`rounded-md px-3 py-1 text-xs ${viewMode === 'office' ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900' : 'text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800'}`}
-              onClick={() => setViewMode('office')}
-            >
-              {t('🎮 辦公室')}
-            </button>
-            <button
-              className={`rounded-md px-3 py-1 text-xs ${viewMode === 'rpg' ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900' : 'text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800'}`}
-              onClick={() => setViewMode('rpg')}
-            >
-              {t('⚔️ 冒險')}
-            </button>
-            <LangSwitch />
-          </div>
+        {/* relative 是給「⬇ 最新」浮動鈕定位用的。放在捲動容器裡面的話
+            它會跟著內容一起捲走，等於沒有浮動。 */}
+        <main className="relative flex min-w-0 flex-1 flex-col">
+          {tabs}
           {viewMode === 'console' ? (
             <Console />
           ) : viewMode === 'office' ? (
@@ -690,7 +811,11 @@ export default function Home() {
                 </div>
               </header>
 
-              <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+              <div
+                ref={msgBoxRef}
+                className="relative min-h-0 flex-1 overflow-y-auto px-5 py-4"
+                onScroll={onMsgScroll}
+              >
                 {!selected.hasMessages ? (
                   <p className="text-zinc-400">此對話檔較大（{fmtSize(selected.size)}），未匯出訊息內容；可用接續指令回原工具查看。</p>
                 ) : detailLoading ? (
@@ -710,6 +835,17 @@ export default function Home() {
                 )}
 
               </div>
+
+              {/* 只在使用者往上捲離開底部時才出現。永遠掛著的話，
+                  它會一直蓋住最後一則訊息的右下角。 */}
+              {awayFromEnd && (
+                <button
+                  className="absolute bottom-24 right-6 z-10 rounded-full border border-zinc-300 bg-white px-3 py-1.5 text-xs shadow-lg hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+                  onClick={() => scrollMsgsToEnd('smooth')}
+                >
+                  {t('⬇ 最新')}
+                </button>
+              )}
 
               {/* 續聊區釘在捲動容器外面。放在裡面的話，對話一長就得
                   捲到最底才碰得到輸入框 —— 而「想接續聊」正是打開一份
@@ -750,7 +886,21 @@ export default function Home() {
                             <div className="whitespace-pre-wrap break-words">{m.text}</div>
                           </div>
                         ))}
-                        {chatBusy && <div className="text-xs text-zinc-400">地端模型思考中…</div>}
+                        {chatBusy && (
+                          <div className="flex items-center gap-2 text-xs text-zinc-400">
+                            <span>{t('地端模型思考中… {n} 秒', { n: chatSecs })}</span>
+                            {/* 15 秒之前不出現：正常的短回覆本來就會在那之內回來，
+                                太早給取消鈕反而像在暗示「它大概壞了」。 */}
+                            {chatSecs >= 15 && (
+                              <button
+                                className="rounded border border-zinc-300 px-1.5 py-0.5 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                                onClick={() => chatAbort.current?.abort()}
+                              >
+                                {t('不等了')}
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                     <div className="flex gap-2">

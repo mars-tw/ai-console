@@ -19,8 +19,10 @@ import { ALLY_BY_ID, recruitById, recruitCombatant, recruitXpForLevel } from '@/
 import { ALLY_PULL_GOLD, GEAR_PULL_GOLD, TEN, floorAt, pullAlly, pullGear, tenCost } from '@/rpg/gacha'
 import { MAX_PLUS, enhance, enhanceCost, odds } from '@/rpg/enhance'
 import { SECRETS } from '@/rpg/secrets'
-import { loadBattle, loadHero, resetHero, saveBattle, saveHero } from '@/rpg/save'
-import { drainPending, setAuto as setSessionAuto, setMounted, startSession } from '@/rpg/session'
+import { loadArena, loadBattle, loadHero, resetHero, saveArena, saveBattle, saveHero } from '@/rpg/save'
+import {
+  cancelRestart, drainPending, setAuto as setSessionAuto, setMounted, setRestart, startSession,
+} from '@/rpg/session'
 import { commitOrder, guard, setFocus, stepTurn, drinkPotion, petXpForLevel } from '@/rpg/engine'
 import {
   AFFIX_NAME, AFFIX_PCT, ALLY_CAT_NAME, ALLY_ROLE_COLOR, ALLY_ROLE_NAME,
@@ -126,6 +128,38 @@ function PetIcon({ art }: { art: string }) {
   )
 }
 
+/**
+ * 計算抽卡所需的券數與金幣。
+ *
+ * 為什麼要有混合折抵：
+ *   原本判定是「券夠就全額用券，券不夠就全額扣金幣」，導致玩家持有 1~9 張券抽十連時，
+ *   一張券都沒被折抵到、金幣全額被扣，給玩家被吞券或規則不合理的負面體驗。
+ *   十連有買九送一優惠（tenCost = price * 9），折算每張券等值 tenCost(price) / 10 金。
+ *   有幾張券就扣幾張，剩餘差額由金幣補齊。
+ */
+function pullCost(count: number, haveTickets: number, unitPrice: number): { tickets: number; gold: number } {
+  const tickets = Math.min(haveTickets, count)
+  const remaining = count - tickets
+  if (remaining <= 0) return { tickets: count, gold: 0 }
+  if (count === 1) return { tickets: 0, gold: unitPrice }
+  const totalGold = tenCost(unitPrice)
+  const gold = Math.round((totalGold * remaining) / count)
+  return { tickets, gold }
+}
+
+/**
+ * 抽卡按鈕文案：明確顯示實際扣除的券數與金幣。
+ */
+function pullButtonLabel(label: string, cost: { tickets: number; gold: number }): string {
+  if (cost.tickets > 0 && cost.gold > 0) {
+    return t('{label} 券×{t} + 🪙{g}', { label, t: cost.tickets, g: cost.gold })
+  }
+  if (cost.tickets > 0) {
+    return t('{label} 券×{t}', { label, t: cost.tickets })
+  }
+  return t('{label} 🪙{g}', { label, g: cost.gold })
+}
+
 export default function Adventure({ tools }: Props) {
   useLang()   // 語言一換就重繪
   // 資料驅動的色票是照深底挑的，亮色主題下要壓暗才讀得清楚
@@ -146,9 +180,12 @@ export default function Adventure({ tools }: Props) {
   const [notice, setNotice] = useState('')
   /** 抽卡結果：最近一次的清單，抽完停在畫面上，不然十連刷過去什麼都看不到 */
   const [pulls, setPulls] = useState<{ label: string; color: string; note?: string }[]>([])
+  const [autoRestartSeconds, setAutoRestartSeconds] = useState<number | null>(null)
+  const [autoRestartCancelled, setAutoRestartCancelled] = useState(false)
   const heroRef = useRef(hero)
   const battleRef = useRef(battle)
   const partyRef = useRef(party)
+  useEffect(() => { partyRef.current = party }, [party])
   /** 手動模式排隊的技能：放在 ref，不去改動 state 物件 */
   // ref 只在 effect 裡更新，不在 render 期間寫
   const autoRef = useRef(auto)
@@ -335,8 +372,92 @@ export default function Adventure({ tools }: Props) {
     battleRef.current = b
     setBattle(b)
     saveBattle(b)
+    // 場地要另外記一筆。saveBattle 在戰鬥結束時是「刪檔」，
+    // 掛機心跳醒來要開下一場時才問得到「剛剛在哪裡打」。
+    saveArena({ kind: b.kind, placeId: b.placeId })
     update((h) => { h.zone = zoneId })
   }
+
+  /**
+   * 用同一份規則組出「下一場」。
+   *
+   * 元件內的 3 秒倒數與模組心跳（session.ts）都走這裡。
+   * 兩邊各寫一份的話遲早會分岔 —— 例如只有一邊會在人數不足時自動補人進地城，
+   * 於是「盯著畫面看」和「切走掛機」打到的內容不一樣。
+   */
+  const nextBattle = (h: Hero, kind: 'field' | 'dungeon', placeId: string): Battle => {
+    const dg = kind === 'dungeon' ? DUNGEONS.find((d) => d.id === placeId) : undefined
+    const need = dg?.partySize ?? 0
+    const members = dg && partyRef.current.length + 1 < need ? autoParty(need) : partyRef.current
+    return startBattle(h, kind, placeId, buildParty(members))
+  }
+
+  /**
+   * 把「怎麼組下一場」登記給模組心跳。
+   *
+   * 為什麼刻意不寫 cleanup：
+   *   這個函式唯一有用的時刻，就是元件**不在場**的時候（切去派工、看對話）。
+   *   照慣例在 unmount 時清成 null，等於剛好在需要它的那一刻把它拆掉，
+   *   掛機又會退回「打完一場就停在結算畫面」。
+   *   沒有 dep array 是為了每次 render 重登記，裡面抓到的工具狀態才是新的。
+   */
+  useEffect(() => {
+    setRestart((h) => {
+      const a = loadArena()
+      return a ? nextBattle(h, a.kind, a.placeId) : null
+    })
+  })
+
+  /** 倒數到 0 要做的事放在 ref：不然它會把 buildParty／launch 拖進 dep，每次 render 重數一次 */
+  const startNextRef = useRef(() => {})
+  useEffect(() => {
+    startNextRef.current = () => {
+      const b = battleRef.current
+      if (!b) return
+      launch(nextBattle(heroRef.current, b.kind, b.placeId), b.placeId)
+    }
+  })
+
+  const battleOver = battle?.over ?? false
+
+  // 新戰鬥開始（或還沒打完）就把倒數與取消標記歸零
+  useEffect(() => {
+    if (!battleOver) {
+      setAutoRestartCancelled(false)
+      setAutoRestartSeconds(null)
+    }
+  }, [battleOver])
+
+  /**
+   * 沉浸自動模式下，戰鬥結束 3 秒後自動開下一場。
+   *
+   * 為什麼要自動開下一場：
+   *   沉浸自動的目的是放著讓它自動掛機練功。原本戰鬥結算後心跳停在 over 狀態，
+   *   若畫面不自動開下一場，玩家放著幾小時回來發現只打了一場就停在結算畫面，等於掛機功能失效。
+   *   提供 3 秒倒數讓玩家有時間看清結算結果（獲勝獎勵或陣亡訊息），並附帶「取消」按鈕供隨時打斷連續開戰。
+   *   手動模式則維持現狀不自動開，避免玩家在尚未準備好或配置未調好的情況下被強制推進下一場。
+   */
+  useEffect(() => {
+    if (!battleOver || !auto || autoRestartCancelled) {
+      setAutoRestartSeconds(null)
+      return
+    }
+
+    setAutoRestartSeconds(3)
+    let remaining = 3
+    const timer = window.setInterval(() => {
+      remaining -= 1
+      if (remaining <= 0) {
+        window.clearInterval(timer)
+        setAutoRestartSeconds(null)
+        startNextRef.current()
+      } else {
+        setAutoRestartSeconds(remaining)
+      }
+    }, 1000)
+
+    return () => window.clearInterval(timer)
+  }, [battleOver, auto, autoRestartCancelled])
 
   /** 打到一半換地方 = 這一場的進度全丟，先問過再說 */
   const confirmLeave = () => {
@@ -471,17 +592,18 @@ export default function Adventure({ tools }: Props) {
   }
 
   // ── 抽卡 ──
-  // 有券優先用券，沒券才吃金幣。反過來的話玩家會先把金幣花光又不知道自己有券。
+  // 券與金幣混合折抵：有幾張扣幾張，差額用金幣補足。
+  // 若不支援混合折抵，玩家持有 1~9 張券抽十連時會被全額扣金幣且一張券都不扣，
+  // 造成券被閒置浪費以及玩家感受不佳。
   const rollAllies = (count: number) => {
     const have = hero.tickets?.ally ?? 0
-    const byTicket = have >= count
-    const cost = byTicket ? 0 : (count === 1 ? ALLY_PULL_GOLD : tenCost(ALLY_PULL_GOLD))
-    if (!byTicket && hero.gold < cost) return flash(t('金幣不夠，還差 {n}', { n: cost - hero.gold }))
+    const cost = pullCost(count, have, ALLY_PULL_GOLD)
+    if (hero.gold < cost.gold) return flash(t('金幣不夠，還差 {n}', { n: cost.gold - hero.gold }))
     const out: { label: string; color: string; note?: string }[] = []
     update((h) => {
       h.tickets ??= { ally: 0, gear: 0 }
-      if (byTicket) h.tickets.ally -= count
-      else h.gold -= cost
+      h.tickets.ally = Math.max(0, (h.tickets.ally ?? 0) - cost.tickets)
+      h.gold -= cost.gold
       for (let i = 0; i < count; i++) {
         const r = pullAlly(h, floorAt(i, count))
         out.push({
@@ -496,14 +618,13 @@ export default function Adventure({ tools }: Props) {
 
   const rollGear = (count: number) => {
     const have = hero.tickets?.gear ?? 0
-    const byTicket = have >= count
-    const cost = byTicket ? 0 : (count === 1 ? GEAR_PULL_GOLD : tenCost(GEAR_PULL_GOLD))
-    if (!byTicket && hero.gold < cost) return flash(t('金幣不夠，還差 {n}', { n: cost - hero.gold }))
+    const cost = pullCost(count, have, GEAR_PULL_GOLD)
+    if (hero.gold < cost.gold) return flash(t('金幣不夠，還差 {n}', { n: cost.gold - hero.gold }))
     const out: { label: string; color: string; note?: string }[] = []
     update((h) => {
       h.tickets ??= { ally: 0, gear: 0 }
-      if (byTicket) h.tickets.gear -= count
-      else h.gold -= cost
+      h.tickets.gear = Math.max(0, (h.tickets.gear ?? 0) - cost.tickets)
+      h.gold -= cost.gold
       for (let i = 0; i < count; i++) {
         const r = pullGear(h, () => `gx${Date.now().toString(36)}${i}`, floorAt(i, count))
         h.bag.push(r.item)
@@ -698,7 +819,23 @@ export default function Adventure({ tools }: Props) {
           </div>
           <div className="mt-2 flex items-center justify-between text-[10px] text-mute3">
             <span>{t('擊殺')} {hero.kills} · {t('陣亡')} {hero.deaths}</span>
-            <button className="hover:text-ink3" onClick={() => { if (confirm(t('重置角色與存檔？'))) { setHero(resetHero()); setBattle(null) } }}>{t('重置')}</button>
+            <button
+              className="hover:text-ink3"
+              onClick={() => {
+                if (confirm(t('重置角色與存檔？'))) {
+                  // 重置時必須同步清空元件內的 party 狀態與 partyRef。
+                  // 如果只重置 Hero 與 Battle，上一輪組好的夥伴仍會留在 party state 中，
+                  // 導致重置後新角色一進戰鬥就帶著上一輪滿等的隊友，存檔與畫面狀態脫節。
+                  const fresh = resetHero()
+                  setHero(fresh)
+                  setBattle(null)
+                  setPartyState([])
+                  partyRef.current = []
+                }
+              }}
+            >
+              {t('重置')}
+            </button>
           </div>
         </div>
 
@@ -868,9 +1005,33 @@ export default function Adventure({ tools }: Props) {
                 ))}
               </div>
               {battle.over && (
-                <div className="mt-2 text-center text-xs text-mute">
-                  {battle.result === 'win' ? t('🏆 通關！') : t('💀 全滅')}
-                  <button className="ml-2 rounded border border-line2 px-2 py-0.5 hover:bg-elev" onClick={() => setBattle(null)}>{t('返回')}</button>
+                <div className="mt-2 flex flex-wrap items-center justify-center gap-2 text-xs text-mute">
+                  <span>{battle.result === 'win' ? t('🏆 通關！') : t('💀 全滅')}</span>
+                  {autoRestartSeconds !== null && (
+                    <span className="text-amber-700 dark:text-amber-300">
+                      {t('{n} 秒後自動開下一場', { n: autoRestartSeconds })}
+                    </span>
+                  )}
+                  {autoRestartSeconds !== null && (
+                    <button
+                      className="rounded border border-line2 px-2 py-0.5 text-mute hover:bg-elev"
+                      // 也要跟模組心跳說一聲。只設元件內的旗標的話，
+                      // 按了取消再切去別的分頁，心跳照樣把下一場開下去。
+                      onClick={() => { setAutoRestartCancelled(true); cancelRestart() }}
+                    >
+                      {t('取消')}
+                    </button>
+                  )}
+                  <button
+                    className="rounded border border-line2 px-2 py-0.5 hover:bg-elev"
+                    onClick={() => {
+                      setAutoRestartCancelled(true)
+                      cancelRestart()
+                      setBattle(null)
+                    }}
+                  >
+                    {t('返回')}
+                  </button>
                 </div>
               )}
             </>
@@ -1037,21 +1198,46 @@ export default function Adventure({ tools }: Props) {
         )}
 
         {tab === 'gear' && (
-          <div className="grid gap-1.5 md:grid-cols-2">
-            {SLOTS.map((s) => {
-              const it = itemById(hero, lo.equipped[s])
-              return (
-                <div key={s} className="flex items-center gap-2 rounded border border-line px-2 py-1 text-xs">
-                  {it ? <ItemIcon it={it} /> : <span className="inline-block h-[22px] w-[22px] flex-none rounded-sm bg-app" />}
-                  <span className="w-12 flex-none text-mute2">{t(SLOT_NAME[s])}</span>
-                  <div className="min-w-0 flex-1 truncate">
-                    {it ? <ItemLine it={it} /> : <span className="text-mute3">{t('（空）')}</span>}
+          <>
+            {/* 裝備分頁頂部提供一鍵擇優裝備，方便玩家快速換上各部位最佳裝備，不用特地切到背包分頁。 */}
+            <div className="mb-2 flex items-center justify-end">
+              <button
+                className="rounded bg-emerald-700 px-2 py-0.5 text-xs text-white hover:bg-emerald-600"
+                onClick={equipBest}
+              >
+                {t('⚡ 一鍵擇優裝備')}
+              </button>
+            </div>
+            <div className="grid gap-1.5 md:grid-cols-2">
+              {SLOTS.map((s) => {
+                const it = itemById(hero, lo.equipped[s])
+                return (
+                  <div key={s} className="flex items-center gap-2 rounded border border-line px-2 py-1 text-xs">
+                    {it ? <ItemIcon it={it} /> : <span className="inline-block h-[22px] w-[22px] flex-none rounded-sm bg-app" />}
+                    <span className="w-12 flex-none text-mute2">{t(SLOT_NAME[s])}</span>
+                    <div className="min-w-0 flex-1 truncate">
+                      {it ? <ItemLine it={it} /> : <span className="text-mute3">{t('（空）')}</span>}
+                    </div>
+                    {it ? (
+                      <button className="flex-none text-mute2 hover:text-ink2" onClick={() => unequip(s)}>{t('卸下')}</button>
+                    ) : (
+                      <button
+                        className="flex-none text-emerald-700 dark:text-emerald-400 hover:underline"
+                        onClick={() => {
+                          // 點選空槽直接切到背包並自動套用該部位篩選。
+                          // 若不提供此按鈕，玩家看見空位卻無法直接前往挑選對應部位裝備，操作中斷。
+                          setFSlot(s)
+                          setTab('bag')
+                        }}
+                      >
+                        {t('挑選')}
+                      </button>
+                    )}
                   </div>
-                  {it && <button className="flex-none text-mute2 hover:text-ink2" onClick={() => unequip(s)}>{t('卸下')}</button>}
-                </div>
-              )
-            })}
-          </div>
+                )
+              })}
+            </div>
+          </>
         )}
 
         {tab === 'bag' && (
@@ -1188,29 +1374,33 @@ export default function Adventure({ tools }: Props) {
                   t('抽人形夥伴。重複不會浪費，會轉成那一隻的經驗')],
                 ['gear', t('⚔️ 裝備召喚'), hero.tickets?.gear ?? 0, GEAR_PULL_GOLD, rollGear,
                   t('抽裝備。有低機率直接掉獨一無二的彩蛋裝備')],
-              ] as const).map(([key, title, tickets, price, fn, desc]) => (
-                <div key={key} className="rounded border border-line bg-app/50 p-3">
-                  <div className="mb-1 flex items-center gap-2 text-xs">
-                    <span className="font-medium text-ink2">{title}</span>
-                    <span className="ml-auto text-mute2">{t('券 {n} 張', { n: tickets })}</span>
+              ] as const).map(([key, title, tickets, price, fn, desc]) => {
+                const cost1 = pullCost(1, tickets, price)
+                const cost10 = pullCost(TEN, tickets, price)
+                return (
+                  <div key={key} className="rounded border border-line bg-app/50 p-3">
+                    <div className="mb-1 flex items-center gap-2 text-xs">
+                      <span className="font-medium text-ink2">{title}</span>
+                      <span className="ml-auto text-mute2">{t('券 {n} 張', { n: tickets })}</span>
+                    </div>
+                    <div className="mb-2 text-[10px] leading-snug text-mute2">{desc}</div>
+                    <div className="flex gap-2">
+                      <button
+                        className="flex-1 rounded border border-amber-300 dark:border-amber-700/60 px-2 py-1 text-xs text-amber-700 dark:text-amber-200 hover:bg-amber-950/40"
+                        onClick={() => fn(1)}
+                      >
+                        {pullButtonLabel(t('單抽'), cost1)}
+                      </button>
+                      <button
+                        className="flex-1 rounded border border-amber-300 dark:border-amber-700/60 px-2 py-1 text-xs text-amber-700 dark:text-amber-200 hover:bg-amber-950/40"
+                        onClick={() => fn(TEN)}
+                      >
+                        {pullButtonLabel(t('十連'), cost10)}
+                      </button>
+                    </div>
                   </div>
-                  <div className="mb-2 text-[10px] leading-snug text-mute2">{desc}</div>
-                  <div className="flex gap-2">
-                    <button
-                      className="flex-1 rounded border border-amber-300 dark:border-amber-700/60 px-2 py-1 text-xs text-amber-700 dark:text-amber-200 hover:bg-amber-950/40"
-                      onClick={() => fn(1)}
-                    >
-                      {tickets >= 1 ? t('單抽（用券）') : t('單抽 🪙{n}', { n: price })}
-                    </button>
-                    <button
-                      className="flex-1 rounded border border-amber-300 dark:border-amber-700/60 px-2 py-1 text-xs text-amber-700 dark:text-amber-200 hover:bg-amber-950/40"
-                      onClick={() => fn(TEN)}
-                    >
-                      {tickets >= TEN ? t('十連（用券）') : t('十連 🪙{n}', { n: tenCost(price) })}
-                    </button>
-                  </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
             {pulls.length > 0 && (
               <div className="mt-3 border-t border-line pt-2">

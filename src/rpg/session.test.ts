@@ -5,8 +5,11 @@
 // 「怪怎麼掉血這麼快」，不會有任何錯誤訊息，只能靠測試守住。
 import { beforeEach, describe, expect, it } from 'vitest'
 import { newHero, startBattle } from './engine'
-import { saveBattle, saveHero } from './save'
-import { _beatOnce, _reset, drainPending, setAuto, setMounted, subscribe } from './session'
+import { loadArena, saveArena, saveBattle, saveHero } from './save'
+import {
+  _beatOnce, _reset, _waitBeats, cancelRestart, drainPending,
+  setAuto, setMounted, setRestart, subscribe,
+} from './session'
 import type { Battle } from './engine'
 
 // node 環境沒有 localStorage / window，補最小替身（見 save.test.ts 的同樣理由）
@@ -95,5 +98,89 @@ describe('掛機心跳', () => {
     const first = drainPending()
     expect(first.length).toBeLessThanOrEqual(5)   // 掛一整晚也只報最近幾件
     expect(drainPending()).toEqual([])            // 取完就清
+  })
+})
+
+// 這一組守的是「掛機」這個承諾本身。
+//
+// 元件裡也有一份 3 秒倒數，但它是 useEffect + setInterval，切分頁就被清掉 ——
+// 而「切去別的分頁」正是掛機的定義。只做元件那份的話，
+// 人在畫面前才會自動續戰，一離開就停在結算畫面，
+// 畫面上看起來完全正常（就是一行「🏆 通關！」），沒有任何錯誤，
+// 只有放著幾小時回來發現等級沒動才會發現 —— 只能靠測試守住。
+describe('打完自動開下一場', () => {
+  beforeEach(() => {
+    mem.clear()
+    _reset()
+    saveHero(newHero())
+  })
+
+  /** 把戰鬥打到結束為止。回傳跑了幾拍，跑太多拍就是引擎那邊出問題了 */
+  function fightToEnd(limit = 400): number {
+    for (let i = 0; i < limit; i++) {
+      _beatOnce()
+      if (!mem.get('ac_rpg_battle_v1')) return i + 1
+    }
+    throw new Error('這場打不完，引擎可能卡住了')
+  }
+
+  it('打完之後會記下場地 —— saveBattle 是刪檔，晚一拍就問不到了', () => {
+    saveBattle(startBattle(newHero(), 'field', 'meadow', []))
+    setMounted(false)
+    fightToEnd()
+    expect(loadArena()).toEqual({ kind: 'field', placeId: 'meadow' })
+  })
+
+  it('倒數走完會用登記的組隊函式開下一場', () => {
+    saveBattle(startBattle(newHero(), 'field', 'meadow', []))
+    setMounted(false)
+    let asked = 0
+    setRestart((h) => { asked += 1; return startBattle(h, 'field', 'meadow', []) })
+    fightToEnd()
+    expect(asked).toBe(0)                    // 結算當下不會立刻開，要讓人看得到獎勵
+    for (let i = 0; i < 5; i++) _beatOnce()
+    expect(asked).toBe(1)
+    expect(mem.get('ac_rpg_battle_v1')).toBeTruthy()
+  })
+
+  it('沒有登記組隊函式就不硬開 —— 寧可停著，也不要組出一支空隊伍去送死', () => {
+    saveArena({ kind: 'field', placeId: 'meadow' })
+    setMounted(false)
+    setRestart(null)
+    for (let i = 0; i < 10; i++) _beatOnce()
+    expect(mem.get('ac_rpg_battle_v1')).toBeFalsy()
+  })
+
+  it('玩家按取消之後就不再自動開', () => {
+    saveBattle(startBattle(newHero(), 'field', 'meadow', []))
+    setMounted(false)
+    let asked = 0
+    setRestart((h) => { asked += 1; return startBattle(h, 'field', 'meadow', []) })
+    fightToEnd()
+    cancelRestart()
+    for (let i = 0; i < 10; i++) _beatOnce()
+    expect(asked).toBe(0)
+    expect(loadArena()).toBeNull()
+  })
+
+  it('畫面回來就把倒數交還給元件，兩邊不會各數各的連開兩場', () => {
+    saveBattle(startBattle(newHero(), 'field', 'meadow', []))
+    setMounted(false)
+    setRestart((h) => startBattle(h, 'field', 'meadow', []))
+    fightToEnd()
+    expect(_waitBeats()).toBeGreaterThan(0)
+    setMounted(true)
+    expect(_waitBeats()).toBe(0)
+  })
+
+  it('關掉自動就不會自動開下一場', () => {
+    saveBattle(startBattle(newHero(), 'field', 'meadow', []))
+    setMounted(false)
+    let asked = 0
+    setRestart((h) => { asked += 1; return startBattle(h, 'field', 'meadow', []) })
+    fightToEnd()
+    setAuto(false)
+    for (let i = 0; i < 10; i++) _beatOnce()
+    expect(asked).toBe(0)
   })
 })
