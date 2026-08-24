@@ -705,9 +705,15 @@ export default function Home() {
                   <p className="text-zinc-400">找不到匯出的訊息檔。</p>
                 )}
 
+              </div>
+
+              {/* 續聊區釘在捲動容器外面。放在裡面的話，對話一長就得
+                  捲到最底才碰得到輸入框 —— 而「想接續聊」正是打開一份
+                  對話最常見的目的，不該是最難到達的動作。 */}
+              <div className="flex-none border-t border-zinc-200 bg-app dark:border-zinc-800">
                 {/* ── 地端續聊 ── */}
                 {apiOk && (
-                  <div className="mx-auto mt-6 max-w-3xl border-t border-zinc-200 pt-4 dark:border-zinc-800">
+                  <div className="mx-auto w-full max-w-3xl px-5 pb-4 pt-3">
                     <div className="mb-2 flex items-center gap-2">
                       <span className="text-sm font-medium">💬 用地端模型接續</span>
                       <select
