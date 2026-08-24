@@ -270,17 +270,27 @@ export default function Console() {
    * 跟前端在不在完全無關。
    */
   const runAll = async (list: Step[]) => {
-    setSteps((s) => s.map((x) => ({ ...x, state: 'sending' })))
+    // 只動這一批真的要派的，不要動整份清單。
+    //
+    // 原本三個 setSteps 都是 s.map(全部) —— 於是按「只重派失敗的」或
+    // 「只派這件」時，畫面上已經成功的工單會一起變回「派工中…」再變「已派出」，
+    // 看起來像被重複派了一次。派出去的是會改檔案的 agent，
+    // 讓人以為重複派工的代價不小。
+    const inBatch = new Set(list.map((x) => x.task))
+    const only = (fn: (x: Step) => Step) =>
+      setSteps((s) => s.map((x) => (inBatch.has(x.task) ? fn(x) : x)))
+
+    only((x) => ({ ...x, state: 'sending' }))
     try {
       const d = await fetch('/api/dispatch/batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ steps: list.map((x) => ({ tool: x.tool, task: x.task })), serial }),
       }).then((r) => r.json())
-      setSteps((s) => s.map((x) => ({ ...x, state: d.ok ? 'sent' : 'failed', note: d.note || d.error || '' })))
+      only((x) => ({ ...x, state: d.ok ? 'sent' : 'failed', note: d.note || d.error || '' }))
       setNote(d.ok ? (d.note || '') : `⚠️ ${d.error}`)
     } catch {
-      setSteps((s) => s.map((x) => ({ ...x, state: 'failed', note: t('控制 API 無回應') })))
+      only((x) => ({ ...x, state: 'failed', note: t('控制 API 無回應') }))
     }
   }
 
@@ -500,6 +510,15 @@ export default function Console() {
                     {s.state === 'sending' && <span className="text-amber-700 dark:text-amber-400">{t('派工中…')}</span>}
                     {s.state === 'failed' && <span className="text-red-700 dark:text-red-400">{s.note || t('失敗')}</span>}
                   </span>
+                  {s.state === 'idle' && (
+                    <button
+                      className="text-[11px] text-sky-700 hover:text-sky-500 dark:text-sky-400"
+                      title={t('只派這一件，其他留著。想先確認一件跑得對再放行其餘的時候用')}
+                      onClick={() => void runAll([s])}
+                    >
+                      {t('▶ 只派這件')}
+                    </button>
+                  )}
                   {s.state === 'idle' && (
                     <button
                       className="text-[11px] text-mute3 hover:text-red-400"

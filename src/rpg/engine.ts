@@ -189,17 +189,22 @@ export function rollItem(ilvl: number, slot?: Slot, rarity?: Rarity, line?: Line
  * 力量向的斧頭，數字再高也不會比較強，所以同分時偏好你主修那條線的武器。
  * 回傳實際換了哪些部位，好在介面上告訴使用者做了什麼。
  */
+/** 目前投點最多的那條技能線。主手武器合不合系用它判斷 */
+export function mainLineOf(h: Hero): Line {
+  const lo = activeLoadout(h)
+  return LINES.reduce((best, l) =>
+    linePoints(lo, l) > linePoints(lo, best) ? l : best, LINES[0])
+}
+
 export function autoEquipBest(h: Hero): { slot: Slot; from?: string; to: string }[] {
   const lo = activeLoadout(h)
-  const mainLine = LINES.reduce((best, l) =>
-    linePoints(lo, l) > linePoints(lo, best) ? l : best, LINES[0])
+  const mainLine = mainLineOf(h)
   const changed: { slot: Slot; from?: string; to: string }[] = []
 
   for (const slot of SLOTS) {
     const cands = h.bag.filter((it) => it.slot === slot)
     if (!cands.length) continue
-    const rank = (it: Item) =>
-      itemScore(it) * (it.slot === 'main' && it.line && it.line !== mainLine ? 0.75 : 1)
+    const rank = (it: Item) => equipRank(it, mainLine)
     const best = cands.reduce((a, b) => (rank(b) > rank(a) ? b : a))
     const cur = itemById(h, lo.equipped[slot])
     if (cur?.id === best.id) continue
@@ -210,10 +215,25 @@ export function autoEquipBest(h: Hero): { slot: Slot; from?: string; to: string 
   return changed
 }
 
+/**
+ * 一件裝備實際值多少 —— 主手不是本系武器要打折。
+ *
+ * 抽成共用函式是因為 isUpgrade 與 autoEquipBest 原本用兩把不同的尺：
+ * 前者只比 itemScore，後者對非本系主手乘 0.75。
+ * 結果背包裡一把高分的非本系武器被標成「▲ 比目前裝著的好」，
+ * 按下「一鍵擇優裝備」卻回你「目前已經是最佳配置」——
+ * 標示跟按鈕互相打臉，而且看不出原因。
+ */
+export function equipRank(it: Item, mainLine: Line | null): number {
+  return itemScore(it) * (it.slot === 'main' && it.line && it.line !== mainLine ? 0.75 : 1)
+}
+
 /** 這件比目前裝著的好嗎（背包篩選「只看可升級」用） */
 export function isUpgrade(h: Hero, it: Item): boolean {
-  const cur = itemById(h, activeLoadout(h).equipped[it.slot])
-  return !cur || itemScore(it) > itemScore(cur)
+  const lo = activeLoadout(h)
+  const cur = itemById(h, lo.equipped[it.slot])
+  const line = mainLineOf(h)
+  return !cur || equipRank(it, line) > equipRank(cur, line)
 }
 
 /** 裝備的粗略分數，用來提示「這件比較好」 */
