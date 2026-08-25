@@ -197,9 +197,23 @@ export default function Home() {
   useEffect(() => { localStorage.setItem('ac_kept', JSON.stringify([...kept])) }, [kept])
   useEffect(() => { localStorage.setItem('ac_onlyCJK', onlyCJK ? '1' : '0') }, [onlyCJK])
 
-  useEffect(() => {
+  /**
+   * 控制 API 還活著嗎。
+   *
+   * 原本這件事只在掛載時做一次。後端之後掛掉（被關掉、當掉、或它本來就是
+   * 另一個行程起的）畫面完全不知道 —— 「↻ 重新掃描」「▶ 派工」全部還亮著，
+   * 按下去才一個一個失敗，而「控制 API 離線（檢視模式）」那行提示
+   * 從來不會出現。提示的機制早就寫好了，只是永遠不會被觸發。
+   *
+   * 這是實際發生過的情境：桌面版的後端是它自己起的 python 子行程，
+   * 那個行程一結束，畫面看起來還是好的。
+   *
+   * 20 秒一次。/api/health 只回一個時間戳，成本可以忽略；
+   * 而按鈕亮著卻按不動的每一秒，都是在騙使用者。
+   */
+  const checkApi = useCallback(() => {
     fetch('/api/health').then((r) => {
-      if (!r.ok) return
+      if (!r.ok) { setApiOk(false); return }
       setApiOk(true)
       fetch('/api/status').then((r2) => r2.ok ? r2.json() : null)
         .then((d) => d?.tools && setLiveTools(d.tools)).catch(() => {})
@@ -209,6 +223,12 @@ export default function Home() {
         }).catch(() => {})
     }).catch(() => setApiOk(false))
   }, [])
+
+  useEffect(() => {
+    checkApi()
+    const timer = setInterval(checkApi, 20000)
+    return () => clearInterval(timer)
+  }, [checkApi])
 
   // useCallback + 空相依：底下每 60 秒的輪詢把這個函式收進 setInterval 的閉包，
   // 每次 render 重新產生一份的話，計時器會一直握著第一次那份。
@@ -718,7 +738,7 @@ export default function Home() {
                 className="rounded-md border border-line px-3 py-1 text-xs hover:bg-elev disabled:opacity-40"
                 disabled={!apiOk || busy === 'refresh'}
                 onClick={refresh}
-                title={apiOk ? t('重新掃描全部工具的對話') : t('控制 API 未啟動（npm run dev 會同時啟動）')}
+                title={apiOk ? t('重新掃描全部工具的對話') : t('控制 API 沒有回應。桌面版重開一次即可；開發模式請確認 npm run dev 還在跑')}
               >
                 {busy === 'refresh' ? t('掃描中…') : t('↻ 重新掃描')}
               </button>
