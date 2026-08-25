@@ -1761,10 +1761,38 @@ class Handler(BaseHTTPRequestHandler):
             if rel.startswith("data/"):
                 return self._json({"ok": False, "error": "not found"}, 404)
             f = DIST_DIR / "index.html"  # SPA fallback
+        # ── 條件式請求：沒變就回 304，不要再送一次 body ──
+        #
+        # 畫面每 60 秒重讀一次 index.json。那個檔在這台機器上是 1.4 MB，
+        # 而它只有在跑過掃描之後才會變（預設 15 分鐘一次）——
+        # 也就是說十五次裡有十四次是把同一份 1.4 MB 再搬一遍。
+        #
+        # 前端本來就寫了 `if (r.status === 304) return null`，它一直在等這個 304；
+        # 是伺服器這半從來沒實作，所以那行是永遠走不到的死碼。
+        #
+        # 而且浪費的不只是頻寬：每次拿到 body 就會 setIndex(新物件)，
+        # 於是「目前選取的對話」換了身分，正在讀的那份對話跟著被重新抓一次，
+        # 畫面還會自動捲回最底 —— 捲上去讀舊訊息的人每 60 秒被打斷一次。
         try:
+            st = f.stat()
             body = f.read_bytes()
         except OSError:
             return self._json({"ok": False, "error": "read fail"}, 500)
+        # 用 mtime + 大小組 ETag，不用內容雜湊：這個檔 1.4 MB，
+        # 每次輪詢都算一次 sha 反而把省下來的 I/O 又花回去。
+        etag = f'W/"{int(st.st_mtime)}-{st.st_size}"'
+        last_mod = _dt.datetime.fromtimestamp(
+            st.st_mtime, _dt.timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+
+        if self.headers.get("If-None-Match") == etag \
+                or self.headers.get("If-Modified-Since") == last_mod:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Last-Modified", last_mod)
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            return
+
         mime = mimetypes.guess_type(str(f))[0] or "application/octet-stream"
         if f.suffix in (".js", ".mjs"):
             mime = "text/javascript"
@@ -1774,6 +1802,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", f"{mime}; charset=utf-8" if mime.startswith(("text", "application/json")) else mime)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("ETag", etag)
+        self.send_header("Last-Modified", last_mod)
         self.end_headers()
         self.wfile.write(body)
 

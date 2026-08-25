@@ -465,6 +465,18 @@ export default function Home() {
       .catch((e) => setError(String(e)))
   }, [])
 
+  /**
+   * 相依只看 id 與「有沒有訊息」，不看整個 selected 物件。
+   *
+   * selected 是從 index 推導出來的（`.find()`），而索引每 60 秒重載一次。
+   * 只要 setIndex 收到新物件，selected 就換一個身分 —— 即使那份對話
+   * 一個字都沒變。原本相依整個物件，於是：
+   *   每 60 秒把正在讀的那份對話（74 KB）加尾端（43 KB）重抓一次，
+   *   setDetail 又觸發「自動捲到最新」——**捲上去讀舊訊息的人
+   *   每 60 秒被拉回底部一次。**
+   * 那個現象沒有任何錯誤訊息，只會讓人覺得「這程式怪怪的」。
+   */
+  const selectedHasMessages = selected?.hasMessages ?? false
   useEffect(() => {
     if (!selected) return
     localStorage.setItem('ac_selected', selected.id)
@@ -523,7 +535,9 @@ export default function Home() {
     }
     void load()
     return () => controller.abort()
-  }, [selected])
+    // selected 只在 id 或 hasMessages 變的時候才需要重載；見上面的說明。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, selectedHasMessages])
 
   /**
    * 「一週未使用」的基準時刻。
@@ -612,15 +626,18 @@ export default function Home() {
    * 主控台、辦公室、冒險三個分頁全部進不去，看起來就是整個程式壞了。
    * 但那三個分頁根本不需要索引。
    */
+  // overflow-x-auto 是保險：視窗再窄一點時分頁列會變成可橫捲，
+  // 而不是把最後一個分頁擠到看不見的地方。
+  // 子項全部 flex-none，不然它們會被壓扁成一團看不懂的字。
   const tabs = (
-    <div className="flex flex-none items-center gap-1 border-b border-line px-3 py-1.5">
+    <div className="flex flex-none items-center gap-1 overflow-x-auto border-b border-line px-3 py-1.5">
       {([
         ['list', t('📋 對話')], ['console', t('🎙️ 主控台')],
         ['office', t('🎮 辦公室')], ['rpg', t('⚔️ 冒險')],
       ] as const).map(([m, label]) => (
         <button
           key={m}
-          className={`rounded-md px-3 py-1 text-xs ${viewMode === m ? 'bg-ink text-invink' : 'text-mute2 hover:bg-elev'}`}
+          className={`flex-none rounded-md px-3 py-1 text-xs ${viewMode === m ? 'bg-ink text-invink' : 'text-mute2 hover:bg-elev'}`}
           onClick={() => setViewMode(m)}
         >
           {label}
@@ -674,9 +691,12 @@ export default function Home() {
             1440 寬的視窗有 22% 給了一個當下用不到的清單，
             像素辦公室的畫布因此只有 1105 寬（收起來是 1425）。
             不是直接拿掉，是收起來：從主控台按「▶ 派工」接續某個資料夾
-            仍然是真實用法，留一顆細長的把手可以隨時拉回來。 */}
+            仍然是真實用法，留一顆細長的把手可以隨時拉回來。
+
+            寬度也跟著視窗走：固定 320px 在 700px 寬的視窗會吃掉 46%，
+            主區只剩 380px —— 連四個分頁鈕都排不下（實測溢出 387>380）。 */}
         {sidebarOpen && (
-        <aside className="flex w-80 flex-none flex-col border-r border-line">
+        <aside className="flex w-64 flex-none flex-col border-r border-line lg:w-80">
           <div className="border-b border-line p-3">
             <div className="mb-2 flex items-baseline justify-between gap-2">
               <h1 className="text-lg font-medium">{t('AI 控制台')}</h1>
@@ -828,7 +848,7 @@ export default function Home() {
                       WCAG 2.2 的目標尺寸下限是 24×24，用觸控板或手抖的人會一直按空。 */}
                   <div className="flex w-full items-center gap-2 px-3 hover:bg-elev">
                     <button
-                      className="flex min-w-0 flex-1 items-center gap-2 py-2 text-left"
+                      className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden py-2 text-left"
                       onClick={() => setOpenGroups((s) => ({ ...s, [dir]: !open }))}
                       aria-expanded={open}
                       title={dir}
@@ -836,7 +856,10 @@ export default function Home() {
                       <span className="text-xs text-mute3">{open ? '▾' : '▸'}</span>
                       <span className="min-w-0 flex-1 truncate text-sm font-medium">📁 {folderName(dir)}</span>
                       {line !== 'other' && (
-                        <span className="flex-none rounded-full bg-elev px-2 py-0.5 text-xs text-mute2">
+                        <span
+                          className="min-w-0 max-w-24 flex-none truncate rounded-full bg-elev px-2 py-0.5 text-xs text-mute2"
+                          title={index.projectTitles[line] || line}
+                        >
                           {index.projectTitles[line] || line}
                         </span>
                       )}
@@ -1137,7 +1160,14 @@ export default function Home() {
             <span className="text-mute3">{t(STATUS_LABEL[tool.status] || tool.status)}</span>
           </span>
         ))}
-        <span className="ml-auto flex-none text-mute3">{liveTools ? t('即時狀態 · ') : ''}{t('ai-hub 每 15 分鐘自動掃描')}</span>
+        {/* 這行是純說明，窄視窗第一個該讓位的就是它。
+            原本是 flex-none，900px 寬時右邊被切掉 88px，而父層是
+            overflow-x-auto —— 要橫捲一條狀態列才看得到，等於看不到。
+            改成可縮可截斷，並在真的太窄時整行藏起來。 */}
+        <span className="ml-auto hidden min-w-0 truncate text-mute3 sm:inline"
+              title={t('ai-hub 每 15 分鐘自動掃描')}>
+          {liveTools ? t('即時狀態 · ') : ''}{t('ai-hub 每 15 分鐘自動掃描')}
+        </span>
       </footer>
     </div>
   )
