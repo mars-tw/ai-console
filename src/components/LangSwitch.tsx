@@ -26,7 +26,7 @@ export default function LangSwitch() {
   const lang = useLang()
   const theme = useTheme()
   const pill = (on: boolean) =>
-    `rounded px-2 py-0.5 text-[11px] ${on ? 'bg-ink text-invink' : 'text-mute2 hover:bg-elev'}`
+    `rounded px-2 py-1 text-[11px] ${on ? 'bg-ink text-invink' : 'text-mute2 hover:bg-elev'}`
 
   return (
     <div className="ml-auto flex items-center gap-1.5">

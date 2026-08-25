@@ -273,9 +273,15 @@ _TERMINAL_SUCCESS_RE = re.compile(
     r'^[ \t]*(?:(?:任務|工作|實作)[：:]?[ \t]*)?已完成[。.!]?[ \t\r]*$')
 _TERMINAL_OK = {"complete", "completed", "ok", "pass", "passed",
                 "success", "succeeded", "done"}
-_TERMINAL_ERROR = {"error", "failed", "failure", "blocked", "timeout",
+_TERMINAL_ERROR = {"error", "failed", "failure", "timeout",
                    "partial", "unavailable"}
 _TERMINAL_NO_CHANGE = {"no_change", "no_changes", "no_write"}
+# BLOCKED 不是失敗，是**照規範停下來**。
+#
+# 這台機器的 POLICY 明寫「缺授權標 BLOCKED」——agent 回報 BLOCKED 的時候
+# 它做對了。跟 529、崩潰混在同一個紅色裡的話，使用者會學會忽略紅字，
+# 然後真正的失敗也一起被忽略。要分開講。
+_TERMINAL_BLOCKED = {"blocked"}
 # Claude CLI 的結算 JSON
 _COST_USD_RE = re.compile(r'"total_cost_usd"\s*:\s*([0-9.]+)')
 _MODEL_USAGE_RE = re.compile(
@@ -321,6 +327,8 @@ def _normalise_terminal_status(value) -> str:
 def _status_signal(value, issue_text: str = ""):
     """把各家終端狀態字轉成統一結果；未知狀態不是訊號。"""
     state = _normalise_terminal_status(value)
+    if state in _TERMINAL_BLOCKED:
+        return "blocked", _ANSI_RE.sub("", issue_text or str(value)).strip()[:160]
     if state in _TERMINAL_ERROR:
         issue = _ANSI_RE.sub("", issue_text or str(value)).strip()[:160]
         return "error", issue
@@ -572,7 +580,20 @@ def _parse_cost(text: str):
     return _cost_from_accumulator(acc)
 
 
-def _advance_cost_stream(state: dict, data: bytes) -> None:
+def _best_signal(text: str, base: int):
+    """這段文字裡最後一個終端訊號，位置換算成全檔的位元組座標。
+
+    只需要「順序」不需要精確位置：chunk 是照順序處理的，base 單調遞增，
+    所以 (base, 段內位置) 就是一個正確的全域排序鍵。
+    """
+    sigs = _terminal_signals(text)
+    if not sigs:
+        return None
+    pos, _, outcome, issue = max(sigs, key=lambda s: (s[0], s[1]))
+    return (base + pos, outcome, issue)
+
+
+def _advance_log_stream(state: dict, data: bytes) -> None:
     combined = state["carry"] + data
     events = list(_byte_cost_events(combined))
     cutoff = max(0, len(combined) - _COST_SCAN_OVERLAP)
@@ -588,18 +609,45 @@ def _advance_cost_stream(state: dict, data: bytes) -> None:
     for start, end, kind, values in events:
         if (end <= carry_start) or (forced and start < carry_start):
             _apply_cost_event(state["acc"], kind, values)
+
+    # 成敗訊號跟成本走同一條串流。
+    #
+    # 原本它只看 log 的最後 64 KiB —— 而實測那份撞上 API Error 529、
+    # 一個檔都沒改的派工，三個失敗標記（529、terminal_reason、
+    # "changed_files":[]）全落在檔案的 42%～53% 處，尾端永遠掃不到，
+    # 於是畫面顯示「已完成」。這個功能在它自己的起因案例上是壞的。
+    #
+    # 解碼用 errors="ignore"：chunk 邊界可能切在多位元組字元中間，
+    # 但所有 pattern 都是純 ASCII，壞掉的中文尾巴不會造出假訊號；
+    # 而真的跨邊界的匹配還留在 carry 裡，下一輪會被完整看到。
+    settled = combined[:carry_start]
+    if settled:
+        found = _best_signal(settled.decode("utf-8", errors="ignore"), state["base"])
+        if found:
+            state["sig"] = found
+    state["base"] += carry_start
     state["carry"] = combined[carry_start:]
 
 
-def _cost_from_log(log: Path, size: int, fallback_text: str):
-    """增量掃完整 log 的成本；記憶體固定，終端結果仍只看 64 KiB 尾端。"""
+def _scan_log(log: Path, size: int, fallback_text: str):
+    """增量掃**完整** log，取出成本與成敗訊號。記憶體固定。
+
+    為什麼一定要掃完整份、而不是只看尾端：
+      實測那份撞上 API Error 529、一個檔都沒改就結束的派工，
+      三個失敗標記全落在 1.1 MB 檔案的 42%～53% 處。
+      只看最後 64 KiB 的話畫面會顯示「已完成」——
+      而那正是當初做這個功能要抓的案例。
+
+    為什麼可以負擔得起：狀態依 log 路徑保存，只讀「上次之後新增的位元組」。
+    已結束的派工大小不再變，一輩子只掃一次；還在跑的每次只掃新長出來的那段。
+    """
     if not log.is_file():
-        return _parse_cost(fallback_text)
+        return _parse_outcome_text(fallback_text)
     key = str(log)
     with _COST_STREAM_LOCK:
         state = _COST_STREAMS.get(key)
         if state is None or size < state["offset"]:
-            state = {"offset": 0, "carry": b"",
+            state = {"offset": 0, "carry": b"", "base": 0, "sig": None,
                      "acc": _new_cost_accumulator()}
             if len(_COST_STREAMS) > 100:
                 _COST_STREAMS.clear()
@@ -612,29 +660,40 @@ def _cost_from_log(log: Path, size: int, fallback_text: str):
                     chunk = handle.read(min(_COST_SCAN_CHUNK, remaining))
                     if not chunk:
                         break
-                    _advance_cost_stream(state, chunk)
+                    _advance_log_stream(state, chunk)
                     state["offset"] += len(chunk)
                     remaining -= len(chunk)
         except OSError:
-            return _parse_cost(fallback_text)
+            return _parse_outcome_text(fallback_text)
 
         # carry 尚未封存，因為下一輪可能從中間接著長；用副本算暫時結果，
         # 不污染 accumulator，也不會在下次輪詢把同一筆重複加一次。
         current = _copy_cost_accumulator(state["acc"])
         for _, _, kind, values in _byte_cost_events(state["carry"]):
             _apply_cost_event(current, kind, values)
-        return _cost_from_accumulator(current)
+
+        best = state["sig"]
+        tail = _best_signal(state["carry"].decode("utf-8", errors="ignore"),
+                            state["base"])
+        if tail and (best is None or tail[0] >= best[0]):
+            best = tail
+        return {"outcome": best[1] if best else "ok",
+                "issue": best[2] if best else "",
+                "cost": _cost_from_accumulator(current)}
 
 
-def _parse_outcome(text: str) -> dict:
-    """從 log 尾端判斷結果與花費。純字串處理，不碰檔案系統。"""
+def _parse_outcome_text(text: str) -> dict:
+    """純字串版本：沒有 log 檔可讀時的退路，也給測試直接呼叫。"""
     signals = _terminal_signals(text)
     if signals:
         _, _, outcome, issue = max(signals, key=lambda item: (item[0], item[1]))
     else:
         outcome, issue = "ok", ""
-
     return {"outcome": outcome, "issue": issue, "cost": _parse_cost(text)}
+
+
+# 舊名字留著：既有測試與外部呼叫都用這個名稱
+_parse_outcome = _parse_outcome_text
 
 
 def _outcome_for(log: Path, size: int, text: str) -> dict:
@@ -643,8 +702,7 @@ def _outcome_for(log: Path, size: int, text: str) -> dict:
         hit = _OUTCOME_CACHE.get(key)
         if hit is not None:
             return hit
-    got = _parse_outcome(text)
-    got["cost"] = _cost_from_log(log, size, text)
+    got = _scan_log(log, size, text)
     with _OUTCOME_LOCK:
         # 上限只是防呆：一台機器的派工紀錄本來就只留最近幾十筆
         if len(_OUTCOME_CACHE) > 500:
@@ -657,6 +715,26 @@ def _outcome_for(log: Path, size: int, text: str) -> dict:
 # 整份送到瀏覽器只會讓畫面卡住 —— 那不是「看得到改動」，是當機。
 _DIFF_FILE_CAP = 200_000
 _DIFF_TOTAL_CAP = 2_000_000
+
+
+def _has_git(cwd: str) -> bool:
+    """這個目錄是不是 git 工作區。
+
+    刻意不呼叫 git —— 這個判斷會在 /api/dispatches 的輪詢路徑上跑，
+    一次 30 筆、每 8 秒一輪，開 30 個子行程只為了問一個是非題太貴。
+    往上找 .git 就夠：那是 git 自己的定義，而且 worktree 的 .git 是檔案
+    不是目錄，所以用 exists() 不是 is_dir()。
+    """
+    try:
+        p = Path(cwd)
+        if not p.is_dir():
+            return False
+        for node in (p, *p.parents):
+            if (node / ".git").exists():
+                return True
+    except OSError:
+        pass
+    return False
 
 
 def _git_diff(cwd: str) -> dict:
@@ -2683,6 +2761,13 @@ class Handler(BaseHTTPRequestHandler):
                     d["outcome"], d["issue"] = None, ""
                 else:
                     d["outcome"], d["issue"] = got["outcome"], got["issue"]
+            # 這一筆的工作目錄有沒有 git，決定「📝 看改了什麼」值不值得出現。
+            #
+            # 不給這個旗標的話，每一筆都長出一顆按鈕，而多數派工的 cwd 是家目錄
+            # ——按下去只會得到「這個工作目錄不是 git 專案」。
+            # 一顆按十次有九次沒東西的按鈕，比沒有這顆按鈕更糟：
+            # 使用者會學會不按它，然後真的有改動的那一次也不會去看。
+            d["canDiff"] = _has_git(d.get("cwd") or "")
             out.append(d)
         # 排隊中的續談：上一輪一結束就送出去。放在輪詢裡而不是另開執行緒，
         # 是因為主控台本來就每 8 秒問一次，不需要再多一個背景迴圈。

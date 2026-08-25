@@ -14,6 +14,7 @@ log 裡出現「retry」「rate limit 這個詞被當成一般名詞提到」不
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -320,3 +321,108 @@ class TestDispatchState(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFullLogScan(unittest.TestCase):
+    """成敗判定必須掃**完整** log，不能只看尾端。
+
+    起因是模擬實驗（把程式跑起來實際點）發現的：主控台把三份實際失敗的
+    派工全部顯示成「已完成」。查下去是因為判定只讀 log 的最後 64 KiB，
+    而那份撞上 API Error 529、一個檔都沒改的派工，三個失敗標記
+    （529、terminal_reason、"changed_files":[]）全落在 1.1 MB 檔案的
+    42%～53% 處 —— 尾端永遠掃不到。
+
+    也就是說：這個功能在它自己的起因案例上是壞的，而且壞得沒有任何徵兆。
+    """
+
+    def setUp(self):
+        api._OUTCOME_CACHE.clear()
+        api._COST_STREAMS.clear()
+        self.tmp = Path(tempfile.mkdtemp(prefix="acscan_"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, *parts: str) -> Path:
+        p = self.tmp / "d.log"
+        p.write_text("".join(parts), encoding="utf-8")
+        return p
+
+    def test_失敗埋在中段也要抓得到(self):
+        pad = "還在做事的普通輸出，一行一行地長。\n" * 20_000   # 遠超過 64 KiB
+        log = self._write(pad, CLAUDE_529, "\n", pad)
+        size = log.stat().st_size
+        self.assertGreater(size, 400_000)
+        # 先確認前提成立：尾端真的看不到
+        self.assertEqual(api._parse_outcome_text(api._tail_text(log))["outcome"], "ok")
+        # 掃完整份就抓得到
+        got = api._scan_log(log, size, api._tail_text(log))
+        self.assertEqual(got["outcome"], "error")
+        self.assertIn("529", got["issue"])
+
+    def test_中段的沒改到檔也要抓得到(self):
+        pad = "普通輸出\n" * 30_000
+        log = self._write(pad, GOVERNOR_NO_CHANGE, "\n", pad)
+        got = api._scan_log(log, log.stat().st_size, "")
+        self.assertEqual(got["outcome"], "no_changes")
+
+    def test_中段的花費要累加進去(self):
+        pad = "x\n" * 30_000
+        log = self._write(pad, CLAUDE_529, "\n", pad, CLAUDE_529, "\n", pad)
+        got = api._scan_log(log, log.stat().st_size, "")
+        self.assertAlmostEqual(got["cost"]["usd"], 0.003956, places=6)
+
+    def test_後面的成功要蓋掉前面的失敗(self):
+        """一次重試失敗、第二次成功，最後的裁決是成功。
+        取最後一個訊號而不是「有失敗就算失敗」，不然任何重試過的工作
+        都會被永久標成紅色。"""
+        pad = "重試中\n" * 20_000
+        log = self._write(pad, CLAUDE_529, "\n", pad,
+                          '{"is_error":false,"terminal_reason":"success","result":"完成"}', "\n")
+        got = api._scan_log(log, log.stat().st_size, "")
+        self.assertEqual(got["outcome"], "ok")
+
+    def test_增量掃描的結果要跟一次掃完一樣(self):
+        """還在跑的派工每次輪詢只掃新長出來的那段。
+        分段掃跟一次掃完必須得到同一個答案，否則畫面會隨輪詢時機忽紅忽綠。"""
+        pad = "y\n" * 5_000
+        body = pad + CLAUDE_529 + "\n" + pad
+        log = self.tmp / "grow.log"
+
+        # 一次寫完、一次掃完
+        log.write_text(body, encoding="utf-8")
+        api._COST_STREAMS.clear()
+        once = api._scan_log(log, log.stat().st_size, "")
+
+        # 分十段長出來，每長一段掃一次
+        api._COST_STREAMS.clear()
+        log.write_text("", encoding="utf-8")
+        step = max(1, len(body) // 10)
+        for i in range(step, len(body) + step, step):
+            log.write_text(body[:i], encoding="utf-8")
+            grown = api._scan_log(log, log.stat().st_size, "")
+        self.assertEqual(grown["outcome"], once["outcome"])
+        self.assertEqual(grown["cost"], once["cost"])
+
+    def test_log被截斷重寫時要重新開始(self):
+        """檔案變小 = 換了一份 log。沿用舊狀態會把上一份的失敗帶到新的上面。"""
+        log = self._write("x\n" * 20_000, CLAUDE_529)
+        self.assertEqual(api._scan_log(log, log.stat().st_size, "")["outcome"], "error")
+        log.write_text("乾淨的新紀錄\n", encoding="utf-8")
+        self.assertEqual(api._scan_log(log, log.stat().st_size, "")["outcome"], "ok")
+
+
+class TestBlockedIsNotFailure(unittest.TestCase):
+    """BLOCKED 是照規範停下，不是失敗。
+
+    這台機器的 POLICY 明寫「缺授權標 BLOCKED」—— agent 回報 BLOCKED 的時候
+    它做對了。跟 529、崩潰混在同一個紅色裡的話，使用者會學會忽略紅字，
+    然後真正的失敗也一起被忽略。
+    """
+
+    def test_blocked自成一類(self):
+        got = api._parse_outcome_text('{"status":"BLOCKED","reason":"缺少當次授權"}')
+        self.assertEqual(got["outcome"], "blocked")
+
+    def test_blocked不會被當成error(self):
+        self.assertNotIn("blocked", api._TERMINAL_ERROR)

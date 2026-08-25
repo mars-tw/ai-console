@@ -55,9 +55,11 @@ function tokenText(c: DispatchCost): string {
 }
 
 type ConsoleDispatch = DispatchRecord & {
-  outcome?: 'ok' | 'no_changes' | 'error' | null
+  outcome?: 'ok' | 'no_changes' | 'blocked' | 'error' | null
   cost?: DispatchCost | null
   issue?: string
+  /** 這一筆的工作目錄在不在 git 裡。不在的話「看改了什麼」按了也沒東西 */
+  canDiff?: boolean
 }
 
 interface DiffFile {
@@ -112,11 +114,62 @@ function outcomeLook(d: ConsoleDispatch): { label: string; tone: string } {
       return { label: t('已完成'), tone: 'text-emerald-700 dark:text-emerald-300' }
     case 'no_changes':
       return { label: t('跑完了但沒有改到任何檔案'), tone: 'text-amber-700 dark:text-amber-300' }
+    // BLOCKED 是照規範停下來，不是失敗 —— 這台機器的規範就是這樣定的。
+    // 跟 529、崩潰混在同一個紅色裡的話，使用者會學會忽略紅字，
+    // 然後真正的失敗也一起被忽略。
+    case 'blocked':
+      return { label: t('依規範停下（沒有執行）'), tone: 'text-sky-700 dark:text-sky-300' }
     case 'error':
       return { label: t('執行失敗'), tone: 'text-red-700 dark:text-red-300' }
     default:
       return look(stateOf(d))
   }
+}
+
+/** 派工時間戳（YYYYMMDD-HHMMSS）→ Date。認不出來就回 null */
+function startedDate(stamp: string): Date | null {
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(stamp || '')
+  if (!m) return null
+  const [, y, mo, d, h, mi, se] = m
+  return new Date(+y, +mo - 1, +d, +h, +mi, +se)
+}
+
+function startedAgo(stamp: string): string {
+  const d = startedDate(stamp)
+  if (!d) return ''
+  const s = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000))
+  if (s < 60) return t('剛剛')
+  if (s < 3600) return t('{n} 分前', { n: Math.floor(s / 60) })
+  if (s < 86400) return t('{n} 小時前', { n: Math.floor(s / 3600) })
+  return t('{n} 天前', { n: Math.floor(s / 86400) })
+}
+
+function startedAt(stamp: string): string {
+  return startedDate(stamp)?.toLocaleString('zh-TW') ?? stamp
+}
+
+/**
+ * 派工清單上顯示的那一行字。
+ *
+ * 工單很常以一整段前置說明開頭（專案根目錄、技術棧、規則……），
+ * 於是同一批派出去的幾件在清單上被 truncate 成完全一樣的字，
+ * 看起來像同一件重複了四次。
+ * 這裡把「看起來像設定或標題」的開頭行跳過，找第一句真正的指示。
+ * 找不到就退回原本的字 —— 寧可顯示得囉唆，也不要顯示空白。
+ */
+function taskLabel(d: ConsoleDispatch): string {
+  const raw = (d.task || '').trim()
+  if (!raw) return t('（沒有工單內容）')
+  // 內部測試用的標記不該出現在使用者的清單裡
+  if (raw === '__DRYRUN__') return t('（連線測試）')
+  const lines = raw.split(/\r?\n/).map((x) => x.trim()).filter(Boolean)
+  const skip = (ln: string) =>
+    ln.length < 4                       // 太短，不成一句
+    || /^[#>*\-`|]/.test(ln)            // markdown 結構行
+    || /^[^：:]{1,14}[：:]\s*\S/.test(ln)  // 「專案根目錄：C:\…」這種設定行
+    || /^\*\*/.test(ln)
+  const first = lines.find((ln) => !skip(ln))
+  return first || lines[0] || raw
 }
 
 function patchLineTone(line: string): string {
@@ -691,7 +744,7 @@ export default function Console() {
                 </button>
               )}
               <button
-                className="rounded bg-emerald-600 px-3 py-1 text-xs font-medium text-white disabled:opacity-60 dark:disabled:opacity-40"
+                className="rounded bg-emerald-700 px-3 py-1 text-xs font-medium text-white disabled:opacity-60 dark:disabled:opacity-40"
                 disabled={!pending || running}
                 onClick={() => runAll(steps)}
               >
@@ -782,7 +835,7 @@ export default function Console() {
       <div className="rounded border border-line bg-panel p-3">
         <div className="mb-2 flex items-center gap-2">
           <button
-            className="text-xs font-medium tracking-widest text-mute"
+            className="rounded px-1 py-1 text-xs font-medium tracking-widest text-mute hover:bg-elev"
             onClick={() => setShowSched((v) => !v)}
           >
             {showSched ? '▾' : '▸'} {t('⏰ 定時工作')}
@@ -926,12 +979,12 @@ export default function Console() {
           <div className="ml-auto flex items-center gap-2">
             {sessionUsd > 0 && (
               <span className="text-[10px] text-mute2">
-                {t('本次累計 {amount}', { amount: formatUsd(sessionUsd) })}
+                {t('清單內累計 {amount}', { amount: formatUsd(sessionUsd) })}
               </span>
             )}
             {done.length > 0 && (
               <button
-                className="text-[10px] text-mute2 hover:text-ink3"
+                className="rounded px-1 py-1.5 text-[10px] text-mute2 hover:bg-elev hover:text-ink3"
                 onClick={() => setShowDone((v) => !v)}
               >
                 {showDone ? t('收起已結束（{n}）', { n: done.length }) : t('看已結束（{n}）', { n: done.length })}
@@ -1013,7 +1066,13 @@ export default function Console() {
                 <span className="w-14 flex-none font-medium" style={{ color: TOOL_COLOR[d.tool] ?? undefined }}>
                   {d.tool}
                 </span>
-                <span className="min-w-0 flex-1 truncate text-mute" title={d.task}>{d.task}</span>
+                <span className="min-w-0 flex-1 truncate text-mute" title={d.task}>{taskLabel(d)}</span>
+                {/* 何時派的。沒有這個的話，同一批派出去的幾件在畫面上長得一模一樣
+                    —— 工單開頭往往是同一段前置說明，truncate 之後完全分不出誰是誰。
+                    時間是最便宜也最有效的區別。 */}
+                <span className="flex-none text-[10px] text-mute3" title={startedAt(d.started)}>
+                  {startedAgo(d.started)}
+                </span>
                 {d.cost && (
                   <span className="flex-none text-[10px] text-mute2" title={d.cost.model}>
                     {formatUsd(d.cost.usd) && `${formatUsd(d.cost.usd)} · `}
@@ -1024,9 +1083,12 @@ export default function Console() {
                   {status.label}
                 </span>
               </button>
-              {d.outcome === 'error' && !isLive(d) && (
-                <div className="ml-6 mt-0.5 text-[10px] text-red-700 dark:text-red-300">
-                  {d.issue?.trim() || t('沒有提供錯誤原因')}
+              {(d.outcome === 'error' || d.outcome === 'blocked') && !isLive(d) && (
+                <div className={`ml-6 mt-0.5 text-[10px] ${d.outcome === 'blocked'
+                  ? 'text-sky-700 dark:text-sky-300' : 'text-red-700 dark:text-red-300'}`}>
+                  {d.issue?.trim() || (d.outcome === 'blocked'
+                    ? t('沒有說明是哪一條規範擋下的')
+                    : t('沒有提供錯誤原因'))}
                 </div>
               )}
               {stateOf(d) === 'running' && (
@@ -1041,7 +1103,10 @@ export default function Console() {
                   {t('已排隊 {n} 句，這一輪結束後送出', { n: d.pending.length })}
                 </div>
               )}
-              {!isLive(d) && (
+              {/* 只有工作目錄在 git 裡才給這顆按鈕。
+                  否則按十次有九次得到「這裡不是 git 專案」，
+                  使用者會學會不按它 —— 然後真的有改動的那一次也不會去看。 */}
+              {!isLive(d) && d.canDiff && (
                 <button
                   className="ml-6 text-[10px] text-mute2 hover:text-ink3"
                   aria-expanded={diffOpen}

@@ -922,7 +922,7 @@ export default function Adventure({ tools }: Props) {
             {([['hero', t('男')], ['heroine', t('女')]] as const).map(([look, label]) => (
               <button
                 key={look}
-                className={`rounded px-2 py-0.5 ${hero.look === look
+                className={`rounded px-2 py-1.5 ${hero.look === look
                   ? 'bg-ink text-invink' : 'border border-line2 text-mute hover:bg-elev'}`}
                 onClick={() => update((h) => { h.look = look })}
               >
@@ -946,7 +946,7 @@ export default function Adventure({ tools }: Props) {
               {ATTRS.map((a) => (
                 <button
                   key={a}
-                  className="rounded border border-line2 px-1.5 py-0.5 text-xs hover:bg-elev disabled:opacity-60 dark:disabled:opacity-40"
+                  className="rounded border border-line2 px-1.5 py-1 text-xs hover:bg-elev disabled:opacity-60 dark:disabled:opacity-40"
                   disabled={attrPts <= 0}
                   onClick={() => addAttr(a)}
                 >
@@ -972,7 +972,7 @@ export default function Adventure({ tools }: Props) {
           <div className="mt-2 flex items-center justify-between text-[10px] text-mute3">
             <span>{t('擊殺')} {hero.kills} · {t('陣亡')} {hero.deaths}</span>
             <button
-              className="hover:text-ink3"
+              className="rounded px-1.5 py-1 hover:bg-elev hover:text-ink3"
               onClick={() => {
                 if (confirm(t('重置角色與存檔？'))) {
                   // 重置時必須同步清空元件內的 party 狀態與 partyRef。
@@ -996,7 +996,7 @@ export default function Adventure({ tools }: Props) {
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <span className="text-xs font-medium tracking-widest text-mute">{t('⚔️ 戰鬥')}</span>
             <button
-              className={`rounded px-2 py-0.5 text-xs ${auto ? 'bg-emerald-600 text-white' : 'border border-line2 text-mute'}`}
+              className={`rounded px-2 py-1 text-xs ${auto ? 'bg-emerald-700 text-white' : 'border border-line2 text-mute'}`}
               onClick={() => setAuto((v) => !v)}
             >
               {auto ? t('沉浸自動') : t('手動操作')}
@@ -1211,13 +1211,13 @@ export default function Adventure({ tools }: Props) {
           <div className="mb-2 flex items-center gap-2">
             <span className="text-xs font-medium tracking-widest text-mute">{t('🤝 AI 夥伴')}</span>
             <button
-              className="ml-auto rounded border border-line2 px-2 py-0.5 text-[10px] text-mute hover:bg-elev"
+              className="ml-auto rounded border border-line2 px-2 py-1 text-[10px] text-mute hover:bg-elev"
               onClick={() => setParty(autoParty(4))}
             >
               {t('自動組隊')}
             </button>
             {party.length > 0 && (
-              <button className="rounded border border-line2 px-2 py-0.5 text-[10px] text-mute hover:bg-elev" onClick={() => setParty([])}>
+              <button className="rounded border border-line2 px-2 py-1 text-[10px] text-mute hover:bg-elev" onClick={() => setParty([])}>
                 {t('解散')}
               </button>
             )}
@@ -1309,7 +1309,7 @@ export default function Adventure({ tools }: Props) {
               className="rounded border border-amber-300 dark:border-amber-700/60 px-2.5 py-1 text-xs text-amber-700 dark:text-amber-200 hover:bg-amber-950/40 disabled:opacity-60 dark:disabled:opacity-40"
               onClick={() => enterDungeon(d.id)}
             >
-              🏰 {t(d.name)} <span className="text-amber-500/70">Lv.{d.minLevel}+ · {t('{n}人', { n: d.partySize })}</span>
+              🏰 {t(d.name)} <span className="text-amber-700 dark:text-amber-300">Lv.{d.minLevel}+ · {t('{n}人', { n: d.partySize })}</span>
             </button>
           ))}
         </div>

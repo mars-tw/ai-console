@@ -15,8 +15,15 @@ const KEY = 'ac_theme'
 const listeners = new Set<() => void>()
 
 function read(): Theme {
-  const v = localStorage.getItem(KEY)
-  return v === 'dark' || v === 'light' || v === 'system' ? v : 'system'
+  // 這一行在模組載入時就會跑。沒有防護的話，只要 localStorage 讀不到
+  //（無痕模式、被封鎖第三方儲存、或任何非瀏覽器環境）就是模組層級的例外，
+  // 整個 app 白畫面 —— 而使用者只是想選一個佈景主題。
+  try {
+    const v = localStorage.getItem(KEY)
+    return v === 'dark' || v === 'light' || v === 'system' ? v : 'system'
+  } catch {
+    return 'system'
+  }
 }
 
 let current: Theme = read()
@@ -74,19 +81,64 @@ export function useTheme(): Theme {
   )
 }
 
+/** sRGB 相對亮度（WCAG 2.x 的定義） */
+function relLum(rgb: number[]): number {
+  const f = (c: number) => {
+    const v = c / 255
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)
+  }
+  return 0.2126 * f(rgb[0]) + 0.7152 * f(rgb[1]) + 0.0722 * f(rgb[2])
+}
+
+function contrast(a: number[], b: number[]): number {
+  const l1 = relLum(a), l2 = relLum(b)
+  return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05)
+}
+
+/**
+ * 判定基準取「同一個主題裡對比最差的那塊底色」，不是最常見的那塊。
+ * 亮色是 --c-elev2（最深的一塊），深色是 --c-elev（最亮的一塊）。
+ * 拿平均值或最常見值來調，換個面板就又不合格了。
+ */
+const LIGHT_SURFACE = [228, 228, 231]
+const DARK_SURFACE = [39, 39, 42]
+/** WCAG AA 的一般文字門檻 */
+export const MIN_CONTRAST = 4.5
+
 /**
  * 把「為深底挑的顏色」調整成在目前主題下讀得清楚。
  *
  * 角色定位徽章、技能線標題、稀有度這些是資料驅動的十六進位色（不是 class），
- * 全部是照深底挑的亮色調。放到白底上會糊成一片，所以亮色主題下壓暗一階。
+ * 全部是照深底挑的亮色調。放到白底上會糊成一片。
  * 用計算而不是維護兩份色票 —— 兩份一定會有一份忘記更新。
+ *
+ * 為什麼不是固定乘一個係數：
+ *   上一版是「亮色主題下每個通道乘 0.62」。那是猜的，不是解出來的 ——
+ *   實測 #4ade80（治療／遠程）壓完只有 4.32、#fbbf24（信仰／輔助）4.19，
+ *   兩個都還在 AA 的 4.5 底下。固定係數對深色也完全不作用，
+ *   於是深底上偏暗的顏色一樣沒人管。
+ *
+ * 現在改成二分找「剛好跨過門檻」的那一點：往安全的方向（亮色壓暗、
+ * 深色提亮）混，一過門檻就停。不一路壓到黑是因為顏色本身也是資訊 ——
+ * 職業、稀有度、定位都靠它區分，壓成一團黑等於把那個資訊刪掉。
  */
-export function readable(hex: string, dark: boolean): string {
-  if (dark || !/^#[0-9a-f]{6}$/i.test(hex)) return hex
+export function readable(hex: string, dark: boolean, min: number = MIN_CONTRAST): string {
+  if (!/^#[0-9a-f]{6}$/i.test(hex)) return hex
   const v = parseInt(hex.slice(1), 16)
-  const mix = (c: number) => Math.round(c * 0.62)
-  return '#' + [(v >> 16) & 255, (v >> 8) & 255, v & 255]
-    .map((c) => mix(c).toString(16).padStart(2, '0')).join('')
+  const rgb = [(v >> 16) & 255, (v >> 8) & 255, v & 255]
+  const bg = dark ? DARK_SURFACE : LIGHT_SURFACE
+  if (contrast(rgb, bg) >= min) return hex
+
+  // 深色主題往白色混、亮色主題往黑色混：兩邊都是「離底色更遠」的方向
+  const target = dark ? 255 : 0
+  const mixed = (k: number) => rgb.map((c) => Math.round(c + (target - c) * k))
+  let lo = 0, hi = 1
+  for (let i = 0; i < 12; i++) {
+    const mid = (lo + hi) / 2
+    if (contrast(mixed(mid), bg) >= min) hi = mid
+    else lo = mid
+  }
+  return '#' + mixed(hi).map((c) => c.toString(16).padStart(2, '0')).join('')
 }
 
 /** 元件裡直接用：主題一換就會重繪 */

@@ -14,16 +14,16 @@ const normalize = (d: IndexData): IndexData => {
 
 const STATUS_DOT: Record<string, string> = {
   active: 'bg-emerald-500',
-  idle: 'bg-zinc-400',
+  idle: 'bg-mute',
   rate_limited: 'bg-red-500',
-  unknown: 'bg-zinc-300',
+  unknown: 'bg-elev2',
 }
 const STATUS_LABEL: Record<string, string> = { active: '活躍', idle: '閒置', rate_limited: '限流中', unknown: '未知' }
 const PROJ_BADGE: Record<string, { label: string; cls: string }> = {
   active: { label: '進行中', cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300' },
   blocked: { label: '阻塞', cls: 'bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300' },
   waiting: { label: '等待中', cls: 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' },
-  done: { label: '完成', cls: 'bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400' },
+  done: { label: '完成', cls: 'bg-elev text-mute2' },
 }
 
 const WEEK_MS = 7 * 86400 * 1000
@@ -150,6 +150,25 @@ export default function Home() {
   const msgBoxRef = useRef<HTMLDivElement>(null)
   const [awayFromEnd, setAwayFromEnd] = useState(false)
   const [viewMode, setViewMode] = useState<'list' | 'console' | 'office' | 'rpg'>('list')
+  /**
+   * 側欄開合。
+   *
+   * 在「📋 對話」以外的分頁預設收起來 —— 那三個分頁跟對話清單沒有關係，
+   * 但側欄照樣佔走 320px（1440 寬的視窗有 22%）。
+   * 記在 localStorage：使用者在主控台把它拉回來過一次，
+   * 下次就不該再幫他收起來，那會變成跟他作對。
+   */
+  const [sidebarPref, setSidebarPref] = useState<Record<string, boolean>>(() => {
+    try { return JSON.parse(localStorage.getItem('ac_sidebar') || '{}') } catch { return {} }
+  })
+  const sidebarOpen = sidebarPref[viewMode] ?? (viewMode === 'list')
+  const setSidebarOpen = (v: boolean) => {
+    setSidebarPref((s) => {
+      const next = { ...s, [viewMode]: v }
+      try { localStorage.setItem('ac_sidebar', JSON.stringify(next)) } catch { /* 存不了不影響使用 */ }
+      return next
+    })
+  }
   // 只顯示最近幾天有活動的資料夾。142 個資料夾裡今天只用過 25 個，
   // 全部列出來等於什麼都找不到。0 = 不限。
   const [activeDays, setActiveDays] = useState(() => Number(localStorage.getItem('ac_activeDays') ?? 7))
@@ -594,14 +613,14 @@ export default function Home() {
    * 但那三個分頁根本不需要索引。
    */
   const tabs = (
-    <div className="flex flex-none items-center gap-1 border-b border-zinc-200 px-3 py-1.5 dark:border-zinc-800">
+    <div className="flex flex-none items-center gap-1 border-b border-line px-3 py-1.5">
       {([
         ['list', t('📋 對話')], ['console', t('🎙️ 主控台')],
         ['office', t('🎮 辦公室')], ['rpg', t('⚔️ 冒險')],
       ] as const).map(([m, label]) => (
         <button
           key={m}
-          className={`rounded-md px-3 py-1 text-xs ${viewMode === m ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900' : 'text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800'}`}
+          className={`rounded-md px-3 py-1 text-xs ${viewMode === m ? 'bg-ink text-invink' : 'text-mute2 hover:bg-elev'}`}
           onClick={() => setViewMode(m)}
         >
           {label}
@@ -612,7 +631,7 @@ export default function Home() {
   )
 
   if (!index) return (
-    <div className="flex h-screen flex-col bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
+    <div className="flex h-screen flex-col bg-panel text-ink">
       <main className="flex min-w-0 flex-1 flex-col">
         {tabs}
         {viewMode === 'console' ? (
@@ -627,9 +646,9 @@ export default function Home() {
               {error ? (
                 <>
                   <p role="alert" className="mb-2 text-sm text-red-600">{t('索引載入失敗：{err}', { err: error })}</p>
-                  <p className="mb-4 text-xs text-zinc-500">{t('第一次使用要先掃描一次，才會有對話清單。其他三個分頁不需要索引，現在就能用。')}</p>
+                  <p className="mb-4 text-xs text-mute2">{t('第一次使用要先掃描一次，才會有對話清單。其他三個分頁不需要索引，現在就能用。')}</p>
                   <button
-                    className="rounded-md border border-zinc-300 px-4 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-40 dark:border-zinc-700 dark:hover:bg-zinc-900"
+                    className="rounded-md border border-line2 px-4 py-1.5 text-sm hover:bg-elev disabled:opacity-40"
                     disabled={busy === 'refresh'}
                     onClick={refresh}
                   >
@@ -637,7 +656,7 @@ export default function Home() {
                   </button>
                 </>
               ) : (
-                <p role="status" aria-live="polite" className="text-sm text-zinc-500">{t('正在掃描全部 AI 對話…')}</p>
+                <p role="status" aria-live="polite" className="text-sm text-mute2">{t('正在掃描全部 AI 對話…')}</p>
               )}
             </div>
           </div>
@@ -647,18 +666,36 @@ export default function Home() {
   )
 
   return (
-    <div className="flex h-screen flex-col bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
+    <div className="flex h-screen flex-col bg-panel text-ink">
       <div className="flex min-h-0 flex-1">
-        {/* ── 側欄 ─────────────────────────── */}
-        <aside className="flex w-80 flex-none flex-col border-r border-zinc-200 dark:border-zinc-800">
-          <div className="border-b border-zinc-200 p-3 dark:border-zinc-800">
-            <div className="mb-2 flex items-baseline justify-between">
+        {/* ── 側欄 ───────────────────────────
+            在「📋 對話」以外的分頁預設收起來。
+            那三個分頁跟對話清單沒有關係，但側欄照樣佔走 320px ——
+            1440 寬的視窗有 22% 給了一個當下用不到的清單，
+            像素辦公室的畫布因此只有 1105 寬（收起來是 1425）。
+            不是直接拿掉，是收起來：從主控台按「▶ 派工」接續某個資料夾
+            仍然是真實用法，留一顆細長的把手可以隨時拉回來。 */}
+        {sidebarOpen && (
+        <aside className="flex w-80 flex-none flex-col border-r border-line">
+          <div className="border-b border-line p-3">
+            <div className="mb-2 flex items-baseline justify-between gap-2">
               <h1 className="text-lg font-medium">{t('AI 控制台')}</h1>
-              <span className="text-xs text-zinc-400">{t('{time}更新', { time: relTime(index.generated_at) })}</span>
+              <span className="min-w-0 flex-1 truncate text-right text-xs text-mute3">
+                {t('{time}更新', { time: relTime(index.generated_at) })}
+              </span>
+              <button
+                className="flex-none rounded px-1.5 py-1 text-xs leading-none text-mute3 hover:bg-elev hover:text-ink3"
+                style={{ minWidth: 24, minHeight: 24 }}
+                onClick={() => setSidebarOpen(false)}
+                title={t('收起對話清單')}
+                aria-label={t('收起對話清單')}
+              >
+                ‹
+              </button>
             </div>
             <div className="mb-2 flex items-center gap-2">
               <button
-                className="rounded-md border border-zinc-200 px-3 py-1 text-xs hover:bg-zinc-50 disabled:opacity-40 dark:border-zinc-700 dark:hover:bg-zinc-900"
+                className="rounded-md border border-line px-3 py-1 text-xs hover:bg-elev disabled:opacity-40"
                 disabled={!apiOk || busy === 'refresh'}
                 onClick={refresh}
                 title={apiOk ? t('重新掃描全部工具的對話') : t('控制 API 未啟動（npm run dev 會同時啟動）')}
@@ -668,7 +705,7 @@ export default function Home() {
               {!apiOk && <span role="status" className="text-xs text-amber-600">{t('控制 API 離線（檢視模式）')}</span>}
             </div>
             <input
-              className="w-full rounded-md border border-zinc-200 bg-transparent px-3 py-1.5 text-sm outline-none focus:border-zinc-400 dark:border-zinc-700"
+              className="w-full rounded-md border border-line bg-transparent px-3 py-1.5 text-sm outline-none focus:border-line3"
               placeholder={t('搜尋全部對話…')}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -677,8 +714,8 @@ export default function Home() {
               <button
                 className={`mt-2 flex w-full items-center gap-2 rounded-md px-2 py-1 text-xs ${
                   showTrash
-                    ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900'
-                    : 'text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                    ? 'bg-ink text-invink'
+                    : 'text-mute2 hover:bg-elev'
                 }`}
                 onClick={() => setShowTrash((v) => !v)}
                 title={t('這些對話只是收起來，檔案完全沒有動。點「留著」可以單筆放回主清單')}
@@ -687,34 +724,34 @@ export default function Home() {
               </button>
             )}
             {showTrash && (
-              <div className="mt-1 rounded bg-zinc-100 px-2 py-1 text-[10px] leading-relaxed text-zinc-500 dark:bg-zinc-900">
+              <div className="mt-1 rounded bg-elev px-2 py-1 text-[10px] leading-relaxed text-mute2">
                 {t('收起來的原因：不是目前在用的工具、太久沒動過，或在原本的工具裡已經封存。檔案都還在，沒有刪除。')}
               </div>
             )}
-            <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs text-zinc-500">
+            <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs text-mute2">
               <input type="checkbox" checked={showSubagent} onChange={(e) => setShowSubagent(e.target.checked)} />
               {t('顯示子代理對話（{n} 份）', { n: index.stats.subagent })}
             </label>
-            <label className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-zinc-500">
+            <label className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-mute2">
               <input type="checkbox" checked={showDup} onChange={(e) => setShowDup(e.target.checked)} />
               {t('顯示重複副本（{dup} 份，去重後 {uniq} 份正本）', { dup: index.stats.duplicates ?? 0, uniq: index.stats.unique ?? index.stats.total })}
             </label>
-            <label className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-zinc-500">
+            <label className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-mute2">
               <input type="checkbox" checked={showOld} onChange={(e) => setShowOld(e.target.checked)} />
               {t('顯示一週未使用的舊對話（已收納 {n} 份）', { n: oldCount })}
             </label>
             <label
-              className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-zinc-500"
+              className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-mute2"
               title={t('機器跑的 agent 迴圈標題都是英文的指令輸出，怎麼列規則都追不完；你自己開的對話都有中文')}
             >
               <input type="checkbox" checked={onlyCJK} onChange={(e) => setOnlyCJK(e.target.checked)} />
               {t('只顯示有中文的對話')}
             </label>
-            <label className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-zinc-500">
+            <label className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-mute2">
               <input type="checkbox" checked={showDispatch} onChange={(e) => setShowDispatch(e.target.checked)} />
               {t('顯示 AI 派工對話（已隱藏 {n} 份 worker 紀錄）', { n: index.stats.dispatch ?? 0 })}
             </label>
-            <label className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500">
+            <label className="mt-1 flex items-center gap-1.5 text-xs text-mute2">
               {t('只看最近')}
               <select
                 className="rounded border border-line2 bg-panel px-1 py-0.5 text-xs text-ink2 [&>option]:bg-panel [&>option]:text-ink2"
@@ -732,9 +769,9 @@ export default function Home() {
           <div className="min-h-0 flex-1 overflow-y-auto">
             {groups.length === 0 && (
               // 過濾條件太緊時整個側欄會是空的，沒有提示的話看起來就像程式壞了
-              <div role="status" aria-live="polite" className="px-3 py-6 text-center text-xs text-zinc-400">
+              <div role="status" aria-live="polite" className="px-3 py-6 text-center text-xs text-mute3">
                 <div>{search.trim() ? t('找不到符合的對話') : t('目前的過濾條件下沒有東西')}</div>
-                <div className="mt-1 text-zinc-500">
+                <div className="mt-1 text-mute2">
                   {t('索引裡共有 {n} 份對話', { n: index.conversations.length })}
                 </div>
                 {/* 「只顯示有中文的對話」是預設開啟的，而它正是最容易把清單清空的那一個。
@@ -746,7 +783,7 @@ export default function Home() {
                       {t('已套用「只顯示有中文的對話」過濾')}
                     </div>
                     <button
-                      className="mt-1 rounded border border-zinc-300 px-2 py-0.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                      className="mt-1 rounded border border-line2 px-2 py-0.5 hover:bg-elev"
                       onClick={() => setOnlyCJK(false)}
                     >
                       {t('關掉這個過濾')}
@@ -754,7 +791,7 @@ export default function Home() {
                   </div>
                 )}
                 <button
-                  className="mt-3 rounded border border-zinc-300 px-3 py-1 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                  className="mt-3 rounded border border-line2 px-3 py-1 hover:bg-elev"
                   onClick={() => {
                     setActiveDays(0); setShowOld(true); setShowSubagent(true)
                     setShowDup(true); setShowDispatch(true); setSearch('')
@@ -779,33 +816,37 @@ export default function Home() {
               const shown = search.trim() ? convs : (showAll[dir] ? convs : convs.slice(0, 40))
               const badge = hub ? PROJ_BADGE[hub.status] : null
               return (
-                <div key={dir} className="border-b border-zinc-100 dark:border-zinc-900">
+                <div key={dir} className="border-b border-line">
                   {/* 外層是 div，不是 button。
                       原本折疊鈕是 <button>，裡面又塞一個 <span role="button">（▶ 派工）——
                       HTML 不准按鈕巢狀，而且那個 span 沒有 tabIndex 也沒有鍵盤處理，
                       用鍵盤操作的人永遠 Tab 不到「派工」。
                       改成兩顆並排的原生 <button>，Tab 與 Enter/Space 就自動正確。 */}
-                  <div className="flex w-full items-center gap-2 px-3 py-2 hover:bg-zinc-50 dark:hover:bg-zinc-900">
+                  {/* 內距放在按鈕上，不是外層的 div。
+                      放在 div 上的話那一列看起來有 36px 高，但真正可以按的區域
+                      只有文字本身的 20px —— 上下各 8px 是死的。
+                      WCAG 2.2 的目標尺寸下限是 24×24，用觸控板或手抖的人會一直按空。 */}
+                  <div className="flex w-full items-center gap-2 px-3 hover:bg-elev">
                     <button
-                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                      className="flex min-w-0 flex-1 items-center gap-2 py-2 text-left"
                       onClick={() => setOpenGroups((s) => ({ ...s, [dir]: !open }))}
                       aria-expanded={open}
                       title={dir}
                     >
-                      <span className="text-xs text-zinc-400">{open ? '▾' : '▸'}</span>
+                      <span className="text-xs text-mute3">{open ? '▾' : '▸'}</span>
                       <span className="min-w-0 flex-1 truncate text-sm font-medium">📁 {folderName(dir)}</span>
                       {line !== 'other' && (
-                        <span className="flex-none rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                        <span className="flex-none rounded-full bg-elev px-2 py-0.5 text-xs text-mute2">
                           {index.projectTitles[line] || line}
                         </span>
                       )}
                       {badge && <span className={`flex-none rounded-full px-2 py-0.5 text-xs ${badge.cls}`}>{badge.label}</span>}
                       {hub?.needs_handoff && <span className="flex-none rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-950 dark:text-amber-300">{t('待接力')}</span>}
-                      <span className="flex-none text-xs text-zinc-400">{convs.length}</span>
+                      <span className="flex-none text-xs text-mute3">{convs.length}</span>
                     </button>
                     {apiOk && convs.some((c) => c.resume) && (
                       <button
-                        className="flex-none rounded border border-zinc-200 px-1.5 py-0.5 text-xs hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                        className="flex-none rounded border border-line px-1.5 py-1 text-xs hover:bg-elev"
                         title={t('派工：接續此資料夾最新的對話')}
                         onClick={() => {
                           const target = convs.find((c) => c.resume)
@@ -817,7 +858,7 @@ export default function Home() {
                     )}
                   </div>
                   {open && hub?.next_step && (
-                    <div className="mx-3 mb-2 rounded-md bg-zinc-50 px-2 py-1.5 text-xs text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
+                    <div className="mx-3 mb-2 rounded-md bg-elev px-2 py-1.5 text-xs text-mute2">
                       {t('下一步：')}{hub.next_step}
                     </div>
                   )}
@@ -826,7 +867,7 @@ export default function Home() {
                     // 按鈕不能巢狀在按鈕裡
                     <div
                       key={c.id}
-                      className={`group flex w-full items-start gap-1 px-3 py-1.5 pl-7 hover:bg-zinc-50 dark:hover:bg-zinc-900 ${selected?.id === c.id ? 'bg-zinc-100 dark:bg-zinc-800' : ''}`}
+                      className={`group flex w-full items-start gap-1 px-3 py-1.5 pl-7 hover:bg-elev ${selected?.id === c.id ? 'bg-elev' : ''}`}
                     >
                       <button
                         onClick={() => selectConversation(c.id)}
@@ -834,10 +875,10 @@ export default function Home() {
                       >
                         <span className="truncate text-sm">
                           {c.title}
-                          {c.dup && <span className="ml-1 rounded bg-zinc-100 px-1 text-xs text-zinc-400 dark:bg-zinc-800">{t('副本')}→{c.dupOfTool}</span>}
-                          {!!c.dupCount && <span className="ml-1 rounded bg-zinc-100 px-1 text-xs text-zinc-400 dark:bg-zinc-800">+{t('{n} 副本', { n: c.dupCount })}</span>}
+                          {c.dup && <span className="ml-1 rounded bg-elev px-1 text-xs text-mute3">{t('副本')}→{c.dupOfTool}</span>}
+                          {!!c.dupCount && <span className="ml-1 rounded bg-elev px-1 text-xs text-mute3">+{t('{n} 副本', { n: c.dupCount })}</span>}
                         </span>
-                        <span className="flex items-center gap-2 text-xs text-zinc-400">
+                        <span className="flex items-center gap-2 text-xs text-mute3">
                           <span className={`inline-block h-1.5 w-1.5 rounded-full ${(liveTools ?? index.tools)[c.tool]?.rate_limited ? 'bg-red-500' : 'bg-emerald-500'}`} />
                           {c.toolLabel} · {relTime(c.mtime)} · {fmtSize(c.size)}
                           {c.msgCount > 0 && ` · ${t('{n} 則', { n: c.msgCount })}`}
@@ -854,7 +895,7 @@ export default function Home() {
                       )}
                       {apiOk && (
                         <button
-                          className="flex-none rounded px-1 text-xs text-zinc-300 opacity-0 hover:text-red-500 focus-visible:text-red-500 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 dark:text-zinc-600"
+                          className="flex-none rounded px-1 text-xs text-mute3 opacity-0 hover:text-red-500 focus-visible:text-red-500 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
                           title={t('移到回收區')}
                           onClick={(e) => { e.stopPropagation(); void removeConv(c) }}
                         >
@@ -864,7 +905,7 @@ export default function Home() {
                     </div>
                   ))}
                   {open && !search.trim() && convs.length > 40 && !showAll[dir] && (
-                    <button className="w-full px-3 py-1.5 text-left text-xs text-zinc-400 hover:text-zinc-600" onClick={() => setShowAll((s) => ({ ...s, [dir]: true }))}>
+                    <button className="w-full px-3 py-1.5 text-left text-xs text-mute3 hover:text-ink3" onClick={() => setShowAll((s) => ({ ...s, [dir]: true }))}>
                       {t('顯示全部 {n} 筆…', { n: convs.length })}
                     </button>
                   )}
@@ -873,6 +914,20 @@ export default function Home() {
             })}
           </div>
         </aside>
+        )}
+
+        {/* 收起來時留一條可以拉回去的把手。
+            完全沒有把手的話，切到主控台再切回來會找不到清單去哪了。 */}
+        {!sidebarOpen && (
+          <button
+            className="flex w-7 flex-none items-center justify-center border-r border-line text-mute3 hover:bg-elev hover:text-ink3"
+            onClick={() => setSidebarOpen(true)}
+            title={t('展開對話清單')}
+            aria-label={t('展開對話清單')}
+          >
+            ›
+          </button>
+        )}
 
         {/* ── 主內容 ─────────────────────────── */}
         {/* relative 是給「⬇ 最新」浮動鈕定位用的。放在捲動容器裡面的話
@@ -892,7 +947,7 @@ export default function Home() {
           ) : viewMode === 'rpg' ? (
             <Adventure tools={liveTools ?? index.tools} />
           ) : !selected ? (
-            <div className="flex flex-1 items-center justify-center text-zinc-400">
+            <div className="flex flex-1 items-center justify-center text-mute3">
               <div className="text-center">
                 <p className="mb-2 text-lg">{t('從左側選一個對話')}</p>
                 <p className="text-sm">{t('共 {n} 份正本對話 · {tools} 個工具 · {groups} 個專案資料夾', { n: index.stats.unique ?? index.stats.total, tools: Object.keys(index.tools).length, groups: groups.length })}</p>
@@ -900,17 +955,17 @@ export default function Home() {
             </div>
           ) : (
             <>
-              <header className="flex-none border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
+              <header className="flex-none border-b border-line px-5 py-3">
                 <div className="mb-1 flex items-center gap-3">
                   <h2 className="min-w-0 flex-1 truncate text-base font-medium">{selected.title}</h2>
-                  <span className="flex-none rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{selected.toolLabel}</span>
+                  <span className="flex-none rounded-full bg-elev px-2 py-0.5 text-xs text-mute2">{selected.toolLabel}</span>
                 </div>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-400">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-mute3">
                   <span>{relTime(selected.mtime)}</span>
                   <span className="max-w-[40%] truncate" title={selected.path}>{selected.path}</span>
                   {apiOk && selected.resume && (
                     <button
-                      className="rounded bg-zinc-900 px-2 py-0.5 text-white hover:bg-zinc-700 disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+                      className="rounded bg-ink px-2 py-0.5 text-invink hover:bg-ink2 disabled:opacity-40"
                       disabled={busy === selected.id}
                       onClick={() => launch(selected)}
                     >
@@ -918,11 +973,11 @@ export default function Home() {
                     </button>
                   )}
                   {selected.resume && (
-                    <button className="rounded border border-zinc-200 px-2 py-0.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" onClick={() => copy(selected.resume, 'resume')}>
+                    <button className="rounded border border-line px-2 py-1 hover:bg-elev" onClick={() => copy(selected.resume, 'resume')}>
                       {copied === 'resume' ? t('已複製 ✓') : t('複製接續指令：{cmd}', { cmd: selected.resume })}
                     </button>
                   )}
-                  <button className="rounded border border-zinc-200 px-2 py-0.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" onClick={() => copy(selected.path, 'path')}>
+                  <button className="rounded border border-line px-2 py-1 hover:bg-elev" onClick={() => copy(selected.path, 'path')}>
                     {copied === 'path' ? '已複製 ✓' : '複製檔案路徑'}
                   </button>
                 </div>
@@ -934,19 +989,19 @@ export default function Home() {
                 onScroll={onMsgScroll}
               >
                 {!selected.hasMessages ? (
-                  <p className="text-zinc-400">此對話檔較大（{fmtSize(selected.size)}），未匯出訊息內容；可用接續指令回原工具查看。</p>
+                  <p className="text-mute3">此對話檔較大（{fmtSize(selected.size)}），未匯出訊息內容；可用接續指令回原工具查看。</p>
                 ) : detailLoading ? (
-                  <p role="status" aria-live="polite" className="text-zinc-400">{t('載入訊息中…')}</p>
+                  <p role="status" aria-live="polite" className="text-mute3">{t('載入訊息中…')}</p>
                 ) : detail ? (
                   <div className="mx-auto flex max-w-3xl flex-col gap-3">
                     {detail.messages.map((m, i) => (
-                      <div key={i} className={`rounded-lg px-4 py-3 text-sm leading-6 ${m.role === 'user' ? 'ml-12 bg-zinc-100 dark:bg-zinc-800' : 'mr-12 border border-zinc-200 dark:border-zinc-800'}`}>
-                        <div className="mb-1 text-xs text-zinc-400">{m.role === 'user' ? '你' : selected.toolLabel}{m.ts ? ` · ${new Date(m.ts).toLocaleString('zh-TW')}` : ''}</div>
+                      <div key={i} className={`rounded-lg px-4 py-3 text-sm leading-6 ${m.role === 'user' ? 'ml-12 bg-elev' : 'mr-12 border border-line'}`}>
+                        <div className="mb-1 text-xs text-mute3">{m.role === 'user' ? '你' : selected.toolLabel}{m.ts ? ` · ${new Date(m.ts).toLocaleString('zh-TW')}` : ''}</div>
                         <div className="whitespace-pre-wrap break-words">{m.text}</div>
                       </div>
                     ))}
                     {detailTailState === 'latest' ? (
-                      <p role="status" className="text-center text-xs text-zinc-400">
+                      <p role="status" className="text-center text-xs text-mute3">
                         {t('已顯示真正最新的 {n} 則訊息；更早內容仍可回原工具查看。', { n: detail.messages.length })}
                       </p>
                     ) : detailTailState === 'fallback' ? (
@@ -956,13 +1011,13 @@ export default function Home() {
                           : t('最新訊息載入失敗：{err}。目前顯示索引匯出的前段；可複製上方檔案路徑回原工具查看。', { err: detailTailError })}
                       </p>
                     ) : detail.truncated ? (
-                      <p className="text-center text-xs text-zinc-400">
+                      <p className="text-center text-xs text-mute3">
                         {t('（訊息過多，目前顯示索引匯出的前段）')}
                       </p>
                     ) : null}
                   </div>
                 ) : (
-                  <p className="text-zinc-400">找不到匯出的訊息檔。</p>
+                  <p className="text-mute3">找不到匯出的訊息檔。</p>
                 )}
 
               </div>
@@ -971,7 +1026,7 @@ export default function Home() {
                   它會一直蓋住最後一則訊息的右下角。 */}
               {awayFromEnd && (
                 <button
-                  className="absolute bottom-24 right-6 z-10 rounded-full border border-zinc-300 bg-white px-3 py-1.5 text-xs shadow-lg hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+                  className="absolute bottom-24 right-6 z-10 rounded-full border border-line2 bg-white px-3 py-1.5 text-xs shadow-lg hover:bg-elev"
                   onClick={() => scrollMsgsToEnd('smooth')}
                 >
                   {t('⬇ 最新')}
@@ -981,7 +1036,7 @@ export default function Home() {
               {/* 續聊區釘在捲動容器外面。放在裡面的話，對話一長就得
                   捲到最底才碰得到輸入框 —— 而「想接續聊」正是打開一份
                   對話最常見的目的，不該是最難到達的動作。 */}
-              <div className="flex-none border-t border-zinc-200 bg-app dark:border-zinc-800">
+              <div className="flex-none border-t border-line bg-app">
                 {/* ── 地端續聊 ── */}
                 {apiOk && (
                   <div className="mx-auto w-full max-w-3xl px-5 pb-4 pt-3">
@@ -996,14 +1051,14 @@ export default function Home() {
                         {models.map((m) => <option key={m} value={m}>{m}</option>)}
                       </select>
                       {chatMsgs.length === 0 && detail?.messages?.length ? (
-                        <button className="rounded-md border border-zinc-200 px-2 py-1 text-xs hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" onClick={seedChat}>
+                        <button className="rounded-md border border-line px-2 py-1 text-xs hover:bg-elev" onClick={seedChat}>
                           載入近期訊息當上下文
                         </button>
                       ) : chatMsgs.length > 0 && (
-                        <span className="text-xs text-zinc-400">上下文 {chatMsgs.length} 則</span>
+                        <span className="text-xs text-mute3">上下文 {chatMsgs.length} 則</span>
                       )}
                       {chatMsgs.length > 0 && (
-                        <button className="rounded px-2 py-1 text-xs text-zinc-400 hover:text-zinc-600" onClick={() => { setChatMsgs([]); if (selected) localStorage.removeItem('ac_chat_' + selected.id) }}>
+                        <button className="rounded px-2 py-1 text-xs text-mute3 hover:text-ink3" onClick={() => { setChatMsgs([]); if (selected) localStorage.removeItem('ac_chat_' + selected.id) }}>
                           清空
                         </button>
                       )}
@@ -1016,16 +1071,16 @@ export default function Home() {
                         aria-relevant="additions text"
                         aria-busy={chatBusy}
                         aria-label={t('地端續聊訊息')}
-                        className="mb-2 flex max-h-64 flex-col gap-2 overflow-y-auto rounded-md bg-zinc-50 p-3 dark:bg-zinc-900"
+                        className="mb-2 flex max-h-64 flex-col gap-2 overflow-y-auto rounded-md bg-elev p-3"
                       >
                         {chatMsgs.map((m, i) => (
-                          <div key={i} className={`rounded-lg px-3 py-2 text-sm ${m.role === 'user' ? 'ml-10 bg-white dark:bg-zinc-800' : 'mr-10 border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-950'}`}>
-                            <div className="mb-0.5 text-xs text-zinc-400">{m.role === 'user' ? '你' : (chatModel === 'auto' ? (routedModel || '自動') : chatModel)}</div>
+                          <div key={i} className={`rounded-lg px-3 py-2 text-sm ${m.role === 'user' ? 'ml-10 bg-white' : 'mr-10 border border-line bg-white'}`}>
+                            <div className="mb-0.5 text-xs text-mute3">{m.role === 'user' ? '你' : (chatModel === 'auto' ? (routedModel || '自動') : chatModel)}</div>
                             <div className="whitespace-pre-wrap break-words">{m.text}</div>
                           </div>
                         ))}
                         {chatBusy && (
-                          <div className="flex items-center gap-2 text-xs text-zinc-400">
+                          <div className="flex items-center gap-2 text-xs text-mute3">
                             {/* role=log 會在這一列加入時宣告一次；每秒變動的視覺計時
                                 對讀屏器隱藏，避免整段推論期間每秒重複播報。 */}
                             <span className="sr-only">{t('地端模型開始處理這次訊息')}</span>
@@ -1034,7 +1089,7 @@ export default function Home() {
                                 太早給取消鈕反而像在暗示「它大概壞了」。 */}
                             {chatSecs >= 15 && (
                               <button
-                                className="rounded border border-zinc-300 px-1.5 py-0.5 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                                className="rounded border border-line2 px-1.5 py-0.5 hover:bg-elev"
                                 onClick={() => chatAbort.current?.abort()}
                               >
                                 {t('不等了')}
@@ -1046,14 +1101,14 @@ export default function Home() {
                     )}
                     <div className="flex gap-2">
                       <textarea
-                        className="min-h-10 flex-1 rounded-md border border-zinc-200 bg-transparent px-3 py-2 text-sm outline-none focus:border-zinc-400 dark:border-zinc-700"
+                        className="min-h-10 flex-1 rounded-md border border-line bg-transparent px-3 py-2 text-sm outline-none focus:border-line3"
                         placeholder={chatMsgs.length ? '繼續這段對話…' : '直接輸入會自動帶入近期訊息當上下文'}
                         value={chatInput}
                         onChange={(e) => setChatInput(e.target.value)}
                         onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat() } }}
                       />
                       <button
-                        className="self-end rounded-md bg-zinc-900 px-4 py-2 text-sm text-white hover:bg-zinc-700 disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+                        className="self-end rounded-md bg-ink px-4 py-2 text-sm text-invink hover:bg-ink2 disabled:opacity-40"
                         disabled={chatBusy || !chatModel}
                         onClick={sendChat}
                       >
@@ -1070,19 +1125,19 @@ export default function Home() {
 
       {/* ── 底部額度狀態列 ─────────────────────── */}
       {toast && (
-        <div role="status" aria-live="polite" aria-atomic="true" className="fixed bottom-10 left-1/2 z-10 -translate-x-1/2 rounded-lg bg-zinc-900 px-4 py-2 text-sm text-white shadow-lg dark:bg-zinc-100 dark:text-zinc-900">
+        <div role="status" aria-live="polite" aria-atomic="true" className="fixed bottom-10 left-1/2 z-10 -translate-x-1/2 rounded-lg bg-ink px-4 py-2 text-sm text-invink shadow-lg">
           {toast}
         </div>
       )}
-      <footer className="flex flex-none items-center gap-4 overflow-x-auto border-t border-zinc-200 px-4 py-1.5 text-xs dark:border-zinc-800">
+      <footer className="flex flex-none items-center gap-4 overflow-x-auto border-t border-line px-4 py-1.5 text-xs">
         {Object.entries(liveTools ?? index.tools).map(([key, tool]) => (
           <span key={key} className="flex flex-none items-center gap-1.5" title={tool.evidence || tool.role}>
             <span className={`inline-block h-2 w-2 rounded-full ${STATUS_DOT[tool.status] || STATUS_DOT.unknown}`} />
-            <span className="text-zinc-600 dark:text-zinc-300">{tool.label}</span>
-            <span className="text-zinc-400">{t(STATUS_LABEL[tool.status] || tool.status)}</span>
+            <span className="text-ink3">{tool.label}</span>
+            <span className="text-mute3">{t(STATUS_LABEL[tool.status] || tool.status)}</span>
           </span>
         ))}
-        <span className="ml-auto flex-none text-zinc-400">{liveTools ? t('即時狀態 · ') : ''}{t('ai-hub 每 15 分鐘自動掃描')}</span>
+        <span className="ml-auto flex-none text-mute3">{liveTools ? t('即時狀態 · ') : ''}{t('ai-hub 每 15 分鐘自動掃描')}</span>
       </footer>
     </div>
   )

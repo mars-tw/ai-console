@@ -37,7 +37,7 @@ export function look(s: DispatchState): Look {
     case 'failed':
       return { label: t('失敗'), dot: 'bg-red-500', tone: 'text-red-300' }
     case 'silent':
-      return { label: t('沒有輸出'), dot: 'bg-zinc-500', tone: 'text-zinc-500' }
+      return { label: t('沒有輸出'), dot: 'bg-mute2', tone: 'text-mute2' }
     default:
       return { label: t('完成'), dot: 'bg-emerald-500', tone: 'text-emerald-400/80' }
   }

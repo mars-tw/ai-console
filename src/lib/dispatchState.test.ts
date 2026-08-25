@@ -208,11 +208,17 @@ describe('look 狀態外觀與色彩對應', () => {
     expect(l.tone).toContain('text-red-300')
   })
 
-  it('silent：顯示「沒有輸出」且使用鋅灰色', () => {
+  it('silent：顯示「沒有輸出」且用語意色票的次要灰', () => {
+    // 原本這裡釘的是 bg-zinc-500 / text-zinc-500。
+    // 那個寫死的灰在深色底只有 4.12:1、亮色底 4.40:1，兩邊都低於 WCAG AA，
+    // 已經整批換成語意色票（色票有深淺兩組值，各自量過對比）。
+    // 測試改成釘「用的是色票」而不是釘某一個 Tailwind 色階 ——
+    // 釘色階等於把「這個灰有多灰」寫死成規格，下次調對比又會假性失敗。
     const l = look('silent')
     expect(l.label).toBe('沒有輸出')
-    expect(l.dot).toContain('bg-zinc-500')
-    expect(l.tone).toContain('text-zinc-500')
+    expect(l.dot).toContain('bg-mute')
+    expect(l.tone).toContain('text-mute')
+    expect(l.tone).not.toContain('zinc')
   })
 
   it('done：顯示「完成」且使用翡翠綠色', () => {

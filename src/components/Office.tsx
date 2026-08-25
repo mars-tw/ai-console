@@ -401,7 +401,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
               onKeyDown={(e) => { if (e.key === 'Enter') sendCommand() }}
             />
             <button
-              className="rounded bg-amber-500 px-4 py-1.5 text-sm font-medium text-invink hover:bg-amber-400 disabled:opacity-60 dark:disabled:opacity-40"
+              className="rounded bg-amber-700 px-4 py-1.5 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-60 dark:disabled:opacity-40"
               disabled={cmdBusy}
               onClick={sendCommand}
             >
@@ -492,7 +492,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
                   <span className="min-w-0 flex-1 truncate text-mute" title={p.next_step}>{p.next_step || t('（無下一步）')}</span>
                   {conv && (
                     <button
-                      className="flex-none rounded border border-line3 px-2 py-0.5 text-ink2 hover:bg-elev2 disabled:opacity-60 dark:disabled:opacity-40"
+                      className="flex-none rounded border border-line3 px-2 py-1 text-ink2 hover:bg-elev2 disabled:opacity-60 dark:disabled:opacity-40"
                       disabled={busyId === conv.id}
                       onClick={() => onDispatch(conv)}
                     >
@@ -508,7 +508,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
 
       {/* ── 對接總覽（帳號/瀏覽器/技能/全域設定） ── */}
       <div className="flex-none border-t border-line bg-panel px-4 py-3">
-        <button className="mb-2 flex items-center gap-2 text-xs font-medium tracking-widest text-mute hover:text-ink2" onClick={() => setShowMap((v) => !v)}>
+        <button className="mb-2 flex items-center gap-2 rounded py-1 text-xs font-medium tracking-widest text-mute hover:text-ink2" onClick={() => setShowMap((v) => !v)}>
           {showMap ? '▾' : '▸'} {t('🗺️ 對接總覽（哪個工具用哪個帳號、哪個瀏覽器、哪些技能）')}
         </button>
         {showMap && toolMap && (
