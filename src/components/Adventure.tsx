@@ -972,7 +972,7 @@ export default function Adventure({ tools }: Props) {
           <div className="mt-2 flex items-center justify-between text-[10px] text-mute3">
             <span>{t('擊殺')} {hero.kills} · {t('陣亡')} {hero.deaths}</span>
             <button
-              className="rounded px-1.5 py-1 hover:bg-elev hover:text-ink3"
+              className="rounded px-1.5 py-1.5 hover:bg-elev hover:text-ink3"
               onClick={() => {
                 if (confirm(t('重置角色與存檔？'))) {
                   // 重置時必須同步清空元件內的 party 狀態與 partyRef。

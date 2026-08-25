@@ -16,6 +16,7 @@ import {
   type StepDispatchMode,
 } from '@/lib/dispatchLifecycle'
 import { isLive, look, stateOf } from '@/lib/dispatchState'
+import { useReadable } from '@/theme'
 import LiveTerminal from '@/components/LiveTerminal'
 import type { DispatchRecord } from '@/types/data'
 
@@ -238,6 +239,9 @@ function whenNext(ts: number): string {
 
 export default function Console() {
   useLang()
+  // 工具名稱用的是照深底挑的顏色，亮色主題下要壓過才讀得清楚
+  // （辦公室早就這樣做了，這裡一直漏掉：codex 在白底只有 3.20:1）
+  const tone = useReadable()
   const [input, setInput] = useState('')
   // 計畫存在 localStorage：切分頁時這個元件會 unmount，
   // 但 runAll 的迴圈還在背景把後續工單派出去。使用者回來看到空白，
@@ -788,7 +792,7 @@ export default function Console() {
                 <div className="mb-1 flex items-center gap-2">
                   <select
                     className="rounded border border-line2 bg-panel px-1.5 py-0.5 text-[11px] text-ink2 [&>option]:bg-panel [&>option]:text-ink2"
-                    style={{ color: TOOL_COLOR[s.tool] ?? undefined }}
+                    style={{ color: TOOL_COLOR[s.tool] ? tone(TOOL_COLOR[s.tool]) : undefined }}
                     value={s.tool}
                     disabled={s.state !== 'idle'}
                     onChange={(e) => editStep(s.id, { tool: e.target.value })}
@@ -1042,7 +1046,7 @@ export default function Console() {
               }`}
             >
               <span className="flex-none">{notice === 'ok' ? '✅' : '⚠️'}</span>
-              <span className="w-14 flex-none font-medium" style={{ color: TOOL_COLOR[d.tool] ?? undefined }}>
+              <span className="w-14 flex-none font-medium" style={{ color: TOOL_COLOR[d.tool] ? tone(TOOL_COLOR[d.tool]) : undefined }}>
                 {d.tool}
               </span>
               <span className="min-w-0 flex-1 truncate text-mute" title={d.task}>{d.task}</span>
@@ -1089,11 +1093,11 @@ export default function Console() {
               <div key={d.id}>
               <button
                 onClick={() => loadLog(d.id)}
-                className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-[11px] hover:bg-elev"
+                className="flex w-full items-center gap-2 rounded px-1 py-1 text-left text-[11px] hover:bg-elev"
                 title={t('點一下看這次派工的產出')}
               >
                 <span className="w-3 flex-none text-mute3">{openLog === d.id ? '▾' : '▸'}</span>
-                <span className="w-14 flex-none font-medium" style={{ color: TOOL_COLOR[d.tool] ?? undefined }}>
+                <span className="w-14 flex-none font-medium" style={{ color: TOOL_COLOR[d.tool] ? tone(TOOL_COLOR[d.tool]) : undefined }}>
                   {d.tool}
                 </span>
                 <span className="min-w-0 flex-1 truncate text-mute" title={d.task}>{taskLabel(d)}</span>
@@ -1138,7 +1142,7 @@ export default function Console() {
                   再花一次錢的按鈕。 */}
               {!isLive(d) && (d.outcome === 'error' || d.outcome === 'no_changes') && (
                 <button
-                  className="ml-6 text-[10px] text-mute2 hover:text-ink3 disabled:opacity-50"
+                  className="ml-6 rounded px-1 py-1.5 text-[10px] text-mute2 hover:bg-elev hover:text-ink3 disabled:opacity-50"
                   disabled={!!retryBusy}
                   title={t('用同一份工單、同一個工具再派一次')}
                   onClick={() => void retry(d.id)}
@@ -1151,7 +1155,7 @@ export default function Console() {
                   使用者會學會不按它 —— 然後真的有改動的那一次也不會去看。 */}
               {!isLive(d) && d.canDiff && (
                 <button
-                  className="ml-6 text-[10px] text-mute2 hover:text-ink3"
+                  className="ml-6 rounded px-1 py-1.5 text-[10px] text-mute2 hover:bg-elev hover:text-ink3"
                   aria-expanded={diffOpen}
                   onClick={() => void toggleDiff(d.id)}
                 >
@@ -1159,7 +1163,7 @@ export default function Console() {
                 </button>
               )}
               <button
-                className={`${isLive(d) ? 'ml-6' : 'ml-2'} text-[10px] text-mute2 hover:text-ink3`}
+                className={`${isLive(d) ? 'ml-6' : 'ml-2'} rounded px-1 py-1.5 text-[10px] text-mute2 hover:bg-elev hover:text-ink3`}
                 title={t('工作跑歪了可以在這裡補一句。還在跑的話會排隊，結束後自動送出')}
                 onClick={() => { setReplyTo(replyTo === d.id ? null : d.id); setReplyText('') }}
               >
