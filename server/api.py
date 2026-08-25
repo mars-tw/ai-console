@@ -717,6 +717,28 @@ _DIFF_FILE_CAP = 200_000
 _DIFF_TOTAL_CAP = 2_000_000
 
 
+def _order_body(order: Path) -> str:
+    """從工單檔取回原始工單內容（切掉派工系統加的前置那一段）。
+
+    切點是「【工單】」自成一行。這個切點之所以可靠，是因為存進檔案的
+    工單內容已經被 rules._neutralize 中和過 —— 使用者自己寫的
+    「【工單】」會被換成半形的「[工單]」。所以檔案裡全形的那一個
+    一定是系統加的分隔線，只有一個。
+
+    找不到分隔線就回空字串，讓呼叫端明講「無法原樣重派」。
+    寧可不重派，也不要送出一份只有半截的工單 ——
+    那比不能重派更糟，使用者會以為重跑了同一件事。
+    """
+    if not order.is_file():
+        return ""
+    try:
+        lines = order.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    cut = next((i for i, ln in enumerate(lines) if ln.strip() == "【工單】"), -1)
+    return "\n".join(lines[cut + 1:]).strip() if cut >= 0 else ""
+
+
 def _has_git(cwd: str) -> bool:
     """這個目錄是不是 git 工作區。
 
@@ -1904,6 +1926,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.do_dispatch_batch()
         if self.path == "/api/dispatch/followup":
             return self.do_followup()
+        if self.path == "/api/dispatch/retry":
+            return self.do_dispatch_retry()
         if self.path == "/api/dispatch":
             return self.do_dispatch()
 
@@ -2548,6 +2572,55 @@ class Handler(BaseHTTPRequestHandler):
 
     # 目前這一批的進度，給介面看的
     BATCH = {"total": 0, "done": 0, "running": False, "current": "", "note": ""}
+
+    def do_dispatch_retry(self):
+        """把某一筆派工原封不動再派一次。
+
+        為什麼需要：撞上 API 529、被規範擋下、或跑完什麼都沒改的時候，
+        目前唯一的辦法是把整份工單重打一次 —— 而工單常常是幾十行。
+        529 是伺服器端的暫時性問題，重派一次就好，不該讓人重打。
+
+        原始工單取自 {id}_task.md，切在「【工單】」那一行之後。
+        存進去的版本已經被 rules._neutralize 中和過（工單內文裡的全形
+        控制標記換成半形），所以那一行一定是系統加的那個，切點是安全的；
+        再中和一次也是冪等的。
+
+        重派會產生一筆新的派工紀錄，不是覆蓋舊的 ——
+        「這件重試過幾次、每次結果是什麼」本身就是要看得到的資訊。
+        """
+        body = self._body()
+        did = str(body.get("id") or "").strip()
+        if not self.DISPATCHES:
+            self._load_registry()
+        rec = next((d for d in self.DISPATCHES if d.get("id") == did), None)
+        if not rec:
+            return self._json({"ok": False, "error": "找不到這筆派工"}, 404)
+        if rec.get("pid") and int(rec["pid"]) in _alive_pids({int(rec["pid"])}):
+            return self._json({"ok": False, "error": "這件還在跑，先等它結束"}, 409)
+
+        task = _order_body(Path(rec.get("log", "")).parent / f"{did}_task.md")
+        if not task:
+            # 工單檔不在了（清過 log、或那時候還沒有這個機制）。
+            # 登錄裡只留前 120 字，拿它重派會送出一份被截斷的工單 ——
+            # 那比不能重派更糟：使用者以為重跑了同一件事。
+            return self._json({"ok": False, "error":
+                               "找不到原始工單內容，無法原樣重派"}, 404)
+
+        payload = {"tool": rec.get("tool") or "auto", "task": task}
+        if rec.get("cwd"):
+            payload["cwd"] = rec["cwd"]
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{PORT}/api/dispatch",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=utf-8",
+                     "Origin": f"http://127.0.0.1:{PORT}"})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                out = json.loads(r.read())
+        except Exception as e:
+            return self._json({"ok": False, "error": str(e)}, 500)
+        out["retryOf"] = did
+        return self._json(out)
 
     def do_dispatch_batch(self):
         """一次收下整批工單，在背景一件一件跑

@@ -306,6 +306,8 @@ export default function Console() {
   const [diffData, setDiffData] = useState<Record<string, DispatchDiff>>({})
   const [diffLoading, setDiffLoading] = useState<Record<string, boolean>>({})
   const [openPatch, setOpenPatch] = useState<string | null>(null)
+  /** 正在重派哪一件。空字串＝沒有 */
+  const [retryBusy, setRetryBusy] = useState('')
   /**
    * 互動終端：哪一件正開著、各工具的執行檔路徑、這個環境支不支援。
    *
@@ -563,6 +565,34 @@ export default function Console() {
     followLog.current = true      // 每次重新展開都先回到跟著跑的狀態
     setOpenLog(id)
     await fetchLog(id)
+  }
+
+  /**
+   * 把一筆派工原封不動再派一次。
+   *
+   * 撞上 API 529 這種伺服器端的暫時性問題時，唯一該做的事就是重跑一次 ——
+   * 但原本得把整份工單重打，而工單常常是幾十行。
+   * 重派會產生一筆新紀錄而不是覆蓋舊的：「這件重試過幾次、每次結果是什麼」
+   * 本身就是要看得到的資訊。
+   */
+  const retry = async (id: string) => {
+    if (retryBusy) return
+    setRetryBusy(id)
+    try {
+      const r = await fetch('/api/dispatch/retry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      }).then((x) => x.json())
+      setNote(r.ok ? (r.note || t('已重派')) : `⚠️ ${r.error || t('重派失敗')}`, !r.ok)
+      if (r.ok) {
+        fetch('/api/dispatches').then((x) => (x.ok ? x.json() : null))
+          .then((x) => x?.dispatches && setDispatches(x.dispatches)).catch(() => {})
+      }
+    } catch {
+      setNote(t('⚠️ 控制 API 無回應'), true)
+    }
+    setRetryBusy('')
   }
 
   const toggleDiff = async (id: string) => {
@@ -1102,6 +1132,19 @@ export default function Console() {
                 <div className="ml-6 text-[10px] text-sky-700 dark:text-sky-400/80">
                   {t('已排隊 {n} 句，這一輪結束後送出', { n: d.pending.length })}
                 </div>
+              )}
+              {/* 只在「重跑一次有意義」的結果上給重派鈕。
+                  已完成的不給 —— 那會變成一顆很容易誤按、而且會真的
+                  再花一次錢的按鈕。 */}
+              {!isLive(d) && (d.outcome === 'error' || d.outcome === 'no_changes') && (
+                <button
+                  className="ml-6 text-[10px] text-mute2 hover:text-ink3 disabled:opacity-50"
+                  disabled={!!retryBusy}
+                  title={t('用同一份工單、同一個工具再派一次')}
+                  onClick={() => void retry(d.id)}
+                >
+                  {retryBusy === d.id ? t('重派中…') : t('↻ 重派')}
+                </button>
               )}
               {/* 只有工作目錄在 git 裡才給這顆按鈕。
                   否則按十次有九次得到「這裡不是 git 專案」，
