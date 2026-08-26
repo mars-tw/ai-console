@@ -739,6 +739,114 @@ def _order_body(order: Path) -> str:
     return "\n".join(lines[cut + 1:]).strip() if cut >= 0 else ""
 
 
+# ── 對話內容全文搜尋 ────────────────────────────────
+#
+# 為什麼需要：側欄的搜尋只比對標題、路徑與專案目錄。但這個程式的賣點是
+# 「所有 AI 對話的統一收件匣」—— 而人真正記得的往往是「我那時候在哪一段
+# 對話裡討論過 CP950」，不是那段對話當初被自動命名成什麼。
+# 標題是工具自己取的，常常跟內容沒什麼關係。
+#
+# 為什麼不建索引：實測這台機器 646 份對話、12 MB，整份掃一次 31～58 ms。
+# 建索引要多一份會過期的狀態、要處理增量更新、要處理索引壞掉 ——
+# 為了省下 50 ms 去養一個新的失敗來源，不划算。
+_SEARCH_MAX_Q = 120
+_SEARCH_MAX_HITS = 60
+_SEARCH_SNIPPETS = 2
+_SEARCH_PAD = 60
+# 解碼過的內容快取，鍵是 (路徑, mtime, 大小)。
+# 搜尋是邊打邊查，同一批檔案會在幾秒內被讀很多次；
+# 快取之後第二次起只剩正規表示式的成本。
+_SEARCH_CACHE: dict = {}
+_SEARCH_CACHE_BYTES = 0
+_SEARCH_CACHE_CAP = 48 * 1024 * 1024
+_SEARCH_LOCK = threading.Lock()
+
+
+def _conv_text(f: Path):
+    """讀出一份對話的訊息。回傳 [(role, text)]，讀不動就回空。"""
+    try:
+        st = f.stat()
+    except OSError:
+        return []
+    key = (str(f), int(st.st_mtime), st.st_size)
+    with _SEARCH_LOCK:
+        hit = _SEARCH_CACHE.get(key)
+        if hit is not None:
+            return hit
+    try:
+        d = json.loads(f.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return []
+    msgs = d.get("messages")
+    out = [(str(m.get("role") or ""), str(m.get("text") or ""))
+           for m in msgs if isinstance(m, dict)] if isinstance(msgs, list) else []
+    size = sum(len(t) for _, t in out)
+    with _SEARCH_LOCK:
+        global _SEARCH_CACHE_BYTES
+        # 超過上限就整個倒掉，不做 LRU：一次全清最多讓下一輪慢 50 ms，
+        # 而維護一個正確的 LRU 是額外的複雜度與 bug 來源。
+        if _SEARCH_CACHE_BYTES + size > _SEARCH_CACHE_CAP:
+            _SEARCH_CACHE.clear()
+            _SEARCH_CACHE_BYTES = 0
+        _SEARCH_CACHE[key] = out
+        _SEARCH_CACHE_BYTES += size
+    return out
+
+
+def _snippet(text: str, m) -> str:
+    """把命中處前後各留一段，讓人一眼看出「是不是我要找的那一段」。"""
+    a = max(0, m.start() - _SEARCH_PAD)
+    b = min(len(text), m.end() + _SEARCH_PAD)
+    s = text[a:b].replace("\n", " ").strip()
+    return ("…" if a > 0 else "") + s + ("…" if b < len(text) else "")
+
+
+def _search_conversations(q: str) -> dict:
+    """在匯出的對話內容裡找一段文字。"""
+    q = (q or "").strip()[:_SEARCH_MAX_Q]
+    if len(q) < 2:
+        # 一個字的查詢在中文裡會命中幾乎所有東西，回幾百筆等於沒回答
+        return {"ok": True, "q": q, "hits": [], "scanned": 0,
+                "truncated": False, "tooShort": True}
+
+    conv_dir = DATA_DIR / "conv"
+    if not conv_dir.is_dir():
+        return {"ok": True, "q": q, "hits": [], "scanned": 0, "truncated": False}
+
+    pat = re.compile(re.escape(q), re.I)
+    needle = q.encode("utf-8")
+    needle_lower = q.lower().encode("utf-8")
+    hits, scanned, truncated = [], 0, False
+    # 先看新的：找東西的人通常在找最近做過的事
+    files = sorted(conv_dir.glob("*.json"),
+                   key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    for f in files:
+        scanned += 1
+        try:
+            raw = f.read_bytes()
+        except OSError:
+            continue
+        # bytes 粗篩：大部分檔案在這裡就被刷掉，不必解碼也不必跑正規表示式
+        if needle not in raw and needle_lower not in raw.lower():
+            continue
+        snippets = []
+        for role, text in _conv_text(f):
+            m = pat.search(text)
+            if not m:
+                continue
+            snippets.append({"role": role, "text": _snippet(text, m)})
+            if len(snippets) >= _SEARCH_SNIPPETS:
+                break
+        if not snippets:
+            continue          # 只出現在 metadata 裡，不算命中
+        hits.append({"id": f.stem, "snippets": snippets})
+        if len(hits) >= _SEARCH_MAX_HITS:
+            truncated = True
+            break
+    return {"ok": True, "q": q, "hits": hits, "scanned": scanned,
+            "truncated": truncated}
+
+
 def _has_git(cwd: str) -> bool:
     """這個目錄是不是 git 工作區。
 
@@ -1701,6 +1809,9 @@ class Handler(BaseHTTPRequestHandler):
                 {**j, "desc": schedule.describe(j)} for j in schedule.load()]})
         if self.path == "/api/dispatches":
             return self.do_dispatches()
+        if self.path.split("?", 1)[0] == "/api/search":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            return self._json(_search_conversations((q.get("q") or [""])[0]))
         if self.path.split("?", 1)[0] == "/api/dispatch/diff":
             return self.do_dispatch_diff()
         if self.path == "/api/audit":

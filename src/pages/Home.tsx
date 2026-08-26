@@ -149,6 +149,26 @@ export default function Home() {
   /** 訊息捲動容器，與「使用者是不是往上捲離開底部了」 */
   const msgBoxRef = useRef<HTMLDivElement>(null)
   const [awayFromEnd, setAwayFromEnd] = useState(false)
+  /**
+   * 對話內容的搜尋結果。
+   *
+   * 側欄原本的搜尋只比對標題、路徑與專案目錄 —— 但人真正記得的往往是
+   * 「我那時候在哪一段對話裡討論過 CP950」，不是那段對話當初被工具
+   * 自動命名成什麼。標題是工具取的，常常跟內容沒關係。
+   *
+   * 這是後端掃出來的（/api/search，實測 646 份 12 MB 掃一次 ~55 ms），
+   * 跟標題比對分開顯示：標題找不到的時候，內容命中一定要看得見，
+   * 否則使用者會直接下結論「沒有這段對話」然後放棄。
+   */
+  const [contentHits, setContentHits] = useState<{ id: string; snippets: { role: string; text: string }[] }[]>([])
+  const [contentBusy, setContentBusy] = useState(false)
+  const [contentTruncated, setContentTruncated] = useState(false)
+  const searchRef = useRef<HTMLInputElement>(null)
+  /** id → 對話。內容搜尋只回 id 與摘要，標題與工具名要從索引補回來 */
+  const contentById = useMemo(
+    () => new Map((index?.conversations ?? []).map((c) => [c.id, c])),
+    [index],
+  )
   const [viewMode, setViewMode] = useState<'list' | 'console' | 'office' | 'rpg'>('list')
   /**
    * 側欄開合。
@@ -229,6 +249,96 @@ export default function Home() {
     const timer = setInterval(checkApi, 20000)
     return () => clearInterval(timer)
   }, [checkApi])
+
+  /**
+   * 全域快捷鍵。
+   *
+   * 這是一個會整天開著、裡面有上千份對話的工具，但真正做事的三個分頁
+   * 一個快捷鍵都沒有（只有冒險分頁有）。每次要找東西都得先把手移到滑鼠、
+   * 點到搜尋框 —— 一天幾十次。
+   *
+   * 刻意只做四件事，不做一整套組合鍵：記不住的快捷鍵等於不存在。
+   *   /        跳到搜尋
+   *   Esc      清掉搜尋（在搜尋框裡）
+   *   Ctrl+1~4 切分頁
+   *   Ctrl+B   收合／展開側欄
+   *
+   * 在輸入框裡時完全不攔截，除了 Ctrl 組合 —— 打字打到一半被搶走焦點
+   * 是最讓人火大的一種「貼心」。
+   */
+  /**
+   * 快捷鍵要動到的東西放 ref，每次 render 更新。
+   *
+   * 第一版把 sidebarOpen 放進相依、直接用閉包裡的值 —— 實測 Ctrl+B 在
+   * 辦公室分頁沒作用：sidebarOpen 從 list 切到 console 時 true→false 觸發一次
+   * 重掛，之後 console→office 兩邊都是 false，effect 不會再重掛，
+   * 於是閉包裡的 viewMode 停在 'console'。在辦公室按 Ctrl+B，
+   * 改到的是主控台的偏好，畫面上什麼都不會發生。
+   *
+   * 這是典型的「為了少掛一次監聽，換來一個只在特定切換順序下才出現的 bug」。
+   * 監聽只掛一次，動作永遠讀最新的 —— 兩邊都要。
+   */
+  const keyActions = useRef({ sidebarOpen, setSidebarOpen, setViewMode })
+  keyActions.current = { sidebarOpen, setSidebarOpen, setViewMode }
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const a = keyActions.current
+      const el = e.target as HTMLElement | null
+      const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+        || el.tagName === 'SELECT' || el.isContentEditable)
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key >= '1' && e.key <= '4') {
+          e.preventDefault()
+          a.setViewMode((['list', 'console', 'office', 'rpg'] as const)[Number(e.key) - 1])
+          return
+        }
+        if (e.key.toLowerCase() === 'b') { e.preventDefault(); a.setSidebarOpen(!a.sidebarOpen) }
+        return
+      }
+      if (typing) return
+      if (e.key === '/') {
+        e.preventDefault()
+        // 已經在畫面上就直接聚焦，不要繞一圈
+        if (searchRef.current) { searchRef.current.focus(); return }
+        a.setSidebarOpen(true)
+        // 側欄剛展開時輸入框還沒進 DOM，等下一輪事件迴圈。
+        // 這裡刻意用 setTimeout 而不是 requestAnimationFrame ——
+        // rAF 在分頁不可見時不會觸發，焦點會安靜地沒有移動過去，
+        // 而「安靜地沒發生」是最難查的一種壞法。
+        setTimeout(() => searchRef.current?.focus(), 0)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  /**
+   * 邊打邊搜對話內容。
+   *
+   * 250ms 的延遲不是為了省伺服器（一次只要 ~55 ms），是為了不要在使用者
+   * 還在打字的時候一直換答案 —— 結果清單在眼前跳動比慢一點更難用。
+   * 每次重打都中止上一次：不然打字快的時候，先發的請求可能後到，
+   * 把舊查詢的結果蓋在新查詢上面。
+   */
+  useEffect(() => {
+    const q = search.trim()
+    if (!apiOk || q.length < 2) { setContentHits([]); setContentBusy(false); return }
+    const ac = new AbortController()
+    setContentBusy(true)
+    const timer = setTimeout(() => {
+      fetch(`/api/search?q=${encodeURIComponent(q)}`, { signal: ac.signal })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (!d?.ok) return
+          setContentHits(d.hits || [])
+          setContentTruncated(Boolean(d.truncated))
+        })
+        .catch(() => { /* 中止或 API 沒回應：清單維持原狀就好 */ })
+        .finally(() => { if (!ac.signal.aborted) setContentBusy(false) })
+    }, 250)
+    return () => { clearTimeout(timer); ac.abort() }
+  }, [search, apiOk])
 
   // useCallback + 空相依：底下每 60 秒的輪詢把這個函式收進 setInterval 的閉包，
   // 每次 render 重新產生一份的話，計時器會一直握著第一次那份。
@@ -745,10 +855,12 @@ export default function Home() {
               {!apiOk && <span role="status" className="text-xs text-amber-600">{t('控制 API 離線（檢視模式）')}</span>}
             </div>
             <input
+              ref={searchRef}
               className="w-full rounded-md border border-line bg-transparent px-3 py-1.5 text-sm outline-none focus:border-line3"
-              placeholder={t('搜尋全部對話…')}
+              placeholder={t('搜尋標題與內容…（按 / 跳到這裡）')}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Escape') { setSearch(''); e.currentTarget.blur() } }}
             />
             {(index.stats.trashed ?? 0) > 0 && (
               <button
@@ -807,6 +919,46 @@ export default function Home() {
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto">
+            {/* 內容命中放在最上面，而且不受任何過濾條件影響。
+                放在下面或跟著過濾走的話，會發生「明明搜到了卻看不到」——
+                跟先前「命中的對話被關在收合資料夾裡」是同一種錯。 */}
+            {search.trim().length >= 2 && (contentBusy || contentHits.length > 0) && (
+              <div className="border-b border-line2 bg-elev/40">
+                <div className="flex items-center gap-2 px-3 py-1.5 text-[11px] text-mute2">
+                  <span>🔎 {t('對話內容裡找到')}</span>
+                  <span className="font-medium text-ink3">
+                    {contentBusy ? t('搜尋中…') : t('{n} 份', { n: contentHits.length })}
+                  </span>
+                  {contentTruncated && !contentBusy && (
+                    <span className="text-mute3">{t('（只列前 {n} 份）', { n: contentHits.length })}</span>
+                  )}
+                </div>
+                {contentHits.map((h) => {
+                  const conv = contentById.get(h.id)
+                  return (
+                    <button
+                      key={h.id}
+                      className={`flex w-full flex-col gap-0.5 border-t border-line2 px-3 py-2 text-left hover:bg-elev ${
+                        selectedId === h.id ? 'bg-elev' : ''}`}
+                      onClick={() => selectConversation(h.id)}
+                    >
+                      <span className="flex items-center gap-2 text-xs">
+                        <span className="min-w-0 flex-1 truncate font-medium">
+                          {conv?.title || h.id}
+                        </span>
+                        {conv && <span className="flex-none text-[10px] text-mute3">{conv.toolLabel}</span>}
+                      </span>
+                      {h.snippets.map((s, i) => (
+                        <span key={i} className="line-clamp-2 text-[11px] leading-snug text-mute2">
+                          <span className="text-mute3">{s.role === 'user' ? t('你：') : t('AI：')}</span>
+                          {s.text}
+                        </span>
+                      ))}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
             {groups.length === 0 && (
               // 過濾條件太緊時整個側欄會是空的，沒有提示的話看起來就像程式壞了
               <div role="status" aria-live="polite" className="px-3 py-6 text-center text-xs text-mute3">
