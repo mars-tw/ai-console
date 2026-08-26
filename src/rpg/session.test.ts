@@ -26,10 +26,28 @@ const mem = new Map<string, string>()
 ;(globalThis as unknown as { window: { setTimeout: unknown; clearTimeout: unknown } }).window.setTimeout = (() => 0)
 ;(globalThis as unknown as { window: { clearTimeout: unknown } }).window.clearTimeout = (() => {})
 
+/**
+ * 一定會死的主角：沒有藥水，也關掉自動喝藥。
+ *
+ * 這些測試要的是一場**會結束**的戰鬥，但野外戰鬥是刻意無限的
+ * （清完一波就生下一波），唯一的結束條件是主角倒下。
+ * 主角現在會自動喝藥 —— 於是它撐得過 400 拍，測試就卡在「這場打不完」，
+ * 而且單獨跑會過、全套跑會掛（戰鬥結果本來就有隨機性）。
+ *
+ * 不是為了配合測試去改功能，是這一組測試本來就不該依賴戰鬥平衡 ——
+ * 平衡一動它就會無聲地變得不穩定。
+ */
+function doomedHero() {
+  const h = newHero()
+  h.potions = { hp: 0, mp: 0 }
+  h.autoPotion = false
+  return h
+}
+
 // 用引擎自己的建構函式造真的戰鬥 —— 手刻假物件會漏欄位，
 // stepBattle 一跑就炸，而且炸在跟測試意圖無關的地方。
 function mkBattle(): Battle {
-  return startBattle(newHero(), 'field', 'meadow', [])
+  return startBattle(doomedHero(), 'field', 'meadow', [])
 }
 
 function mkCompletedBattle(): Battle {
@@ -119,7 +137,7 @@ describe('打完自動開下一場', () => {
   beforeEach(() => {
     mem.clear()
     _reset()
-    saveHero(newHero())
+    saveHero(doomedHero())
   })
 
   /** 把戰鬥打到結束為止。回傳跑了幾拍，跑太多拍就是引擎那邊出問題了 */
@@ -132,14 +150,14 @@ describe('打完自動開下一場', () => {
   }
 
   it('打完之後會記下場地 —— saveBattle 是刪檔，晚一拍就問不到了', () => {
-    saveBattle(startBattle(newHero(), 'field', 'meadow', []))
+    saveBattle(startBattle(doomedHero(), 'field', 'meadow', []))
     setMounted(false)
     fightToEnd()
     expect(loadArena()).toEqual({ kind: 'field', placeId: 'meadow' })
   })
 
   it('倒數走完會用登記的組隊函式開下一場', () => {
-    saveBattle(startBattle(newHero(), 'field', 'meadow', []))
+    saveBattle(startBattle(doomedHero(), 'field', 'meadow', []))
     setMounted(false)
     let asked = 0
     setRestart((h) => { asked += 1; return startBattle(h, 'field', 'meadow', []) })
@@ -159,7 +177,7 @@ describe('打完自動開下一場', () => {
   })
 
   it('玩家按取消之後就不再自動開', () => {
-    saveBattle(startBattle(newHero(), 'field', 'meadow', []))
+    saveBattle(startBattle(doomedHero(), 'field', 'meadow', []))
     setMounted(false)
     let asked = 0
     setRestart((h) => { asked += 1; return startBattle(h, 'field', 'meadow', []) })
@@ -223,7 +241,7 @@ describe('打完自動開下一場', () => {
   })
 
   it('關掉自動就不會自動開下一場', () => {
-    saveBattle(startBattle(newHero(), 'field', 'meadow', []))
+    saveBattle(startBattle(doomedHero(), 'field', 'meadow', []))
     setMounted(false)
     let asked = 0
     setRestart((h) => { asked += 1; return startBattle(h, 'field', 'meadow', []) })

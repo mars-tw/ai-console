@@ -2409,14 +2409,31 @@ class Handler(BaseHTTPRequestHandler):
                                "error": f"不認得的工具：{tool[:40]}"}, 400)
         raw_task = task
 
-        # 自動路由：依 ROUTER 鏈跳過限流的工具
+        # ── 選一個現在真的有額度的工具 ──
+        #
+        # 原本只有 tool == "auto" 會查限流。指名的話一律照派 ——
+        # 於是指名一個正在限流的工具，等於把工單丟進牆裡：
+        # 派得出去、log 裡一行「usage limit」、然後就沒了。
+        # 使用者的原話是「不會自動切換有額度的模型」。
+        #
+        # 「你指名誰就是誰」仍然是這個程式的原則，所以改派不是安靜做掉的：
+        # 回傳 rerouted，畫面要明講換了誰、為什麼。
+        # 指名的深層意圖是「這件事要做完」，不是「就算做不成也要給他」。
+        limited = self._limited_tools()
+        rerouted = None
         if tool == "auto":
-            try:
-                status = json.loads(STATUS_JSON.read_text(encoding="utf-8"))
-                limited = {k for k, v in status.get("tools", {}).items() if v.get("rate_limited")}
-            except Exception:
-                limited = set()
             tool = next((t for t in self.CLOUD_CHAIN if t not in limited), "local")
+        elif tool in limited:
+            alt = next((t for t in self.CLOUD_CHAIN
+                        if t != tool and t not in limited
+                        and t in self.DISPATCH_TOOLS and BIN.get(t)), None)
+            if alt:
+                rerouted = {"from": tool, "to": alt, "why": f"{tool} 的額度已經用完"}
+                tool = alt
+            else:
+                return self._json({"ok": False, "error":
+                                   f"{tool} 的額度已經用完，而其他工具現在也都不能用"
+                                   "（限流或沒安裝）。等額度恢復，或改用地端"}, 503)
 
         # 掛上規範與技能。派出去的 agent 不會自己知道這台機器的不可違反條款，
         # 也不會知道有現成技能可用 —— 工單裸奔的代價太高，所以一律加。
@@ -2492,10 +2509,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._reg_append({"id": stamp, "tool": tool, "task": raw_task[:120],
                                   "started": stamp, "pid": proc_pid, "log": str(log_file),
                                   "mode": "headless", "cwd": cwd})
+                note = f"已派出 {tool} 無頭執行" + (
+                    f"（已掛技能：{'、'.join(applied_skills)}）" if applied_skills else "")
+                if rerouted:
+                    note = f"{rerouted['why']}，已改派給 {tool}。" + note
                 return self._json({"ok": True, "tool": tool, "mode": "headless",
                                    "log": str(log_file), "id": stamp, "skills": applied_skills,
-                                   "note": f"已派出 {tool} 無頭執行"
-                                           + (f"（已掛技能：{'、'.join(applied_skills)}）" if applied_skills else "")})
+                                   "rerouted": rerouted, "note": note})
             except Exception as e:
                 return self._json({"ok": False, "error": str(e)}, 500)
 
@@ -2569,9 +2589,12 @@ class Handler(BaseHTTPRequestHandler):
             self._reg_append({"id": stamp, "tool": tool, "task": raw_task[:120],
                               "started": stamp, "pid": None, "log": str(log_file),
                               "mode": "terminal", "echo_size": echo_size})
-            note = f"{tool} 已開終端並帶入指令"
+            note = f"{tool} 已開終端並帶入指令（指令已帶進去，但**還沒有人按下去**）"
+            if rerouted:
+                note = f"{rerouted['why']}，已改派給 {tool}。" + note
             return self._json({"ok": True, "tool": tool, "mode": "terminal",
-                               "id": stamp, "note": note, "log": str(log_file)})
+                               "id": stamp, "note": note, "rerouted": rerouted,
+                               "log": str(log_file)})
         except Exception as e:
             return self._json({"ok": False, "error": str(e)}, 500)
 
@@ -2747,6 +2770,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error":
                                "找不到原始工單內容，無法原樣重派"}, 404)
 
+        # 原樣重派，但工具本身撞牆的話就不要再撞一次 ——
+        # 使用者按重派是想「把這件做完」，不是「再看它失敗一次」。
+        # do_dispatch 會自己處理改派並回報 rerouted，這裡照原樣送就好。
         payload = {"tool": rec.get("tool") or "auto", "task": task}
         if rec.get("cwd"):
             payload["cwd"] = rec["cwd"]
@@ -2837,6 +2863,68 @@ class Handler(BaseHTTPRequestHandler):
                            "note": f"已收下 {len(jobs)} 件，"
                                    + ("一件跑完才派下一件" if serial else "同時派出")})
 
+    @staticmethod
+    def _limited_tools() -> set:
+        """現在限流中的工具。讀不到就當成沒有人限流（不要因此擋住派工）"""
+        try:
+            status = json.loads(STATUS_JSON.read_text(encoding="utf-8"))
+            return {k for k, v in (status.get("tools") or {}).items()
+                    if v.get("rate_limited")}
+        except Exception:
+            return set()
+
+    def _handoff_order(self, target: dict, text: str, why: str) -> str:
+        """把一件做到一半的工作，交接給另一個 AI。
+
+        為什麼需要：「💬 補一句」是用各家的續談旗標（--continue / -c /
+        resume --last）再派一次 —— **一定是原本那個 AI 執行**。
+        它撞到額度上限的時候，這條路就斷了；而 kimi 這種只能開終端的工具
+        從一開始就沒有這條路。
+
+        那正是這個程式該解決的事：對話的脈絡活在原工具裡帶不走，
+        但「原始工單」與「它已經做到哪裡」是我們手上就有的東西。
+        把這兩樣加上使用者補的那句話組成一份新工單，換一個沒限流的 AI 接手，
+        比讓使用者自己複製貼上重打一遍可靠得多。
+
+        log 尾端刻意只給 6000 字：太少看不出做到哪，太多會把接手的那個
+        AI 的注意力吃光，而且前面多半是它自己的思考過程，不是結論。
+        """
+        order = _order_body(Path(target.get("log", "")).parent
+                            / f"{target.get('id')}_task.md")
+        log = Path(target.get("log", ""))
+        tail = _ANSI_RE.sub("", _tail_text(log, 24 * 1024))[-6000:] if log.is_file() else ""
+        prev = target.get("tool", "?")
+        # 只開終端的工具（kimi／grok／cursor）不會把產出寫進 log，
+        # 檔案裡只有「啟動時回顯的那份工單」。判準用 rules 的控制標記，
+        # 那是回顯才會有的東西，不是猜的。
+        echoed = "【執行前置" in tail or "【工單】" in tail
+        has_progress = bool(tail) and not echoed
+        parts = [
+            f"【接力】這件工作原本交給 {prev}，{why}。請你接手做完。",
+            "",
+            "接手的規則（很重要）：",
+            # 規則要跟下面的內容一致。沒有進度可讀卻寫「先讀下面它做到哪裡」，
+            # 接手的 AI 會去找一段不存在的東西，然後自己編一個它以為的進度。
+            (f"1. 先讀下面「{prev} 已經做到哪裡」，**不要把它做過的事再做一次**。"
+             if has_progress
+             else f"1. {prev} 沒有留下可讀的輸出，**先自己確認檔案現況**，"
+                  "不要假設它什麼都沒做，也不要假設它做完了。"),
+            "2. 它可能做到一半就中斷，檔案可能處於半完成狀態 —— 先確認現況再動手。",
+            "3. 有疑慮就照原始工單的要求走，不要自己改需求。",
+            "",
+            "── 原始工單 ──",
+            order or "（原始工單檔已經不在，只能依下面的紀錄推斷）",
+        ]
+        if has_progress:
+            parts += ["", f"── {prev} 已經做到哪裡（它的輸出尾端）──", tail]
+        else:
+            parts += ["", f"── {prev} 的進度 ──",
+                      f"（{prev} 是開終端執行的，沒有留下可讀的輸出。"
+                      "請先自己確認檔案現況，再決定要做什麼。）"]
+        if text:
+            parts += ["", "── 使用者這次補充的要求 ──", text]
+        return "\n".join(parts)
+
     def do_followup(self):
         """對一件已派出的工作補一句話
 
@@ -2852,9 +2940,50 @@ class Handler(BaseHTTPRequestHandler):
         target = next((x for x in self.DISPATCHES if x.get("id") == did), None)
         if not target:
             return self._json({"ok": False, "error": "找不到這件派工"}, 404)
-        if target.get("tool") not in self.FOLLOWUP_TOOLS:
-            return self._json({"ok": False,
-                               "error": f"{target.get('tool')} 沒有續談模式，只能重新派一件"}, 400)
+
+        # ── 原本那個 AI 接不下去的時候，換一個人接手 ──
+        #
+        # 「補一句」是用各家的續談旗標再派一次，所以**一定是原本那個 AI 執行**。
+        # 兩種情況它接不下去：
+        #   · 沒有續談模式（kimi 只能開終端，沒有無頭續談）
+        #   · 額度用完了 —— 而這正是使用者問的：「額度就用完了怎麼執行」
+        # 以前這兩種都只回一句「只能重新派一件」，把問題丟回給使用者，
+        # 而他要做的事是把整份工單重打一遍。
+        #
+        # 對話脈絡活在原工具裡帶不走，但「原始工單」與「它做到哪裡」
+        # 我們手上就有。組成一份接力工單換人做，比讓人重打可靠得多。
+        prev_tool = target.get("tool", "")
+        limited = self._limited_tools()
+        why = ""
+        if prev_tool not in self.FOLLOWUP_TOOLS:
+            why = f"{prev_tool} 沒有無頭續談模式"
+        elif prev_tool in limited:
+            why = f"{prev_tool} 的額度已經用完"
+        if why:
+            # 挑一個「能無頭跑、有執行檔、而且沒限流」的工具
+            pick = next((t for t in self.CLOUD_CHAIN
+                         if t != prev_tool and t in self.DISPATCH_TOOLS
+                         and BIN.get(t) and t not in limited), None)
+            if not pick:
+                return self._json({"ok": False, "error":
+                                   f"{why}，而其他工具現在也都不能用（限流或沒安裝）。"
+                                   "等額度恢復，或自己開終端接手"}, 503)
+            payload = {"tool": pick, "task": self._handoff_order(target, text, why)}
+            if target.get("cwd"):
+                payload["cwd"] = target["cwd"]
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{PORT}/api/dispatch",
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={"Content-Type": "application/json; charset=utf-8",
+                         "Origin": f"http://127.0.0.1:{PORT}"})
+            try:
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    out = json.loads(r.read())
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)}, 500)
+            out["handoff"] = {"from": prev_tool, "to": pick, "why": why}
+            out["note"] = f"{why}，已把工單與它做到的進度交給 {pick} 接手"
+            return self._json(out)
 
         pid = target.get("pid")
         alive = bool(pid) and int(pid) in _alive_pids({int(pid)})
@@ -2971,7 +3100,18 @@ class Handler(BaseHTTPRequestHandler):
                 # 但花費是累積的，跑到一半也算得出來，先給使用者看。
                 got = _outcome_for(log, d["logSize"], text)
                 d["cost"] = got["cost"]
-                if d["alive"]:
+                # state 是 running／waiting 時**沒有結果可以講**。
+                #
+                # 這是實際點過畫面才看到的：兩張剛派給 kimi 的工單，
+                # 清單標題寫「3 件進行中」，三列卻全部寫「已完成」——
+                # 而 kimi 的終端才剛開，一個字都還沒做。
+                # 原因是終端派工的 pid 是啟動器不是 kimi，啟動器一退出
+                # alive 就變 false，outcome 就被算成 ok。
+                # 「行程結束」對無頭派工等於「工作做完」，對終端派工只等於
+                # 「視窗開好了」—— 那是兩件完全不同的事。
+                # _dispatch_state 本來就判得對（waiting／等你執行），
+                # 是後加的 outcome 把它輾過去了。
+                if d["state"] in ("running", "waiting"):
                     d["outcome"], d["issue"] = None, ""
                 else:
                     d["outcome"], d["issue"] = got["outcome"], got["issue"]

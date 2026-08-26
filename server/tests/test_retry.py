@@ -84,5 +84,97 @@ class TestOrderBody(unittest.TestCase):
         self.assertEqual(api._order_body(self._write(PREAMBLE + "\n   \n")), "")
 
 
+
+class TestHandoffOrder(unittest.TestCase):
+    """原本那個 AI 接不下去時，把工作交給另一個。
+
+    使用者問的原話：「接續工作也是原ai去執行，問題額度就用完了怎麼執行」。
+
+    他指出的是一個真的缺口：「💬 補一句」是用各家的續談旗標
+    （--continue / -c / resume --last）再派一次 —— **一定是原本那個 AI 執行**。
+    它撞到額度上限時這條路就斷了；kimi 這種只能開終端的工具從來就沒有這條路。
+    以前這兩種情況都只回一句「只能重新派一件」，把問題丟回給使用者，
+    而他要做的事是把整份工單重打一遍。
+
+    對話脈絡活在原工具裡帶不走，但「原始工單」與「它做到哪裡」我們手上就有。
+    這一份測的就是那份接力工單有沒有把該帶的都帶過去 ——
+    少帶了接手的 AI 會重做一遍，多帶了它的注意力會被前一個 AI 的思考過程吃光。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="achand_"))
+        self.log = self.tmp / "20260101-000000_kimi.log"
+        self.log.write_text("開始工作\n" * 50 + "改好了 server/api.py\n", encoding="utf-8")
+        (self.tmp / "20260101-000000_task.md").write_text(
+            PREAMBLE + "把 tools 底下的腳本補上使用說明。\n", encoding="utf-8")
+        self.target = {"id": "20260101-000000", "tool": "kimi", "log": str(self.log)}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _order(self, text="順便跑一次測試"):
+        return api.Handler._handoff_order(api.Handler, self.target, text, "kimi 沒有無頭續談模式")
+
+    def test_帶上原始工單(self):
+        # 少了它，接手的 AI 只知道「有人做過什麼」，不知道原本要做什麼
+        self.assertIn("把 tools 底下的腳本補上使用說明", self._order())
+
+    def test_帶上前一個AI做到哪裡(self):
+        # 少了它，接手的會從頭再做一遍
+        self.assertIn("改好了 server/api.py", self._order())
+
+    def test_帶上使用者這次的補充(self):
+        self.assertIn("順便跑一次測試", self._order())
+
+    def test_講明原因與是誰做過(self):
+        order = self._order()
+        self.assertIn("接力", order)
+        self.assertIn("kimi", order)
+
+    def test_明確要求不要重做(self):
+        """接手的 AI 不知道前面做過什麼就會全部重來 ——
+        對已經改過的檔案再改一次，結果往往比沒接手更糟。"""
+        self.assertIn("不要把它做過的事再做一次", self._order())
+
+    def test_log太長要截掉(self):
+        """太多會把接手的 AI 的注意力吃光，而且前面多半是它自己的思考過程"""
+        self.log.write_text("雜訊\n" * 50_000, encoding="utf-8")
+        self.assertLess(len(self._order()), 12_000)
+
+    def test_工單檔不見了也要能組出東西(self):
+        (self.tmp / "20260101-000000_task.md").unlink()
+        order = self._order()
+        self.assertIn("原始工單檔已經不在", order)
+        self.assertIn("改好了 server/api.py", order)   # 至少還有進度
+
+    def test_沒有log也不會炸(self):
+        self.target["log"] = str(self.tmp / "沒有這個.log")
+        self.assertIn("把 tools 底下的腳本", self._order())
+
+    def test_只開終端的工具不要把回顯的工單當成進度(self):
+        """kimi／grok／cursor 只開終端，log 裡只有啟動時回顯的那份工單。
+
+        原封不動貼進來的話，接手的 AI 會在同一份工單裡看到原始工單兩次，
+        而且第二次被標成「它已經做到哪裡」—— 那是假的進度，
+        會讓它以為前面已經做過了什麼。
+        """
+        self.log.write_text(
+            "[20260101] kimi 開啟可見終端\n"
+            "指令：【執行前置｜這段是派工系統加的】\n【工單】\n做某件事\n",
+            encoding="utf-8")
+        order = self._order()
+        self.assertIn("沒有留下可讀的輸出", order)
+        self.assertNotIn("── kimi 已經做到哪裡", order)
+        # 規則也要跟著改口 —— 叫它去讀一段不存在的東西，
+        # 它會自己編一個以為的進度出來
+        self.assertIn("先自己確認檔案現況", order)
+
+    def test_真的有輸出時照常帶過去(self):
+        self.log.write_text("跑完了，改了三個檔案\n", encoding="utf-8")
+        order = self._order()
+        self.assertIn("── kimi 已經做到哪裡", order)
+        self.assertIn("改了三個檔案", order)
+
+
 if __name__ == "__main__":
     unittest.main()

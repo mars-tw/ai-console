@@ -426,3 +426,37 @@ class TestBlockedIsNotFailure(unittest.TestCase):
 
     def test_blocked不會被當成error(self):
         self.assertNotIn("blocked", api._TERMINAL_ERROR)
+
+
+class TestTerminalDispatchIsNotDone(unittest.TestCase):
+    """終端派工不能因為「啟動器退出」就被說成已完成。
+
+    這是實際點過畫面才看到的：兩張剛派給 kimi 的工單，清單標題寫
+    「3 件進行中」，三列卻全部寫「已完成」—— 而 kimi 的終端才剛開，
+    一個字都還沒做。同一個畫面上兩個互相矛盾的說法。
+
+    原因：終端派工記的 pid 是啟動器（cmd /c start），不是 kimi 本身。
+    啟動器一退出 alive 就變 false，outcome 就被算成 ok。
+    「行程結束」對無頭派工等於「工作做完」，對終端派工只等於
+    「視窗開好了」—— 那是兩件完全不同的事。
+
+    _dispatch_state 本來就判得對（waiting／等你執行），
+    是後加的 outcome 層把它輾過去了。
+    """
+
+    def test_只有回音的終端派工是waiting不是done(self):
+        h = api.Handler
+        rec = {"mode": "terminal", "log": "x.log", "echo_size": 100}
+        # 檔案大小沒有超過回音 → 那個視窗還沒被執行
+        self.assertEqual(
+            h._dispatch_state(h, {**rec, "log": ""}, False), "silent")
+
+    def test_無頭派工行程結束就是有結果(self):
+        """對照組：無頭的那條路不能被這次的修正影響。"""
+        h = api.Handler
+        self.assertEqual(h._dispatch_state(h, {"mode": "sync", "log": ""}, False), "done")
+
+    def test_還活著一律是running(self):
+        h = api.Handler
+        self.assertEqual(
+            h._dispatch_state(h, {"mode": "terminal", "log": "x"}, True), "running")

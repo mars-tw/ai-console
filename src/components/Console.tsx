@@ -55,6 +55,24 @@ function tokenText(c: DispatchCost): string {
   return c.total ? t('{n} tokens', { n: n(c.total) }) : ''
 }
 
+/** /api/dispatch/followup 的回應。接力時會多一個 handoff */
+interface FollowupReply {
+  ok: boolean
+  note?: string
+  error?: string
+  handoff?: { from: string; to: string; why: string }
+}
+
+/** 派工／重派的回應。指名的工具限流時會改派，那時候多一個 rerouted */
+interface DispatchReply {
+  ok: boolean
+  note?: string
+  error?: string
+  id?: string
+  tool?: string
+  rerouted?: { from: string; to: string; why: string } | null
+}
+
 type ConsoleDispatch = DispatchRecord & {
   outcome?: 'ok' | 'no_changes' | 'blocked' | 'error' | null
   cost?: DispatchCost | null
@@ -510,6 +528,12 @@ export default function Console() {
   /**
    * 對一件派工補一句話。
    *
+   * 補一句是用各家的續談旗標再派一次，所以**一定是原本那個 AI 執行**。
+   * 它沒有續談模式（kimi）或額度用完時，後端會改成「接力」：
+   * 把原始工單＋它做到哪裡＋這次的補充，組成新工單交給另一個沒限流的 AI。
+   * 那時候回傳裡會有 handoff，要明講換人了 —— 使用者以為是原本那個在做，
+   * 結果換了一個，是很難查的誤會。
+   *
    * 無頭執行是一次性的，沒辦法對跑到一半的行程插話 —— 但四個工具都支援
    * 續談上一輪，所以這裡是「用續談旗標再派一次」。還在跑的話伺服器會先排隊，
    * 等它結束再送，不然兩個行程會搶同一段對話。
@@ -523,8 +547,15 @@ export default function Console() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, text }),
-      }).then((x) => x.json())
-      setNote(r.ok ? (r.note || t('已送出')) : `⚠️ ${r.error || t('送出失敗')}`, !r.ok)
+      }).then((x) => x.json()) as FollowupReply
+      setNote(
+        r.ok
+          ? (r.handoff
+            ? t('🤝 {why} —— 已把工單與進度交給 {to} 接手', { why: r.handoff.why, to: r.handoff.to })
+            : (r.note || t('已送出')))
+          : `⚠️ ${r.error || t('送出失敗')}`,
+        !r.ok,
+      )
       if (r.ok) {
         setReplyText('')
         setReplyTo(null)
@@ -602,8 +633,15 @@ export default function Console() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id }),
-      }).then((x) => x.json())
-      setNote(r.ok ? (r.note || t('已重派')) : `⚠️ ${r.error || t('重派失敗')}`, !r.ok)
+      }).then((x) => x.json()) as DispatchReply
+      setNote(
+        r.ok
+          ? (r.rerouted
+            ? t('🔀 {why}，已改派給 {to}', { why: r.rerouted.why, to: r.rerouted.to })
+            : (r.note || t('已重派')))
+          : `⚠️ ${r.error || t('重派失敗')}`,
+        !r.ok,
+      )
       if (r.ok) {
         fetch('/api/dispatches').then((x) => (x.ok ? x.json() : null))
           .then((x) => x?.dispatches && setDispatches(x.dispatches)).catch(() => {})
@@ -1179,7 +1217,8 @@ export default function Console() {
               )}
               <button
                 className={`${isLive(d) ? 'ml-6' : 'ml-2'} rounded px-1 py-1.5 text-[10px] text-mute2 hover:bg-elev hover:text-ink3`}
-                title={t('工作跑歪了可以在這裡補一句。還在跑的話會排隊，結束後自動送出')}
+                title={t('工作跑歪了可以在這裡補一句。還在跑的話會排隊，結束後自動送出。'
+                  + '原本那個 AI 沒有續談模式或額度用完時，會自動把工單與進度交給別的 AI 接手')}
                 onClick={() => { setReplyTo(replyTo === d.id ? null : d.id); setReplyText('') }}
               >
                 {replyTo === d.id ? t('取消') : t('💬 補一句')}
