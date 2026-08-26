@@ -12,7 +12,7 @@ import { itemLabel, t } from '@/i18n'
 import {
   checkSecretAllies, ensureRoster, growRecruit, syncSecretAllies,
 } from './allies'
-import { plusMult } from './enhance'
+import { effAtk, effDef, plusMult } from './enhance'
 import {
   checkSecrets, hasSecret, makeUnique, missingUniques, recordUnique, syncUniques,
 } from './secrets'
@@ -240,9 +240,16 @@ export function isUpgrade(h: Hero, it: Item): boolean {
   return !cur || equipRank(it, line) > equipRank(cur, line)
 }
 
-/** 裝備的粗略分數，用來提示「這件比較好」 */
+/**
+ * 裝備的粗略分數，用來提示「這件比較好」。
+ *
+ * **一定要含強化。** 這個分數不只是拿來看的 —— autoEquipBest（⚡ 一鍵擇優裝備）
+ * 與背包的 ▲ 標記都靠它排序。不含強化的話，一鍵擇優會把你 +10 的武器
+ * 換成一把基礎攻擊多 1 點的白裝，直接毀掉幾十次強化的投入。
+ * 那是「幫倒忙」，比沒有這個按鈕更糟。
+ */
 export function itemScore(it: Item): number {
-  let n = it.atk * 2 + it.def * 1.5
+  let n = effAtk(it) * 2 + effDef(it) * 1.5
   for (const a of it.affixes) n += AFFIX_SCALE[a.key] < 0.02 ? a.value * 400 : a.value * 2
   return Math.round(n)
 }

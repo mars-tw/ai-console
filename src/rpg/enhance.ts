@@ -63,6 +63,24 @@ export function enhanceCost(it: Item): number {
 /** 強化後的實際數值（畫面與戰鬥都用這個，不要各算各的） */
 export const plusMult = (it: Item) => 1 + (it.plus ?? 0) * PLUS_STEP
 
+/**
+ * 這件裝備實際生效的攻／防（已含強化）。
+ *
+ * 為什麼一定要有這兩個函式，而不是各處自己乘：
+ *   強化本來只有 computeStats() 會乘 plusMult，而**畫面上每一個
+ *   會去看的地方都沒乘**：背包那一行寫的是 it.atk（基礎值）、
+ *   分數 itemScore() 也只吃 it.atk。於是把一把劍強化到 +10：
+ *     背包顯示「攻100」——跟 +0 一模一樣
+ *     分數不變
+ *     ⚡ 一鍵擇優裝備會把它換成基礎攻擊多 1 點的白裝
+ *   使用者的原話是「強化裝備能力值也沒有上升，那強化要幹嘛」。
+ *   他是對的：從每一個他會看的地方，強化都像沒有作用。
+ *
+ * 詞綴刻意不放大 —— 一起放大的話，一件 +15 的傳說會讓其他裝備變成裝飾品。
+ */
+export const effAtk = (it: Item) => Math.round(it.atk * plusMult(it))
+export const effDef = (it: Item) => Math.round(it.def * plusMult(it))
+
 export type EnhanceOutcome = 'up' | 'down' | 'stay' | 'destroy'
 
 export interface EnhanceResult {

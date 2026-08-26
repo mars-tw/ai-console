@@ -21,7 +21,7 @@ import {
 import { ALLY_PULL_GOLD, GEAR_PULL_GOLD, TEN, floorAt, pullAlly, pullGear, tenCost } from '@/rpg/gacha'
 import { HITSTOP, shake } from '@/rpg/battleFx'
 import {
-  CANNOT_ENHANCE_MSG, ENHANCE_FX_MS, MAX_PLUS, canEnhance,
+  CANNOT_ENHANCE_MSG, ENHANCE_FX_MS, MAX_PLUS, canEnhance, effAtk, effDef,
   drawEnhAlarm, drawEnhPop, drawEnhShards, drawEnhSparks,
   enhance, enhanceCost, odds, type EnhanceOutcome,
 } from '@/rpg/enhance'
@@ -108,8 +108,11 @@ function ItemLine({ it, dim }: { it: Item; dim?: boolean }) {
         {!!it.plus && <span className="ml-0.5 text-amber-700 dark:text-amber-300">+{it.plus}</span>}
       </span>
       <span className="ml-1 text-mute2">
+        {/* 顯示**實際生效**的數值（已含強化）。
+            寫 it.atk 的話，+10 的劍跟 +0 的看起來一模一樣 ——
+            玩家強化完回來看，會以為強化沒有用。 */}
         ({t(RARITY_NAME[it.rarity])} · iLv{it.ilvl}
-        {it.atk ? ` · ${t('攻')}${it.atk}` : ''}{it.def ? ` · ${t('防')}${it.def}` : ''})
+        {it.atk ? ` · ${t('攻')}${effAtk(it)}` : ''}{it.def ? ` · ${t('防')}${effDef(it)}` : ''})
       </span>
       {it.affixes.length > 0 && (
         <span className="ml-1 text-emerald-700 dark:text-emerald-400/80">

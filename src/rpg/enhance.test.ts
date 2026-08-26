@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  effAtk,
+  effDef,
   enhance,
   enhanceCost,
   MAX_PLUS,
@@ -8,6 +10,7 @@ import {
   plusMult,
   PLUS_STEP,
 } from './enhance'
+import { itemScore } from './engine'
 import type { Hero, Item } from './types'
 
 function fixedRandom(value: number): void {
@@ -302,5 +305,52 @@ describe('enhance 強化行為與保護機制', () => {
     fixedRandom(0.0)
     const res = enhance(h, it, false)
     expect(res.outcome).toBe('up')
+  })
+})
+
+// ── 強化必須在「玩家看得到的地方」也生效 ──
+//
+// 使用者實際回報：「強化裝備能力值也沒有上升，那強化要幹嘛..」
+// 他是對的。強化本來只有 computeStats() 會乘 plusMult，
+// 而畫面上每一個他會去看的地方都沒乘：
+//   背包那一行顯示 it.atk（基礎值）→ +10 跟 +0 長得一樣
+//   itemScore() 只吃 it.atk       → 分數不變
+//   而 autoEquipBest 是靠 itemScore 排序的
+//     → ⚡ 一鍵擇優會把 +10 的武器換成基礎攻擊多 1 點的白裝
+describe('強化要看得見', () => {
+  const mkItem = (over: Partial<Item> = {}): Item => ({
+    id: 'i1', name: '劍', slot: 'main', rarity: 'rare', ilvl: 20,
+    line: 'melee', atk: 100, def: 0, affixes: [], ...over,
+  })
+
+  it('生效攻擊要含強化', () => {
+    expect(effAtk(mkItem({ plus: 0 }))).toBe(100)
+    expect(effAtk(mkItem({ plus: 1 }))).toBe(109)
+    expect(effAtk(mkItem({ plus: 10 }))).toBe(190)
+  })
+
+  it('生效防禦同理', () => {
+    expect(effDef(mkItem({ atk: 0, def: 100, plus: 5 }))).toBe(145)
+  })
+
+  it('沒強化過的東西不會被動到', () => {
+    const it = mkItem()
+    expect(effAtk(it)).toBe(it.atk)
+    expect(effDef(it)).toBe(it.def)
+  })
+
+  it('分數要跟著強化上升', () => {
+    // 不上升的話，背包的 ▲ 標記與一鍵擇優都會忽略強化
+    const plain = mkItem({ plus: 0 })
+    const upgraded = mkItem({ plus: 10 })
+    expect(itemScore(upgraded)).toBeGreaterThan(itemScore(plain))
+  })
+
+  it('★ +10 的武器不能被基礎值只多一點的白裝比下去', () => {
+    // 這是最重要的一項：一鍵擇優靠分數排序，
+    // 分數不含強化的話它會主動幫你把幾十次強化的投入換掉
+    const enhanced = mkItem({ id: 'a', atk: 100, plus: 10 })   // 生效 190
+    const rawBetter = mkItem({ id: 'b', atk: 101, plus: 0 })   // 生效 101
+    expect(itemScore(enhanced)).toBeGreaterThan(itemScore(rawBetter))
   })
 })
