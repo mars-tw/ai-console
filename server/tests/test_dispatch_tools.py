@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import datetime
 import json
 import shutil
 import sys
@@ -210,5 +211,114 @@ class TestCancel(unittest.TestCase):
         self.assertIn("關掉", out["note"])
 
 
+
+class TestDetectRateLimits(unittest.TestCase):
+    """從派工 log 認出「這個工具沒額度了」。
+
+    真實事件：codex 的 log 裡明明白白寫著
+      「You've hit your usage limit... try again at Sep 1st, 2026 10:37 PM」
+    但 status.json 的 rate_limited 還是 false，於是工單照樣送過去撞牆，
+    改派邏輯（本來就寫好了）完全沒有觸發。
+
+    原因是 enrich_reset_times 只替**已經被標成限流**的工具補恢復時間，
+    它從來不會自己加上那個標記 —— 而它的註解卻寫著
+    「真的還在限流的話，下次派工失敗會寫進 log 再被抓到」。
+    那個「被抓到」在程式裡不存在。
+    """
+
+    QUOTA = ("ERROR: You've hit your usage limit. Visit https://example/usage "
+             "to purchase more credits or try again at {when}.")
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="acrl_"))
+        self._home = api.Path.home
+        api.Path.home = staticmethod(lambda: self.tmp)      # log 目錄跟著搬
+        (self.tmp / "ai-hub" / "dispatch-log").mkdir(parents=True)
+
+    def tearDown(self):
+        api.Path.home = self._home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _log(self, tool: str, text: str, stamp="20260826-224319"):
+        p = self.tmp / "ai-hub" / "dispatch-log" / f"{stamp}_{tool}.log"
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    @staticmethod
+    def _data(**tools):
+        return {"tools": {k: dict(v) for k, v in tools.items()}}
+
+    def _future(self, days=6):
+        return (datetime.datetime.now() + datetime.timedelta(days=days)).strftime("%b %d, %Y %I:%M %p")
+
+    def test_認出限流並記下恢復時間(self):
+        self._log("codex", self.QUOTA.format(when=self._future()))
+        d = self._data(codex={"rate_limited": False, "status": "active"})
+        api.detect_rate_limits(d)
+        self.assertTrue(d["tools"]["codex"]["rate_limited"])
+        self.assertEqual(d["tools"]["codex"]["status"], "rate_limited")
+        self.assertTrue(d["tools"]["codex"]["reset_at"])
+
+    def test_恢復時間已經過了就不算限流(self):
+        past = (datetime.datetime.now() - datetime.timedelta(days=3)).strftime("%b %d, %Y %I:%M %p")
+        self._log("codex", self.QUOTA.format(when=past))
+        d = self._data(codex={"rate_limited": False})
+        api.detect_rate_limits(d)
+        self.assertFalse(d["tools"]["codex"].get("rate_limited"))
+
+    def test_工單裡提到usage_limit不算(self):
+        """工單本文會被寫進 log 開頭，而工單裡交代「撞到 usage limit 就回報」
+        是家常便飯。把它當成真的撞牆，等於每一件成功的派工都會把工具關掉。"""
+        self._log("gemini",
+                  "【工單】如果撞到 usage limit 就停下來回報。\n"
+                  "（這只是範例，不是本次執行）\n跑完了，改了三個檔案\n")
+        d = self._data(gemini={"rate_limited": False})
+        api.detect_rate_limits(d)
+        self.assertFalse(d["tools"]["gemini"].get("rate_limited"))
+
+    def test_沒有恢復時間就不標記(self):
+        """沒有恢復時間 = 沒有證據證明現在還在限流。
+        寧可讓它被派一次工再失敗，也不要把一個其實可用的工具永久關在門外
+        —— 這跟 enrich_reset_times 的既有政策是同一條。"""
+        self._log("qwen", "ERROR: quota exhausted\n")
+        d = self._data(qwen={"rate_limited": False})
+        api.detect_rate_limits(d)
+        self.assertFalse(d["tools"]["qwen"].get("rate_limited"))
+
+    def test_只看最近一次派工(self):
+        """幾天前撞過一次牆不代表現在還在牆裡。
+        只有最新那一份 log 算數，否則旗標會永遠黏著。"""
+        self._log("gemini", self.QUOTA.format(when=self._future()), stamp="20260820-100000")
+        self._log("gemini", "跑完了，一切正常\n", stamp="20260826-224320")
+        d = self._data(gemini={"rate_limited": False})
+        api.detect_rate_limits(d)
+        self.assertFalse(d["tools"]["gemini"].get("rate_limited"))
+
+    def test_已經標了就不覆蓋原本的證據(self):
+        self._log("codex", self.QUOTA.format(when=self._future()))
+        d = self._data(codex={"rate_limited": True, "evidence": "上游掃描器標的"})
+        api.detect_rate_limits(d)
+        self.assertEqual(d["tools"]["codex"]["evidence"], "上游掃描器標的")
+
+    def test_沒有這個工具的狀態就不憑空生一個(self):
+        self._log("cursor", self.QUOTA.format(when=self._future()))
+        d = self._data(codex={"rate_limited": False})
+        api.detect_rate_limits(d)
+        self.assertNotIn("cursor", d["tools"])
+
+
+class TestParseReset(unittest.TestCase):
+
+    def test_跨年不會被當成已經過期(self):
+        """12/31 的限流在 1/1 讀到時，補上「今年」會得到一個十二個月前的時間，
+        於是旗標被清掉 —— 明明還在限流卻一直被派工。"""
+        now = datetime.datetime(2027, 1, 1, 9, 0)
+        when = api._parse_reset("12/31 23:00", now)
+        self.assertIsNotNone(when)
+        self.assertGreater(when, now)
+        self.assertEqual(when.year, 2027)
+
+    def test_解析不了就回None(self):
+        self.assertIsNone(api._parse_reset("下週三", datetime.datetime.now()))
 if __name__ == "__main__":
     unittest.main()

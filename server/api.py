@@ -249,6 +249,23 @@ _FAIL_PATTERNS = [
     re.compile(r'(?im)^[ \t]*429\s+Too\s+Many\s+Requests\b[^\r\n]*[ \t\r]*$'),
     re.compile(r'(?im)^[ \t]*(?:quota|credits?)\s+exhaust\w*'
                r'[^"\r\n]{0,60}[ \t\r]*$'),
+    # 帶嚴重性前綴、而且後面接一整句話的那種。
+    #
+    # 上面那幾條都要求片語從行首開始、後面最多再 60 個字 —— 那個限制是為了
+    # 不要去咬「文章裡順帶提到 usage limit」的句子。但 codex 實際吐出來的是：
+    #   ERROR: You've hit your usage limit. Visit https://…/usage to purchase
+    #   more credits or try again at Sep 1st, 2026 10:37 PM.
+    # 前綴是 `ERROR: `（不是行首片語），尾巴 110 個字（不只 60）——
+    # 兩個條件都不合，於是**一次都沒有被認出來過**。派工照樣送過去撞牆，
+    # 而畫面上那件事看起來不是失敗。
+    #
+    # 這一條放寬尾巴，但改用「行首必須是明確的嚴重性標記」換回精確度：
+    # 一行以 ERROR: 開頭、接著說「你撞到額度上限」，那不會是敘述文字。
+    # _benign_failure_context 仍然會擋掉「（這只是範例）」那種。
+    re.compile(r"(?im)^[ \t]*\[?(?:ERROR|FATAL|CRITICAL)\]?[ \t]*:[ \t]*"
+               r"(?:you(?:'ve| have)\s+)?(?:hit|reached|exceeded)\s+"
+               r'(?:your\s+)?(?:\w+\s+){0,2}(?:rate|usage|quota|credit)'
+               r'[ _-]?limits?\b'),
 ]
 _BENIGN_FAILURE_CONTEXT_RE = re.compile(
     r'\b(?:historical|past|previous|prior)\s+(?:example|incident|case|attempt)\b|'
@@ -1620,6 +1637,96 @@ def enrich_installed(data: dict) -> None:
             v["evidence"] = f"已安裝但尚無使用紀錄（{Path(exe).name}）"
 
 
+def _parse_reset(raw: str, now: _dt.datetime) -> _dt.datetime | None:
+    """把 reset_at（MM/DD HH:MM）還原成年份正確的時間。
+
+    12/31 的限流在 1/1 讀到時，補上「今年」會得到一個十二個月前的時間，
+    於是「已經過了」→ 旗標被清掉 → 明明還在限流卻一直被派工。
+    """
+    try:
+        when = _dt.datetime.strptime(f"{now.year}/{raw}", "%Y/%m/%d %H:%M")
+    except ValueError:
+        return None
+    if when < now - _dt.timedelta(days=180):
+        when = when.replace(year=now.year + 1)
+    return when
+
+
+def _latest_log_per_tool(log_dir: Path) -> dict:
+    """每個工具最近一次派工的 log。只看最近一次是關鍵 ——
+    幾天前撞過一次牆不代表現在還在牆裡。
+
+    排序用檔名的時間戳，不用 mtime。兩個理由：
+      · mtime 排的是「誰最後被寫過」。一件還在跑的舊派工會一直長 log，
+        於是它的 mtime 比一件剛派出去的還新 —— 但「最近一次派工」問的是
+        哪一件比較晚被派出去，那是時間戳。
+      · 同一秒建立的兩個檔 mtime 會相等，排序結果不穩定（測試就先咬到這個）。
+    檔名是 {YYYYMMDD-HHMMSS[_n]}_{tool}.log，時間戳在最前面，
+    所以整個 stem 直接字典序比大小就是時間序。
+    """
+    out: dict = {}
+    try:
+        logs = sorted(log_dir.glob("*_*.log"), key=lambda p: p.stem, reverse=True)[:80]
+    except OSError:
+        return out
+    for f in logs:
+        tool = f.stem.split("_")[-1]
+        out.setdefault(tool, f)
+    return out
+
+
+def detect_rate_limits(data: dict) -> None:
+    """從最近一次派工的 log，認出「這個工具自己說沒額度了」。
+
+    為什麼需要：底下的 enrich_reset_times 只會替**已經被標成限流**的工具
+    補上恢復時間，它從來不會自己加上那個標記。而它的註解卻寫著
+    「判斷錯了也會自我修正：真的還在限流的話，下次派工失敗會寫進 log 再被抓到」
+    —— 那個「被抓到」在程式裡不存在。
+
+    這不是理論問題。實際發生的事：codex 的額度用到 2026-09-01，
+    log 裡明明白白寫著「You've hit your usage limit... try again at
+    Sep 1st, 2026 10:37 PM」，但 status.json 裡 rate_limited 還是 false，
+    於是派工照樣送過去、照樣撞牆，改派邏輯完全沒有觸發 ——
+    使用者第二次講「不會自動切換有額度的模型」，指的就是這一層。
+
+    只在「有恢復時間、而且還沒到」的時候才標記。理由跟 enrich_reset_times
+    一樣：沒有恢復時間就沒有證據證明現在還在限流，寧可讓它被派一次工
+    再失敗，也不要把一個其實可用的工具永久關在門外。
+    """
+    tools = data.get("tools") or {}
+    if not tools:
+        return
+    now = _dt.datetime.now()
+    for tool, log in _latest_log_per_tool(Path.home() / "ai-hub" / "dispatch-log").items():
+        v = tools.get(tool)
+        if not isinstance(v, dict) or v.get("rate_limited"):
+            continue                      # 已經標了就不用再認一次
+        try:
+            text = log.read_text(encoding="utf-8", errors="ignore")[-8192:]
+        except OSError:
+            continue
+        hit = None
+        for pat in _FAIL_PATTERNS:
+            for m in pat.finditer(text):
+                # 工單本文會被寫進 log 開頭，而工單裡交代「撞到 usage limit 就回報」
+                # 是家常便飯 —— 那不是本次執行的結果
+                if not _benign_failure_context(text, m):
+                    hit = m
+        if not hit:
+            continue
+        found = RESET_RE.search(text)
+        if not found:
+            continue
+        raw = _fmt_reset(found.group(1))
+        when = _parse_reset(raw, now)
+        if not when or when <= now:
+            continue                      # 恢復時間已經過了，不是現在的限流
+        v["rate_limited"] = True
+        v["status"] = "rate_limited"
+        v["reset_at"] = raw
+        v["evidence"] = f"{log.name}：{_ANSI_RE.sub('', hit.group(0)).strip()[:120]}"
+
+
 def enrich_reset_times(data: dict) -> None:
     """校正「限流中」的判定，並補上額度恢復時間。
 
@@ -1665,12 +1772,8 @@ def enrich_reset_times(data: dict) -> None:
             v["rate_limit_unverified"] = True
             v["evidence"] = (v.get("evidence") or "") + "（無法確認是否仍在限流：找不到工具回報的恢復時間，已當作可用）"
             continue
-        # reset_at 是 MM/DD HH:MM，補上年份後跟現在比
-        try:
-            when = _dt.datetime.strptime(f"{now.year}/{raw}", "%Y/%m/%d %H:%M")
-            if when < now - _dt.timedelta(days=180):     # 跨年
-                when = when.replace(year=now.year + 1)
-        except ValueError:
+        when = _parse_reset(raw, now)                    # MM/DD HH:MM → 補年份（含跨年）
+        if not when:
             continue
         if when <= now:
             v["rate_limited"] = False
@@ -1741,6 +1844,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/status":
             if STATUS_JSON.exists():
                 data = json.loads(STATUS_JSON.read_text(encoding="utf-8"))
+                detect_rate_limits(data)
                 enrich_reset_times(data)
                 enrich_installed(data)
                 return self._json(data)
@@ -2944,9 +3048,24 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _limited_tools() -> set:
-        """現在限流中的工具。讀不到就當成沒有人限流（不要因此擋住派工）"""
+        """現在限流中的工具。讀不到就當成沒有人限流（不要因此擋住派工）。
+
+        這裡跟 /api/status 一樣會跑 detect_rate_limits —— 原本這一層完全不存在，
+        於是 codex 的 log 裡明明白白寫著「usage limit… try again at Sep 1st」，
+        status.json 的 rate_limited 卻還是 false，工單照樣送過去撞牆。
+
+        但**刻意不跑 enrich_reset_times**，雖然畫面那邊會跑。不是疏忽：
+        那個函式做的是「找不到恢復時間就把旗標清掉」，而清掉旗標在這兩個地方
+        的代價完全不同 ——
+          · 畫面猜錯：一隻龍的顏色不對，看一眼就知道
+          · 路由猜錯：工單送進一個沒額度的工具，log 裡一行錯誤，然後就沒了，
+            半小時後才發現這件事根本沒開始
+        兩邊都往「比較不痛的那個方向」錯：畫面寧可說它還能用，
+        路由寧可換一個。加旗標兩邊一致，清旗標只在畫面。
+        """
         try:
             status = json.loads(STATUS_JSON.read_text(encoding="utf-8"))
+            detect_rate_limits(status)
             return {k for k, v in (status.get("tools") or {}).items()
                     if v.get("rate_limited")}
         except Exception:
