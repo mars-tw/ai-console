@@ -33,6 +33,8 @@ export function loadHero(): Hero {
     h.tickets.ally ??= 0
     h.tickets.gear ??= 0
     h.secrets ??= []
+    // 舊存檔沒有這個欄位。預設開 —— 抱著一整包藥水戰到死不是任何人要的
+    h.autoPotion ??= true
     h.tally ??= { deathStreak: 0, crits: 0, superKills: 0, cleanClears: 0, breaks: 0 }
     h.potions.hp ??= 0
     h.potions.mp ??= 0

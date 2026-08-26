@@ -150,8 +150,11 @@ function beat() {
 
   if (b.xp || b.gold || b.loot.length) {
     const gained = collect(h, b)
+    // 順序＝優先級，理由同 Adventure.tsx：彩蛋一輩子一次，
+    // 背包清理是不可逆的動作，升級則會一直發生。
     if (gained.secretAllies.length) pending.push(`✦ 有人加入了：${gained.secretAllies.join('、')}`)
     else if (gained.secrets.length) pending.push(`🔮 解鎖隱藏技能：${gained.secrets.join('、')}`)
+    else if (gained.trimmed.count) pending.push(`背包滿了，自動賣掉 ${gained.trimmed.count} 件雜物換 ${gained.trimmed.gold} 金`)
     else if (gained.levels > 0) pending.push(`升到 Lv.${h.level}`)
     else if (gained.allyUps.length) pending.push(`${gained.allyUps.join('、')} 升級了`)
     saveHero(h)

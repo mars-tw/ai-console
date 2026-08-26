@@ -11,7 +11,7 @@ import { useReadable } from '@/theme'
 import { DUNGEONS, RARITY_ORDER, SKILLS_OF_LINE, SKILL_BY_ID, ZONES } from '@/rpg/data'
 import {
   activeLoadout, attrLeft, autoEquipBest, collect, computeStats, isUpgrade,
-  itemById, itemScore, linePoints, skillLeft, skillUnlocked, startBattle, stepBattle,
+  itemById, itemScore, junkOf, linePoints, skillLeft, skillUnlocked, startBattle, stepBattle,
   xpForLevel, type Battle,
 } from '@/rpg/engine'
 import { SHOP, type BuyResult, type ShopEntry } from '@/rpg/shop'
@@ -289,9 +289,13 @@ export default function Adventure({ tools }: Props) {
       // 每回合把獎勵收進角色，這樣掛著離開也不會白打
       if (b.xp || b.gold || b.loot.length) {
         const gained = collect(h, b)
-        // 解鎖彩蛋比升級更值得報 —— 那是玩家不知道存在的東西，不講他不會發現
+        // 一個 tick 只報一件，所以順序就是優先級。由高到低：
+        //   1. 彩蛋（一輩子一次，不講就不會發現）
+        //   2. 背包自動清理（有東西被賣掉了，是不可逆的動作）
+        //   3. 升級／成長（會重複發生，而且等級數字本來就在畫面上）
         if (gained.secretAllies.length) flash(t('✦ 有人加入了：{name}', { name: gained.secretAllies.map((x) => t(x)).join('、') }))
         else if (gained.secrets.length) flash(t('🔮 解鎖隱藏技能：{name}', { name: gained.secrets.map((x) => t(x)).join('、') }))
+        else if (gained.trimmed.count) flash(t('背包滿了，自動賣掉 {n} 件雜物換 {g} 金', { n: gained.trimmed.count, g: gained.trimmed.gold }))
         else if (gained.levels > 0) flash(t('升到 Lv.{lv}！獲得技能點與屬性點', { lv: h.level }))
         else if (gained.uniquesGrown.length) flash(t('✦ {name} 跟著你變強了', { name: gained.uniquesGrown.map((x) => t(x)).join('、') }))
         else if (gained.allyUps.length) flash(t('{who} 升級了', { who: gained.allyUps.map((x) => t(x)).join('、') }))
@@ -872,26 +876,14 @@ export default function Adventure({ tools }: Props) {
       : t('目前已經是最佳配置')), 0)
   })
 
-  /** 賣掉所有「不是最佳、也沒裝著」的裝備，換錢清背包 */
-  /** 這次會被賣掉的東西（先算出來，才能在確認框裡講清楚） */
-  const junkPreview = (h: Hero) => {
-    const keep = new Set<string>()
-    for (const l of h.loadouts) for (const s of SLOTS) if (l.equipped[s]) keep.add(l.equipped[s]!)
-    // 每個部位保留分數最高的三件當備用
-    for (const s of SLOTS) {
-      h.bag.filter((i) => i.slot === s).sort((a, b) => itemScore(b) - itemScore(a))
-        .slice(0, 3).forEach((i) => keep.add(i.id))
-    // 彩蛋裝備一律留著，不管分數。
-    //
-    // 它們是六件獨一無二、賣掉就再也拿不回來的東西 —— 而原本的規則只看
-    // itemScore 取每個部位前三名，所以一件沒穿在身上的彩蛋裝，
-    // 只要同部位有三件分數更高的普通裝，就會被當成雜物永久賣掉。
-    // 「清雜物」這個名字讓人以為它只會清沒用的東西，不會清掉稀有品。
-    h.bag.filter((i) => i.unique).forEach((i) => keep.add(i.id))
-    }
-    const sold = h.bag.filter((i) => !keep.has(i.id))
-    return { keep, sold, gold: sold.reduce((n, i) => n + Math.max(1, Math.round(itemScore(i) / 4)), 0) }
-  }
+  /**
+   * 這次會被賣掉的東西（先算出來，才能在確認框裡講清楚）。
+   *
+   * 規則本體搬到 engine.junkOf() —— 背包滿了自動清理那一條路徑
+   * 也要用同一份規則。兩邊各寫一份的話，遲早會出現
+   * 「手動清雜物留著的東西，自動清理卻賣掉了」。
+   */
+  const junkPreview = junkOf
 
   /**
    * 清雜物。先確認再賣，理由有兩個：
@@ -1027,6 +1019,20 @@ export default function Adventure({ tools }: Props) {
               onClick={() => setAuto((v) => !v)}
             >
               {auto ? t('沉浸自動') : t('手動操作')}
+            </button>
+            {/* 自動喝藥。預設開 —— 試玩第一場就死在新手草原，
+                身上帶著四瓶生命藥水一口都沒喝。
+                留一個關得掉的地方，是因為彩蛋「苦行者」的條件正是
+                「一口藥水都不喝，通關三次地城」。 */}
+            <button
+              className={`rounded px-2 py-1 text-xs ${hero.autoPotion !== false
+                ? 'bg-emerald-700 text-white' : 'border border-line2 text-mute'}`}
+              title={hero.autoPotion !== false
+                ? t('血量低於 35% 時自動喝生命藥水（喝藥不佔回合）。關掉才拿得到彩蛋「苦行者」')
+                : t('目前不會自動喝藥。彩蛋「苦行者」需要全程不喝藥通關地城')}
+              onClick={() => update((h) => { h.autoPotion = h.autoPotion === false })}
+            >
+              {hero.autoPotion !== false ? t('🧪 自動喝藥') : t('🧪 不喝藥')}
             </button>
             {battle && !battle.over && (
               <button className="rounded border border-line2 px-2 py-0.5 text-xs text-mute hover:bg-elev" onClick={() => setBattle(null)}>

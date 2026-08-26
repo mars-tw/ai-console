@@ -254,6 +254,58 @@ export function itemScore(it: Item): number {
   return Math.round(n)
 }
 
+/**
+ * 背包上限。超過就自動賣掉最不值錢的雜物，一路賣到回到上限以內。
+ *
+ * 為什麼非有不可：這個遊戲的主打用法就是掛機 ——「你切去派工、看對話的
+ * 時候它照打」。實測掉落速度約每分鐘十件，掛一整晚就是好幾千件。
+ * 那三件事會一起壞掉：背包清單渲染不動、每 900ms 的存檔 JSON 越來越大、
+ * 而玩家永遠找不到自己想找的那一件。
+ *
+ * 240 是刻意訂得寬的：正常玩不會碰到，碰到的一定是掛了很久。
+ */
+export const BAG_CAP = 240
+
+/**
+ * 哪些東西算「雜物」。
+ *
+ * 保留三種：身上穿著的、每個部位分數最高的三件（備用與換裝空間）、
+ * 以及**所有彩蛋裝備**。最後一項不能只靠分數判斷 ——
+ * 那是永遠只有一件、賣掉就再也拿不回來的東西，
+ * 只要同部位有三件分數更高的普通裝就會被當雜物清掉。
+ */
+export function junkOf(h: Hero): { keep: Set<string>; sold: Item[]; gold: number } {
+  const keep = new Set<string>()
+  for (const l of h.loadouts) for (const s of SLOTS) if (l.equipped[s]) keep.add(l.equipped[s]!)
+  for (const s of SLOTS) {
+    h.bag.filter((i) => i.slot === s).sort((a, b) => itemScore(b) - itemScore(a))
+      .slice(0, 3).forEach((i) => keep.add(i.id))
+  }
+  h.bag.filter((i) => i.unique).forEach((i) => keep.add(i.id))
+  const sold = h.bag.filter((i) => !keep.has(i.id))
+  return { keep, sold, gold: sold.reduce((n, i) => n + Math.max(1, Math.round(itemScore(i) / 4)), 0) }
+}
+
+/**
+ * 背包滿了就自動賣掉最不值錢的那幾件，剛好回到上限以內。
+ *
+ * 刻意不是「一次清光所有雜物」：那是玩家自己按「清雜物」時的行為，
+ * 他知道自己在做什麼。自動的那一份要盡量少動 —— 只賣到剛好夠用，
+ * 而且從最不值錢的開始。
+ */
+export function trimBag(h: Hero): { count: number; gold: number } {
+  if (h.bag.length <= BAG_CAP) return { count: 0, gold: 0 }
+  const { sold } = junkOf(h)
+  const need = h.bag.length - BAG_CAP
+  const drop = sold.sort((a, b) => itemScore(a) - itemScore(b)).slice(0, need)
+  if (!drop.length) return { count: 0, gold: 0 }
+  const ids = new Set(drop.map((i) => i.id))
+  const gold = drop.reduce((n, i) => n + Math.max(1, Math.round(itemScore(i) / 4)), 0)
+  h.bag = h.bag.filter((i) => !ids.has(i.id))
+  h.gold += gold
+  return { count: drop.length, gold }
+}
+
 // ── 戰鬥 ───────────────────────────────────────────
 export interface Battle {
   kind: 'field' | 'dungeon'
@@ -545,10 +597,45 @@ function chooseSkill(c: Combatant, h: Hero | null): string | null {
   return best
 }
 
+/** 低於這個比例就自動喝藥。藥水回 40%，所以 0.35 喝下去不會浪費 */
+const AUTO_POTION_HP = 0.35
+const AUTO_POTION_MP = 0.2
+
+/**
+ * 快死了就自己喝一口。
+ *
+ * 為什麼非有不可：試玩第一場就死在新手草原 —— 身上帶著 4 瓶生命藥水
+ * 一口都沒喝。「沉浸自動」是預設模式，而它打得比任何一個新手都差：
+ * 沒有人會抱著一整包藥水戰到死。
+ * 喝藥不佔回合（drinkPotion 的設計），所以這裡不會犧牲輸出。
+ *
+ * 門檻設 0.35 而不是更高：藥水回 40%，太早喝會溢出浪費；
+ * 太晚（例如 0.15）則會來不及 —— 一次暴擊就跨過去了。
+ *
+ * 用開關而不是寫死，是因為彩蛋「苦行者」的條件正是
+ * 「一口藥水都不喝，通關三次地城」。自動喝藥會讓那個彩蛋幾乎拿不到，
+ * 所以要留一個關得掉的地方，而不是二選一。
+ */
+function autoDrink(b: Battle, c: Combatant, h: Hero | null): boolean {
+  if (!h || c.side !== 'hero' || h.autoPotion === false) return false
+  if (c.hp > 0 && c.hp < c.hpMax * AUTO_POTION_HP && (h.potions?.hp ?? 0) > 0) {
+    return drinkPotion(b, h, 'hp')
+  }
+  // 魔力見底時技能全部放不出來，只能普攻 —— 那時候一口魔力藥水
+  // 的價值比一次攻擊高得多
+  if (c.mp < c.mpMax * AUTO_POTION_MP && (h.potions?.mp ?? 0) > 0
+      && c.skills.some((id) => (SKILL_BY_ID[id]?.mpCost ?? 0) > c.mp)) {
+    return drinkPotion(b, h, 'mp')
+  }
+  return false
+}
+
 function act(b: Battle, c: Combatant, h: Hero | null, haste: number, skipCd = false) {
   if (c.hp <= 0) return
   // 玩家即時施放時不要再扣一次冷卻 —— 那一回合的冷卻已經在 tick 裡扣過了
   if (!skipCd) for (const k of Object.keys(c.cds)) if (c.cds[k] > 0) c.cds[k]--
+  // 喝藥不佔回合，所以放在最前面：先把命保住，這一回合照樣出手
+  autoDrink(b, c, h)
 
   const ourSide = [b.hero, ...(b.pet ? [b.pet] : []), ...b.allies]
   const targets = c.side === 'foe' ? ourSide.filter((x) => x.hp > 0) : b.foes.filter((x) => x.hp > 0)
@@ -930,6 +1017,8 @@ export function collect(h: Hero, b: Battle): {
   secretAllies: string[]
   /** 這一場跟著升級的彩蛋裝備名稱 */
   uniquesGrown: string[]
+  /** 背包滿了自動賣掉的雜物 */
+  trimmed: { count: number; gold: number }
 } {
   h.tally ??= { deathStreak: 0, crits: 0, superKills: 0, cleanClears: 0, breaks: 0 }
   h.tickets ??= { ally: 0, gear: 0 }
@@ -1001,8 +1090,11 @@ export function collect(h: Hero, b: Battle): {
   // 早期拿到的等於注定要丟 —— 而你永遠拿不到第二件。
   const grown = levels > 0 ? syncUniques(h) : []
   if (levels > 0) syncSecretAllies(h)
+  // 背包滿了就自動清一點。掛機一整晚會撿到好幾千件，
+  // 不清的話清單渲染不動、存檔也越來越大。
+  const trimmed = trimBag(h)
   return {
     levels, loot, newPet: newPet ?? undefined,
-    secrets: got, allyUps, secretAllies: allies, uniquesGrown: grown,
+    secrets: got, allyUps, secretAllies: allies, uniquesGrown: grown, trimmed,
   }
 }

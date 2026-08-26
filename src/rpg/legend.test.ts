@@ -16,10 +16,10 @@ import {
   recruitCombatant, syncSecretAllies,
 } from './allies'
 import { CANNOT_ENHANCE_MSG, canEnhance, enhance } from './enhance'
-import { newHero } from './engine'
+import { BAG_CAP, junkOf, newHero, trimBag } from './engine'
 import { UNIQUES, makeUnique, syncUniques } from './secrets'
 import { PARTY_CAP_DEFAULT, PARTY_CAP_MAX, PARTY_CAP_MIN, partyCapOf } from './types'
-import type { Hero } from './types'
+import type { Hero, Item } from './types'
 
 // node 環境沒有 localStorage，newHero 不碰它，但 saveHero 會 —— 這裡只用 newHero
 const mk = (over: Partial<Hero> = {}): Hero => Object.assign(newHero(), over)
@@ -244,5 +244,67 @@ describe('傳說人物：四個定位都要有', () => {
     for (const role of ['tank', 'dps', 'healer', 'support']) {
       expect(legendRoles.has(role as never), `傳說階缺 ${role}`).toBe(true)
     }
+  })
+})
+
+describe('背包上限：掛機一整晚不會爆', () => {
+  const mkJunk = (i: number): Item => ({
+    id: `j${i}`, name: '雜物', slot: 'head', rarity: 'crude', ilvl: 1,
+    atk: 0, def: 1, affixes: [],
+  })
+
+  it('沒超過上限就什麼都不做', () => {
+    const h = mk()
+    h.bag = Array.from({ length: BAG_CAP }, (_, i) => mkJunk(i))
+    expect(trimBag(h)).toEqual({ count: 0, gold: 0 })
+    expect(h.bag.length).toBe(BAG_CAP)
+  })
+
+  it('超過就賣到剛好回到上限，不會一次清光', () => {
+    // 一次清光是玩家自己按「清雜物」時的行為 —— 他知道自己在做什麼。
+    // 自動的那一份要盡量少動。
+    const h = mk()
+    h.bag = Array.from({ length: BAG_CAP + 30 }, (_, i) => mkJunk(i))
+    const r = trimBag(h)
+    expect(r.count).toBe(30)
+    expect(h.bag.length).toBe(BAG_CAP)
+    expect(h.gold).toBeGreaterThan(0)
+  })
+
+  it('★ 彩蛋裝備一件都不會被自動賣掉', () => {
+    // 它們是永遠只有一件、賣掉就再也拿不回來的東西
+    const h = mk()
+    h.bag = [
+      ...UNIQUES.map((u, i) => makeUnique(u, 10, `u${i}`)),
+      ...Array.from({ length: BAG_CAP + 50 }, (_, i) => mkJunk(i)),
+    ]
+    trimBag(h)
+    for (const u of UNIQUES) {
+      expect(h.bag.some((it) => it.unique === u.id), `${u.name} 被賣掉了`).toBe(true)
+    }
+  })
+
+  it('身上穿著的不會被賣掉', () => {
+    const h = mk()
+    const worn = mkJunk(9999)
+    h.bag = [worn, ...Array.from({ length: BAG_CAP + 20 }, (_, i) => mkJunk(i))]
+    h.loadouts[0].equipped.head = worn.id
+    trimBag(h)
+    expect(h.bag.some((it) => it.id === worn.id)).toBe(true)
+  })
+
+  it('從最不值錢的開始賣', () => {
+    const h = mk()
+    const good = { ...mkJunk(1), id: 'good', def: 500 }
+    h.bag = [good, ...Array.from({ length: BAG_CAP + 5 }, (_, i) => mkJunk(i + 100))]
+    trimBag(h)
+    expect(h.bag.some((it) => it.id === 'good')).toBe(true)
+  })
+
+  it('手動清雜物與自動清理用同一份規則', () => {
+    // 兩邊各寫一份的話，遲早會出現「手動留著的東西自動卻賣掉了」
+    const h = mk()
+    h.bag = [makeUnique(UNIQUES[0], 10, 'u1'), mkJunk(1)]
+    expect(junkOf(h).sold.some((i) => i.unique)).toBe(false)
   })
 })

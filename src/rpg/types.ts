@@ -112,6 +112,13 @@ export interface Hero {
   deaths: number
   /** 消耗品存量 */
   potions: Potions
+  /**
+   * 快死了自動喝藥。預設開。
+   *
+   * 關得掉是因為彩蛋「苦行者」的條件正是「一口藥水都不喝，通關三次地城」——
+   * 自動喝藥會讓那個彩蛋幾乎拿不到。與其二選一，不如留一個開關。
+   */
+  autoPotion?: boolean
   /** 已收服的寵物 */
   pets: Pet[]
   /** 出戰中的寵物 id；沒有就不帶 */
