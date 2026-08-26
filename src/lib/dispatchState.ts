@@ -21,6 +21,9 @@ export function stateOf(d: DispatchRecord): DispatchState {
 
 export const isLive = (d: DispatchRecord) => {
   const s = stateOf(d)
+  // cancelled 不算 live —— 取消的整個意義就是「不要再把它算成待辦」。
+  // 漏掉這裡的話，取消完清單標題還是寫著「3 件進行中」，
+  // 而那個數字正是使用者用來判斷「還有沒有事情等我」的東西。
   return s === 'running' || s === 'waiting'
 }
 
@@ -38,6 +41,8 @@ export function look(s: DispatchState): Look {
       return { label: t('失敗'), dot: 'bg-red-500', tone: 'text-red-300' }
     case 'silent':
       return { label: t('沒有輸出'), dot: 'bg-mute2', tone: 'text-mute2' }
+    case 'cancelled':
+      return { label: t('已取消'), dot: 'bg-mute3', tone: 'text-mute3' }
     default:
       return { label: t('完成'), dot: 'bg-emerald-500', tone: 'text-emerald-400/80' }
   }

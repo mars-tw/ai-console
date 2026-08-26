@@ -1809,6 +1809,8 @@ class Handler(BaseHTTPRequestHandler):
                 {**j, "desc": schedule.describe(j)} for j in schedule.load()]})
         if self.path == "/api/dispatches":
             return self.do_dispatches()
+        if self.path == "/api/dispatch/tools":
+            return self.do_dispatch_tools()
         if self.path.split("?", 1)[0] == "/api/search":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             return self._json(_search_conversations((q.get("q") or [""])[0]))
@@ -2067,6 +2069,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.do_dispatch_batch()
         if self.path == "/api/dispatch/followup":
             return self.do_followup()
+        if self.path == "/api/dispatch/cancel":
+            return self.do_dispatch_cancel()
         if self.path == "/api/dispatch/retry":
             return self.do_dispatch_retry()
         if self.path == "/api/dispatch":
@@ -2198,7 +2202,21 @@ class Handler(BaseHTTPRequestHandler):
     }
     # 可以被指定的工具名。任何不在這裡面的一律拒絕 —— 見 do_dispatch 的說明。
     KNOWN_TOOLS = set(BIN) | {"local", "auto"}
-    CLOUD_CHAIN = ["claude", "codex", "gemini", "grok", "qwen"]  # 自動路由順序（地端由 LM Studio 兜底）
+    # 只會開一個可見終端、把指令帶進去、然後等人按 Enter 的工具。
+    # 它們不是壞掉，是本來就沒有無頭模式 —— 但對「派工」來說差別是致命的：
+    # 派出去之後沒有人按，那件事就永遠停在原地，而畫面上它看起來已經派出去了。
+    TERMINAL_TOOLS = {"grok", "kimi", "cursor"}
+    # 自動路由順序。**只放會自己跑完的工具**（地端由 LM Studio 兜底）。
+    #
+    # 原本這裡是 [claude, codex, gemini, grok, qwen] —— grok 排在 qwen 前面，
+    # 而 grok 只開終端。於是「前三個都限流」的那天，auto 會挑中 grok，
+    # 開一個視窗擺在那裡，沒有人按，工單一步都不會動；
+    # 而 qwen 明明有額度、也會自己跑完，卻永遠輪不到。
+    # 使用者的原話是「不會自動切換有額度的模型」—— 真正的病因在這一行。
+    #
+    # 要人手動按的工具仍然可以「指名」派工（那是使用者自己的選擇），
+    # 但不該由自動路由替他做這個選擇。
+    CLOUD_CHAIN = ["claude", "codex", "gemini", "qwen"]
     DISPATCHES = []  # 派工登錄：{id, tool, task, started, pid, log, mode, reply}
     # 請求執行緒、批次工作執行緒、排程執行緒都會動這份清單再整份寫檔。
     # 沒有鎖的話兩邊同時寫會互相蓋掉 —— 這個專案已經因為登錄被覆蓋而丟過一次歷史。
@@ -2605,6 +2623,11 @@ class Handler(BaseHTTPRequestHandler):
         跑完的、失敗的、還沒被按下去的終端全部長一樣 ——
         清單標題寫「執行中的派工」，實際上是一份只增不減的歷史。
         """
+        # 取消優先於一切。已取消的那件如果剛好還活著（使用者在按下取消的
+        # 前一秒把終端按下去了），畫面上仍然標成「已取消」是對的 ——
+        # 這個狀態代表的是「不要再把它算成待辦」，不是「行程已經死了」。
+        if d.get("cancelled"):
+            return "cancelled"
         if alive:
             return "running"
         raw_log = d.get("log") or ""
@@ -2736,6 +2759,62 @@ class Handler(BaseHTTPRequestHandler):
 
     # 目前這一批的進度，給介面看的
     BATCH = {"total": 0, "done": 0, "running": False, "current": "", "note": ""}
+
+    def do_dispatch_cancel(self):
+        """取消一件還沒被按下去的終端派工。
+
+        為什麼需要：終端派工會開一個視窗、把指令帶進去，然後等人按。
+        在那之前它一直被算成「進行中」。真實情況是 —— 派給 kimi 的工單
+        擺了半小時沒人按，我把同一件事改派給會自己跑的 gemini；
+        於是同一份工單有兩個持有者，誰先按下那個視窗，就有兩個 AI
+        在同一批檔案上做同一件事。介面上完全沒有辦法把前一件收掉。
+
+        只能取消 waiting 的那些。running 的要停下來得殺行程，
+        那是另一件事，而且中途砍掉一個正在改檔案的 agent 更危險。
+
+        取消做兩件事，缺一不可：
+          1. 登錄標記 cancelled —— 畫面不再把它算成待辦
+          2. **把工單檔內容換成一句「已取消」** —— 那個終端視窗還開著，
+             指令也還帶在裡面。只做第 1 件的話，半小時後有人回到桌面
+             看到那個視窗、順手按下去，工單照樣會被執行一次。
+             換掉內容之後就算被按下去，agent 讀到的是「不要做任何事」。
+        """
+        body = self._body()
+        did = str(body.get("id") or "").strip()
+        with self._REG_LOCK:
+            if not self.DISPATCHES:
+                self._load_registry()
+            rec = next((d for d in self.DISPATCHES if d.get("id") == did), None)
+            if not rec:
+                return self._json({"ok": False, "error": "找不到這筆派工"}, 404)
+            alive = bool(rec.get("pid")) and int(rec["pid"]) in _alive_pids({int(rec["pid"])})
+            state = self._dispatch_state(dict(rec), alive)
+            if state == "cancelled":
+                return self._json({"ok": True, "id": did, "already": True,
+                                   "note": "這件先前已經取消過了"})
+            if state != "waiting":
+                return self._json({"ok": False, "error":
+                                   f"只有『等你執行』的派工可以取消，這件現在是「{state}」"},
+                                  409)
+            rec["cancelled"] = time.strftime("%Y%m%d-%H%M%S")
+            self._save_registry()
+
+        # 工單檔換成取消通知。寫不進去不算失敗（登錄已經標記了），
+        # 但一定要讓使用者知道那個視窗還是危險的。
+        note = ""
+        try:
+            order = Path(rec.get("log", "")).parent / f"{did}_task.md"
+            if order.exists():
+                order.write_text(
+                    "這件工作已經取消。\n\n"
+                    "不要執行任何動作、不要修改任何檔案、不要回報進度。\n"
+                    "如果你正在讀這份檔案，請直接結束並回覆一句「已取消」。\n",
+                    encoding="utf-8")
+            else:
+                note = "工單檔已經不在了；那個終端視窗如果還開著，請直接關掉"
+        except OSError as e:
+            note = f"工單檔改不動（{e}）；請直接把那個終端視窗關掉"
+        return self._json({"ok": True, "id": did, "note": note})
 
     def do_dispatch_retry(self):
         """把某一筆派工原封不動再派一次。
@@ -2872,6 +2951,41 @@ class Handler(BaseHTTPRequestHandler):
                     if v.get("rate_limited")}
         except Exception:
             return set()
+
+    # 給人看的工具名。程式裡用小寫 id，畫面上用這個。
+    TOOL_LABELS = {"claude": "Claude", "codex": "Codex", "gemini": "Gemini",
+                   "qwen": "Qwen", "grok": "Grok", "kimi": "Kimi",
+                   "cursor": "Cursor", "local": "地端模型"}
+
+    def do_dispatch_tools(self):
+        """現在派得出去的工具，以及每一個「派出去之後會發生什麼」。
+
+        為什麼要有這支 API：前端的工具下拉本來是寫死的一串字串，
+        於是畫面上 kimi 跟 gemini 長得一模一樣 —— 但選前者要人回到桌面
+        找到那個視窗按 Enter，選後者按完就沒事了。這個差別在派工的當下
+        完全看不出來，只會在半小時後發現「怎麼一步都沒動」。
+
+        limited 也一起回：限流中的工具照樣列出來（使用者要知道它存在），
+        但畫面上要能標成不可選，而不是選了才在 503 裡看到原因。
+        """
+        limited = self._limited_tools()
+        out = []
+        for tool in ["claude", "codex", "gemini", "qwen", "grok", "kimi", "cursor"]:
+            if not BIN.get(tool):
+                continue          # 這台機器上沒裝，不要列出來給人選
+            out.append({
+                "id": tool,
+                "label": self.TOOL_LABELS.get(tool, tool),
+                "mode": "terminal" if tool in self.TERMINAL_TOOLS else "headless",
+                "limited": tool in limited,
+            })
+        out.append({"id": "local", "label": self.TOOL_LABELS["local"],
+                    "mode": "local", "limited": False})
+        # auto 現在會挑到誰。畫面上直接寫出來，不要讓人猜。
+        pick = next((t for t in self.CLOUD_CHAIN
+                     if t not in limited and BIN.get(t)), "local")
+        return self._json({"ok": True, "tools": out, "auto": pick,
+                           "limited": sorted(limited)})
 
     def _handoff_order(self, target: dict, text: str, why: str) -> str:
         """把一件做到一半的工作，交接給另一個 AI。

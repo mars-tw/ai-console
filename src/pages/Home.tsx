@@ -4,6 +4,7 @@ import type { ConversationDetail, ConversationSummary, IndexData } from '@/types
 import Adventure from '@/components/Adventure'
 import Console from '@/components/Console'
 import Office from '@/components/Office'
+import QuickDispatch from '@/components/QuickDispatch'
 import { t, useLang } from '@/i18n'
 import LangSwitch from '@/components/LangSwitch'
 
@@ -1344,6 +1345,20 @@ export default function Home() {
                         {chatBusy ? '…' : '送出'}
                       </button>
                     </div>
+                    {/* 同一個輸入框有兩個出口：往上是地端模型現在回你一句，
+                        往下是把它變成工單交出去做。刻意共用文字 ——
+                        「先問地端模型、覺得可行再派出去」是真實會發生的順序，
+                        中間不該有一次複製貼上。 */}
+                    <QuickDispatch
+                      conv={selected ? { title: selected.title, projectDir: selected.projectDir } : null}
+                      recent={(detail?.messages || []).slice(-6).map((m) => ({
+                        role: m.role === 'assistant' ? 'assistant' : 'user',
+                        text: m.text,
+                      }))}
+                      text={chatInput}
+                      setText={setChatInput}
+                      onToast={showToast}
+                    />
                   </div>
                 )}
               </div>

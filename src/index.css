@@ -85,6 +85,31 @@
     outline: 2px solid rgb(var(--c-focus));
     outline-offset: 2px;
   }
+
+  /* 佔位符。
+     沒有這一條的話，全站的佔位符都是 Tailwind 的預設 gray-400 ——
+     實測亮色模式下 2.31:1（搜尋框 2.54:1），遠低於 4.5:1。
+     這個專案的佔位符不是裝飾：搜尋框那句「按 / 跳到這裡」是唯一
+     講出快捷鍵的地方，引導那格的佔位符裝的是「例：…」的範例。
+     看不清楚等於那些話沒有寫。
+
+     mute3 是這套色票裡「最暗但仍然過關」的那一階（對最差的表面 4.57:1），
+     所以佔位符還是比正文淡 —— 該有的層次沒有丟掉，只是不再淡到讀不出來。
+
+     opacity: 1 是必要的：Firefox 預設會再把佔位符調淡一次，
+     顏色設對了還是會掉到門檻底下。
+
+     這裡刻意**不用** :where()。Tailwind 的 preflight 有一條
+     `input::placeholder, textarea::placeholder`，權重是 (0,0,2)；
+     包進 :where() 之後這條只剩 (0,0,1)，寫了完全沒有作用 ——
+     而且沒有任何錯誤，只是顏色照舊（實測就是這樣沒生效的）。
+     用同樣的權重、排在它後面才蓋得過去。元件要自己指定顏色時
+     用 placeholder: 開頭的 utility，那在 utilities 層，照樣蓋得過這裡。 */
+  input::placeholder,
+  textarea::placeholder {
+    color: rgb(var(--c-mute3));
+    opacity: 1;
+  }
 }
 
 @layer base {

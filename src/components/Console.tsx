@@ -345,6 +345,7 @@ export default function Console() {
   const [openPatch, setOpenPatch] = useState<string | null>(null)
   /** 正在重派哪一件。空字串＝沒有 */
   const [retryBusy, setRetryBusy] = useState('')
+  const [cancelBusy, setCancelBusy] = useState('')
   /**
    * 互動終端：哪一件正開著、各工具的執行檔路徑、這個環境支不支援。
    *
@@ -650,6 +651,39 @@ export default function Console() {
       setNote(t('⚠️ 控制 API 無回應'), true)
     }
     setRetryBusy('')
+  }
+
+  /**
+   * 取消一件還沒被按下去的終端派工。
+   *
+   * 為什麼需要：終端派工開一個視窗、把指令帶進去、然後等人按。在那之前
+   * 它一直被算成「進行中」。實際發生過的事 —— 派給 kimi 的工單擺了半小時
+   * 沒人按，同一件事改派給會自己跑的 gemini；於是同一份工單有兩個持有者，
+   * 誰先按下那個視窗，就有兩個 AI 在同一批檔案上做同一件事。
+   * 而畫面上完全沒有辦法把前一件收掉。
+   *
+   * 後端除了標記登錄，還會把工單檔換成「不要做任何事」——
+   * 那個視窗還開著，光標記登錄擋不住有人順手按下去。
+   */
+  const cancelDispatch = async (id: string) => {
+    if (cancelBusy) return
+    setCancelBusy(id)
+    try {
+      const r = await fetch('/api/dispatch/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      }).then((x) => x.json()) as { ok?: boolean; error?: string; note?: string }
+      setNote(r.ok ? (r.note ? `⚠️ ${r.note}` : t('已取消。那個終端就算被按下去也不會做事了'))
+        : `⚠️ ${r.error || t('取消失敗')}`, !r.ok || !!r.note)
+      if (r.ok) {
+        fetch('/api/dispatches').then((x) => (x.ok ? x.json() : null))
+          .then((x) => x?.dispatches && setDispatches(x.dispatches)).catch(() => {})
+      }
+    } catch {
+      setNote(t('⚠️ 控制 API 無回應'), true)
+    }
+    setCancelBusy('')
   }
 
   const toggleDiff = async (id: string) => {
@@ -1223,6 +1257,19 @@ export default function Console() {
               >
                 {replyTo === d.id ? t('取消') : t('💬 補一句')}
               </button>
+              {/* 只有「等你執行」才給取消。執行中的要停下來得殺行程，
+                  而中途砍掉一個正在改檔案的 agent 比讓它跑完更危險。 */}
+              {stateOf(d) === 'waiting' && (
+                <button
+                  className="ml-2 text-[10px] text-mute2 hover:text-red-500"
+                  title={t('這件還沒有人按下去。取消之後那個終端就算被按下去也不會做事 ——'
+                    + '同一件事已經改派給別人的時候用這個，才不會兩個 AI 動同一批檔案')}
+                  disabled={cancelBusy === d.id}
+                  onClick={() => void cancelDispatch(d.id)}
+                >
+                  {cancelBusy === d.id ? '…' : t('✕ 取消這件')}
+                </button>
+              )}
               {ptyOk && bins[d.tool] && (
                 <button
                   className="ml-2 text-[10px] text-sky-700 hover:text-sky-500 dark:text-sky-400"
