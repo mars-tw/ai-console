@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import type { ConversationDetail, ConversationSummary, IndexData } from '@/types/data'
 import Adventure from '@/components/Adventure'
 import Console from '@/components/Console'
@@ -78,6 +79,39 @@ function readChatCache(id?: string): { role: string; text: string }[] {
 
 /** 標題裡有沒有中文 */
 const HAS_CJK = /[\u4e00-\u9fff]/
+
+/**
+ * \u628a\u6458\u8981\u88e1\u547d\u4e2d\u7684\u90a3\u4e00\u6bb5\u6a19\u51fa\u4f86\u3002
+ *
+ * \u6458\u8981\u524d\u5f8c\u5404\u7559 60 \u5b57\u624d\u770b\u5f97\u51fa\u4e0a\u4e0b\u6587\uff0c\u4f46\u4e5f\u56e0\u6b64\u4e00\u773c\u6383\u4e0d\u5230\u95dc\u9375\u5b57\u5728\u54ea \u2014\u2014
+ * \u6a19\u51fa\u4f86\u4e4b\u5f8c\u624d\u662f\u300c\u6383\u4e00\u773c\u5c31\u77e5\u9053\u662f\u4e0d\u662f\u9019\u4e00\u4efd\u300d\uff0c\u4e0d\u7136\u9084\u662f\u5f97\u9010\u5b57\u8b80\u3002
+ *
+ * \u7528\u9663\u5217\u62fc React \u7bc0\u9ede\u800c\u4e0d\u662f innerHTML\uff1a\u67e5\u8a62\u5b57\u4e32\u662f\u4f7f\u7528\u8005\u6253\u7684\uff0c
+ * \u7d44 HTML \u5c31\u7b49\u65bc\u958b\u4e00\u500b\u6ce8\u5165\u7684\u53e3\u5b50\uff0c\u800c\u9019\u88e1\u5b8c\u5168\u4e0d\u9700\u8981\u90a3\u500b\u98a8\u96aa\u3002
+ */
+function markHits(text: string, q: string): ReactNode[] {
+  const needle = q.trim()
+  if (!needle) return [text]
+  const lower = text.toLowerCase()
+  const target = needle.toLowerCase()
+  const out: ReactNode[] = []
+  let i = 0
+  let n = 0
+  for (;;) {
+    const at = lower.indexOf(target, i)
+    // \u4e0a\u9650\u53ea\u662f\u9632\u5446\uff1a\u6458\u8981\u672c\u4f86\u5c31\u53ea\u6709\u4e00\u767e\u591a\u5b57\uff0c\u6a19\u8a18\u591a\u5230 20 \u500b\u4ee3\u8868\u51fa\u4e86\u602a\u4e8b
+    if (at < 0 || n > 20) { out.push(text.slice(i)); break }
+    if (at > i) out.push(text.slice(i, at))
+    out.push(
+      <mark key={n} className="rounded-sm bg-amber-300 px-0.5 font-medium text-ink dark:bg-amber-400/45">
+        {text.slice(at, at + needle.length)}
+      </mark>,
+    )
+    i = at + needle.length
+    n += 1
+  }
+  return out
+}
 
 export default function Home() {
   useLang()   // 語言一換就整頁重繪
@@ -951,7 +985,7 @@ export default function Home() {
                       {h.snippets.map((s, i) => (
                         <span key={i} className="line-clamp-2 text-[11px] leading-snug text-mute2">
                           <span className="text-mute3">{s.role === 'user' ? t('你：') : t('AI：')}</span>
-                          {s.text}
+                          {markHits(s.text, search)}
                         </span>
                       ))}
                     </button>

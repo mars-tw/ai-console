@@ -296,7 +296,22 @@ export default function Console() {
   const [jobs, setJobs] = useState<SchedJob[]>([])
   const [showSched, setShowSched] = useState(false)
   const [draft, setDraft] = useState<SchedJob | null>(null)
-  const [history, setHistory] = useState<string[]>([])
+  /**
+   * 最近下過的指令。
+   *
+   * 存 localStorage 的理由跟上面的 steps 一模一樣：切分頁這個元件會 unmount。
+   * 原本只放在元件狀態裡 —— 去看一眼對話再切回來，剛剛打過的那幾句就沒了，
+   * 而那正是最可能要再用一次的東西。
+   */
+  const [history, setHistory] = useState<string[]>(() => {
+    try {
+      const raw: unknown = JSON.parse(localStorage.getItem('ac_console_history') || '[]')
+      return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string').slice(0, 8) : []
+    } catch { return [] }
+  })
+  useEffect(() => {
+    try { localStorage.setItem('ac_console_history', JSON.stringify(history)) } catch { /* 存不了不影響使用 */ }
+  }, [history])
   // 展開中的派工與它的產出。派出去卻看不到結果，等於白派。
   useEffect(() => { localStorage.setItem('ac_serial', serial ? '1' : '0') }, [serial])
   const [openLog, setOpenLog] = useState<string | null>(null)
@@ -751,7 +766,7 @@ export default function Console() {
             {history.map((h) => (
               <button
                 key={h}
-                className="max-w-64 truncate rounded bg-elev px-2 py-0.5 text-[11px] text-mute hover:text-ink2"
+                className="max-w-64 truncate rounded bg-elev px-2 py-1 text-[11px] text-mute hover:text-ink2"
                 onClick={() => setInput(h)}
               >
                 {h}
