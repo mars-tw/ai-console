@@ -6,6 +6,8 @@ import {
   hasSecret,
   makeUnique,
   missingUniques,
+  recordUnique,
+  rememberUniques,
   SECRET_BY_ID,
   SECRETS,
   UNIQUES,
@@ -169,21 +171,9 @@ describe('missingUniques 彩蛋裝備去重', () => {
     expect(missing.length).toBe(6)
   })
 
-  it('背包擁有部分彩蛋裝時，正確排除已持有裝備', () => {
+  it('拿過的就排除掉 —— 依據是永久紀錄，不是背包', () => {
     const h = newHero()
-    h.bag = [
-      {
-        id: 'item-u1',
-        name: '除錯者之刃',
-        slot: 'main',
-        rarity: 'legend' as Rarity,
-        ilvl: 10,
-        atk: 50,
-        def: 0,
-        affixes: [],
-        unique: 'u-debugger',
-      },
-    ]
+    h.uniquesFound = ['u-debugger']
 
     const missing = missingUniques(h)
     expect(missing.length).toBe(5)
@@ -210,35 +200,51 @@ describe('missingUniques 彩蛋裝備去重', () => {
     expect(missing.length).toBe(6)
   })
 
-  it('背包已集齊全部彩蛋裝時，回傳空陣列', () => {
+  it('全部拿過就回空陣列', () => {
     const h = newHero()
-    h.bag = UNIQUES.map((u, i) => ({
-      id: `u-${i}`,
-      name: u.name,
-      slot: u.slot,
-      rarity: 'legend' as Rarity,
-      ilvl: 10,
-      atk: 10,
-      def: 0,
-      affixes: [],
-      unique: u.id,
-    }))
-
+    h.uniquesFound = UNIQUES.map((u) => u.id)
     expect(missingUniques(h)).toEqual([])
+  })
+
+  it('★ 賣掉之後也不會再掉一次', () => {
+    // 這一項是整個「獨一無二」的重點。
+    // 舊版是掃背包判斷「拿過沒有」，於是賣掉、清雜物、或任何讓它離開背包的
+    // 操作之後它就變回「沒拿過」——那叫「一次只能有一件」，不是獨一無二。
+    const h = newHero()
+    recordUnique(h, 'u-debugger')
+    h.bag = []                     // 賣掉了
+    expect(missingUniques(h).some((u) => u.id === 'u-debugger')).toBe(false)
+  })
+
+  it('recordUnique 重複呼叫不會累積重複的 id', () => {
+    const h = newHero()
+    recordUnique(h, 'u-loop')
+    recordUnique(h, 'u-loop')
+    expect(h.uniquesFound).toEqual(['u-loop'])
+  })
+
+  it('舊存檔補課：背包裡既有的彩蛋裝備要補進永久紀錄', () => {
+    // 沒有這一步，改版之後老玩家手上那幾件會被當成「沒拿過」而重複掉
+    const h = newHero()
+    h.uniquesFound = undefined
+    h.bag = [makeUnique(UNIQUES[0], 10, 'x1'), makeUnique(UNIQUES[1], 10, 'x2')]
+    rememberUniques(h)
+    expect(h.uniquesFound).toEqual([UNIQUES[0].id, UNIQUES[1].id])
+    expect(missingUniques(h).length).toBe(UNIQUES.length - 2)
   })
 })
 
 // ── 彩蛋裝備建立 ──────────────────────────────────────────
 
 describe('makeUnique 彩蛋裝備建立', () => {
-  it('武器（slot=main）：具有攻擊力與技能線，防禦為 0，稀有度必為 legend', () => {
+  it('武器（slot=main）：具有攻擊力與技能線，防禦為 0，稀有度必為 mythic', () => {
     const swordSpec = UNIQUES.find((u) => u.id === 'u-debugger')!
     const item = makeUnique(swordSpec, 20, 'weapon-test-1')
 
     expect(item.id).toBe('weapon-test-1')
     expect(item.name).toBe(swordSpec.name)
     expect(item.slot).toBe('main')
-    expect(item.rarity).toBe('legend')
+    expect(item.rarity).toBe('mythic')
     expect(item.ilvl).toBe(20)
     expect(item.line).toBe(swordSpec.line)
     expect(item.atk).toBeGreaterThan(0)

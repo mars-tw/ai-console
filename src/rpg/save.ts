@@ -1,8 +1,9 @@
 // 存檔：純 localStorage，跟這個專案「資料不出本機」的原則一致
-import { ensureRoster } from './allies'
+import { checkSecretAllies, ensureRoster, syncSecretAllies } from './allies'
 import { newHero } from './engine'
 import type { Battle } from './engine'
-import type { Hero } from './types'
+import { rememberUniques, syncUniques } from './secrets'
+import { partyCapOf, type Hero } from './types'
 
 const KEY = 'ac_rpg_hero_v1'
 
@@ -41,6 +42,26 @@ export function loadHero(): Hero {
       lo.skills ??= {}
       lo.attrs ??= { str: 0, dex: 0, int: 0, fai: 0, vit: 0 }
     }
+
+    // ── 彩蛋裝備／彩蛋夥伴／隊伍上限：讀檔時補課 ──
+    //
+    // 這四行的順序有意義：
+    //   1. rememberUniques 先把背包裡既有的彩蛋裝備補進永久紀錄，
+    //      不然改版之後老玩家手上那幾件會被當成「沒拿過」而重複掉。
+    //   2. syncUniques 把它們拉到現在的等級。舊存檔的彩蛋裝備是
+    //      「取得那一刻的數值」，Lv.8 拿到的到 Lv.40 已經是廢鐵，
+    //      而它永遠拿不到第二件。
+    //   3./4. 彩蛋夥伴同理：解鎖條件可能在上一版就達成了，補發並對齊等級。
+    rememberUniques(h)
+    syncUniques(h)
+    checkSecretAllies(h)
+    syncSecretAllies(h)
+    // 存檔被改壞也不能讓隊伍上限跑到範圍外 —— partyCapOf 會夾住
+    h.partyCap = partyCapOf(h)
+    // 隊伍本身也要夾。只夾上限不夾名單的話，舊存檔（或手改過的存檔）
+    // 會出現「隊伍 5 / 4 人」這種畫面，而且下一場真的帶五個上去 ——
+    // 那個設定就變成純裝飾。實測就是這樣露餡的。
+    h.party = (h.party ?? []).slice(0, Math.max(0, h.partyCap - 1))
     return h
   } catch {
     return newHero()

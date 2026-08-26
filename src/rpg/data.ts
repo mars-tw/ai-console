@@ -124,7 +124,7 @@ export const PET_BY_ART = Object.fromEntries(PET_KINDS.map((p) => [p.art, p]))
 export const PET_DROP_CHANCE = { boss: 0.35, elite: 0.04 }
 
 // ── 裝備產生 ───────────────────────────────────────
-export const RARITY_ORDER: Rarity[] = ['crude', 'common', 'fine', 'rare', 'legend']
+export const RARITY_ORDER: Rarity[] = ['crude', 'common', 'fine', 'rare', 'legend', 'mythic']
 /** 各品質的詞綴數量與數值倍率 */
 export const RARITY_SPEC: Record<Rarity, { affixes: number; mult: number }> = {
   crude: { affixes: 0, mult: 0.7 },
@@ -132,6 +132,10 @@ export const RARITY_SPEC: Record<Rarity, { affixes: number; mult: number }> = {
   fine: { affixes: 2, mult: 1.25 },
   rare: { affixes: 3, mult: 1.55 },
   legend: { affixes: 4, mult: 2.0 },
+  // 神話只給彩蛋裝備用，隨機掉落表**不會**產出它 ——
+  // 隨機也掉得到的話它就只是「更好的傳說」，而不是「那一件」。
+  // 倍率拉到 2.6 是因為它同時受兩個限制：每種只有一件、而且不能強化。
+  mythic: { affixes: 5, mult: 2.6 },
 }
 
 export const WEAPON_NAMES: Record<Line, string[]> = {
@@ -155,6 +159,9 @@ export const PREFIXES: Record<Rarity, string[]> = {
   fine: ['精工', '銳利的', '堅固的'],
   rare: ['秘銀', '符文', '風行'],
   legend: ['龍紋', '曙光', '終末'],
+  // 神話裝備的名字是彩蛋自己指定的，不走前綴組字。
+  // 這裡留一組只是為了讓型別完整；真的用到代表某處把神話當成隨機掉落了。
+  mythic: ['原初'],
 }
 
 // 裝備名是「前綴 + 基礎名」組出來的，i18n 要知道前綴有哪些才拆得開

@@ -6,7 +6,7 @@
 export type Line = 'melee' | 'ranged' | 'magic' | 'faith'
 export type Attr = 'str' | 'dex' | 'int' | 'fai' | 'vit'
 export type Slot = 'main' | 'off' | 'head' | 'body' | 'hands' | 'feet' | 'ring1' | 'ring2'
-export type Rarity = 'crude' | 'common' | 'fine' | 'rare' | 'legend'
+export type Rarity = 'crude' | 'common' | 'fine' | 'rare' | 'legend' | 'mythic'
 
 export const LINES: Line[] = ['melee', 'ranged', 'magic', 'faith']
 export const ATTRS: Attr[] = ['str', 'dex', 'int', 'fai', 'vit']
@@ -23,10 +23,14 @@ export const SLOT_NAME: Record<Slot, string> = {
   hands: '手部', feet: '腳部', ring1: '飾品 I', ring2: '飾品 II',
 }
 export const RARITY_NAME: Record<Rarity, string> = {
-  crude: '粗製', common: '普通', fine: '精良', rare: '稀有', legend: '傳說',
+  crude: '粗製', common: '普通', fine: '精良', rare: '稀有', legend: '傳說', mythic: '神話',
 }
 export const RARITY_COLOR: Record<Rarity, string> = {
   crude: '#9ca3af', common: '#e5e7eb', fine: '#4ade80', rare: '#60a5fa', legend: '#fbbf24',
+  // 神話刻意選一個跟傳說的金色差很遠的顏色。
+  // 兩者只差一階，配色再相近的話清單掃過去會分不出來 ——
+  // 而「這件是不是那件永遠只有一件的」正是玩家最需要一眼看出來的事。
+  mythic: '#f472b6',
 }
 
 /** 詞綴可以加在屬性上，也可以加在衍生數值上 */
@@ -120,8 +124,41 @@ export interface Hero {
   tickets?: { ally: number; gear: number; protect?: number }
   /** 已解鎖的彩蛋技能 id */
   secrets?: string[]
+  /**
+   * 已經拿過的彩蛋裝備 id。**永久紀錄，賣掉也不會消失。**
+   *
+   * 原本「有沒有拿過」是掃背包判斷的。那有一個洞：賣掉或清雜物之後
+   * 它就從背包消失，於是又會再掉一次 —— 「獨一無二」變成
+   * 「一次只能有一件」，完全是兩回事。
+   */
+  uniquesFound?: string[]
+  /**
+   * 已經解鎖的彩蛋夥伴 id。跟 uniquesFound 同理，是永久紀錄。
+   * 解鎖之後就一直在名冊裡，不會因為任何操作消失。
+   */
+  secretAllies?: string[]
+  /**
+   * 出戰隊伍人數上限（含主角）。3～5，預設 4。
+   *
+   * 做成可設定而不是寫死，是因為這件事沒有唯一正解：
+   * 人少一點每個夥伴的存在感強、回合跑得快；人多一點容錯高、看起來熱鬧。
+   * 那是口味不是平衡問題，交給玩家。
+   */
+  partyCap?: number
   /** 解鎖條件用的累計數字 */
   tally?: Tally
+}
+
+/** 隊伍人數上限的合法範圍（含主角） */
+export const PARTY_CAP_MIN = 3
+export const PARTY_CAP_MAX = 5
+export const PARTY_CAP_DEFAULT = 4
+
+/** 讀出隊伍上限並夾在合法範圍內。存檔被改壞也不會炸 */
+export function partyCapOf(h: Pick<Hero, 'partyCap'>): number {
+  const v = Math.round(Number(h.partyCap ?? PARTY_CAP_DEFAULT))
+  if (!Number.isFinite(v)) return PARTY_CAP_DEFAULT
+  return Math.min(PARTY_CAP_MAX, Math.max(PARTY_CAP_MIN, v))
 }
 
 /** 由等級 + 屬性 + 裝備 + 技能算出來的最終數值 */
@@ -224,6 +261,17 @@ export interface AllyKind {
   desc: string
   /** 人形夥伴的圖檔（public/office/rpg/recruits/<art>.png）。AI 龍用辦公室的動作總表 */
   art?: string
+  /**
+   * 彩蛋夥伴：達成這個條件才會出現在名冊裡。
+   *
+   * 有值代表它**不在抽卡池**、不能重複取得，而且等級跟著主角走
+   * （不用另外練，見 allies.syncSecretAllies）。
+   */
+  secret?: {
+    /** 沒解鎖時給的線索。跟彩蛋技能一樣：看得到目標，但不說死怎麼做 */
+    hint: string
+    test: (h: Hero) => boolean
+  }
 }
 
 /** 已經擁有的夥伴。會跟著打怪長等級，不再是每場臨時捏出來的 */

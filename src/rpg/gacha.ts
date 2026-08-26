@@ -10,7 +10,7 @@
 
 import { GACHA_POOL, growRecruit, newRecruit } from './allies'
 import { rollItem } from './engine'
-import { makeUnique, missingUniques } from './secrets'
+import { makeUnique, missingUniques, recordUnique } from './secrets'
 import type { AllyKind, Hero, Item, Rarity, Recruit } from './types'
 
 export const ALLY_PULL_GOLD = 900
@@ -27,6 +27,9 @@ const GEAR_ODDS: [Rarity, number][] = [['common', 0.34], ['fine', 0.40], ['rare'
 const UNIQUE_CHANCE = 0.02
 
 function pickRarity(table: [Rarity, number][], floor?: Rarity): Rarity {
+  // 刻意不含 mythic：神話只給彩蛋用，隨機表不該抽得到。
+  // 寫死在這裡而不是用 RARITY_ORDER，正是為了讓「隨機掉不到神話」
+  // 是一件看得見的事，而不是靠別處的表剛好沒列到。
   const order: Rarity[] = ['crude', 'common', 'fine', 'rare', 'legend']
   const min = floor ? order.indexOf(floor) : 0
   const pool = table.filter(([r]) => order.indexOf(r) >= min)
@@ -59,7 +62,7 @@ export function pullAlly(h: Hero, floor?: Rarity): AllyPull {
   const owned = h.roster.find((r) => r.kind === kind.id)
   if (owned) {
     // 重複 → 餵給已經有的那一隻。稀有度越高，一張換的經驗越多
-    const xp = { crude: 40, common: 60, fine: 90, rare: 180, legend: 400 }[kind.rarity] ?? 90
+    const xp = { crude: 40, common: 60, fine: 90, rare: 180, legend: 400, mythic: 800 }[kind.rarity] ?? 90
     growRecruit(owned, xp)
     return { kind, dupeXp: xp, recruit: owned }
   }
@@ -78,6 +81,9 @@ export function pullGear(h: Hero, nextId: () => string, floor?: Rarity): GearPul
   const left = missingUniques(h)
   if (left.length && Math.random() < UNIQUE_CHANCE) {
     const u = left[Math.floor(Math.random() * left.length)]
+    // 記進永久紀錄。少了這一行，賣掉之後同一件又會再抽到 ——
+    // 那叫「一次只能有一件」，不是「獨一無二」。
+    recordUnique(h, u.id)
     return { item: makeUnique(u, h.level, nextId()), unique: true }
   }
   return { item: rollItem(h.level, undefined, pickRarity(GEAR_ODDS, floor)), unique: false }

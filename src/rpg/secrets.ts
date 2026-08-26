@@ -132,25 +132,90 @@ export const UNIQUES: UniqueSpec[] = [
 
 export const UNIQUE_BY_ID = Object.fromEntries(UNIQUES.map((u) => [u.id, u]))
 
-/** 還沒拿過的彩蛋裝備。同一件不重複掉，不然「獨一無二」就沒有意義 */
+/**
+ * 還沒拿過的彩蛋裝備。
+ *
+ * 判斷依據是 h.uniquesFound —— 一份**永久**紀錄，不是掃背包。
+ *
+ * 原本是掃背包（`h.bag.map(i => i.unique)`），那有一個洞：
+ * 賣掉、清雜物、或任何讓它離開背包的操作之後，它就「沒拿過」了，
+ * 於是又會再掉一次。那叫「一次只能有一件」，不是「獨一無二」。
+ * 舊存檔沒有這個欄位，所以第一次讀檔時用背包補上（見 rememberUniques）。
+ */
 export function missingUniques(h: Hero): UniqueSpec[] {
-  const owned = new Set(h.bag.map((i) => i.unique).filter(Boolean))
-  return UNIQUES.filter((u) => !owned.has(u.id))
+  const found = new Set(h.uniquesFound ?? [])
+  return UNIQUES.filter((u) => !found.has(u.id))
 }
 
-/** 造一件彩蛋裝備。ilvl 跟著主角走，所以什麼時候拿到都不會馬上退休 */
-export function makeUnique(spec: UniqueSpec, ilvl: number, id: string): Item {
+/** 記下「這件拿過了」。取得的當下一定要呼叫，否則去重形同虛設 */
+export function recordUnique(h: Hero, uniqueId: string): void {
+  h.uniquesFound ??= []
+  if (!h.uniquesFound.includes(uniqueId)) h.uniquesFound.push(uniqueId)
+}
+
+/**
+ * 舊存檔補課：背包裡已經有的彩蛋裝備補進永久紀錄。
+ * 沒有這一步，改版之後老玩家手上的彩蛋裝備會被當成「沒拿過」而重複掉。
+ */
+export function rememberUniques(h: Hero): void {
+  h.uniquesFound ??= []
+  for (const it of h.bag ?? []) {
+    if (it.unique && !h.uniquesFound.includes(it.unique)) h.uniquesFound.push(it.unique)
+  }
+}
+
+/** 彩蛋裝備在某個等級下的數值。makeUnique 與 syncUniques 共用同一份算式 */
+function uniqueStats(spec: UniqueSpec, ilvl: number): { atk: number; def: number } {
   const isWeapon = spec.slot === 'main'
+  return {
+    atk: isWeapon ? Math.round((4 + ilvl * 2.2) * 2 * spec.mult) : 0,
+    def: isWeapon ? 0 : Math.round((2 + ilvl * 1.4) * 2 * spec.mult),
+  }
+}
+
+/** 造一件彩蛋裝備。等級跟著主角走，之後也會繼續跟（見 syncUniques） */
+export function makeUnique(spec: UniqueSpec, ilvl: number, id: string): Item {
   return {
     id,
     name: spec.name,
     slot: spec.slot,
-    rarity: 'legend' as Rarity,
+    // 神話：比傳說高一階，而且隨機掉落表產不出來。
+    rarity: 'mythic' as Rarity,
     ilvl,
     line: spec.line,
-    atk: isWeapon ? Math.round((4 + ilvl * 2.2) * 2 * spec.mult) : 0,
-    def: isWeapon ? 0 : Math.round((2 + ilvl * 1.4) * 2 * spec.mult),
+    ...uniqueStats(spec, ilvl),
     affixes: spec.affixes.map((a) => ({ ...a })),
     unique: spec.id,
   }
+}
+
+/**
+ * 把身上所有彩蛋裝備重算到主角現在的等級。
+ *
+ * 為什麼要「自動升級」而不是「拿到當下定生死」：
+ *   彩蛋裝備每種只有一件、而且不能重複取得。如果它的數值鎖在取得那一刻，
+ *   Lv.8 拿到的那把劍在 Lv.40 就是廢鐵 —— 但你永遠拿不到第二把。
+ *   一件「獨一無二但注定要丟掉」的東西，比沒有這個系統更糟：
+ *   玩家會學會不要太早開箱，那不是遊戲該教的事。
+ *
+ * 這個函式是冪等的：算式只吃 spec 與等級，跑幾次結果都一樣。
+ * 升級後與讀檔時各呼叫一次就夠。
+ */
+export function syncUniques(h: Hero): string[] {
+  const grown: string[] = []
+  for (const it of h.bag ?? []) {
+    if (!it.unique) continue
+    const spec = UNIQUE_BY_ID[it.unique]
+    if (!spec) continue
+    if (it.ilvl >= h.level) continue
+    const next = uniqueStats(spec, h.level)
+    // plus（玩家自己強化上去的）不動。它是另一條線的投入，
+    // 不該被自動成長洗掉。
+    it.ilvl = h.level
+    it.atk = next.atk
+    it.def = next.def
+    it.rarity = 'mythic' as Rarity   // 舊存檔裡是 legend，順手升上來
+    grown.push(spec.name)
+  }
+  return grown
 }

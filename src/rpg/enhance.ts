@@ -14,6 +14,21 @@ export const MAX_PLUS = 15
 /** 每一級加多少（乘在基礎 atk/def 上） */
 export const PLUS_STEP = 0.09
 
+/**
+ * 彩蛋（神話）裝備不能強化。
+ *
+ * 三個理由，缺一個都不足以擋掉一個系統：
+ *   1. **碎了就永遠沒了。** 每種只有一件、而且不可重複取得 ——
+ *      強化台上一次 55% 的碎裂率，賭掉的是這個存檔再也拿不到的東西。
+ *   2. **它本來就會自己長。** 等級跟著主角走（secrets.syncUniques），
+ *      強化要解決的「後期變廢鐵」問題，在它身上不存在。
+ *   3. 兩個成長來源疊在一起，數值會直接失控。
+ *
+ * 擋在 enhance() 裡而不是只在介面上藏按鈕：介面會改，規則不該靠介面守。
+ */
+export const canEnhance = (it: Item): boolean => !it.unique
+export const CANNOT_ENHANCE_MSG = '神話裝備會自己跟著等級成長，不需要也不能強化'
+
 export interface EnhanceOdds {
   /** 成功率 0..1 */
   success: number
@@ -68,6 +83,7 @@ export interface EnhanceResult {
  * 也掛著保護符，反而變成沒有決策。
  */
 export function enhance(h: Hero, it: Item, protect: boolean): EnhanceResult {
+  if (!canEnhance(it)) return { outcome: 'stay', msg: CANNOT_ENHANCE_MSG }
   const p = it.plus ?? 0
   if (p >= MAX_PLUS) return { outcome: 'stay', msg: '已經強化到頂了' }
   const o = odds(p, h)

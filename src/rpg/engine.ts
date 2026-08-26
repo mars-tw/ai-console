@@ -9,9 +9,13 @@ import {
   RARITY_SPEC, SKILL_BY_ID, SKILLS, WEAPON_NAMES, ZONE_BY_ID,
 } from './data'
 import { itemLabel, t } from '@/i18n'
-import { ensureRoster, growRecruit } from './allies'
+import {
+  checkSecretAllies, ensureRoster, growRecruit, syncSecretAllies,
+} from './allies'
 import { plusMult } from './enhance'
-import { checkSecrets, hasSecret, makeUnique, missingUniques } from './secrets'
+import {
+  checkSecrets, hasSecret, makeUnique, missingUniques, recordUnique, syncUniques,
+} from './secrets'
 import {
   ATTRS, LINES, type Affix, type Attr, type Combatant, type Hero, type HeroLook,
   type Item, type Pet, SLOTS, type FxEvent, type Line, type Loadout, type LogEntry, type Monster,
@@ -830,7 +834,11 @@ function settle(b: Battle, h: Hero): void {
         say(b, 'loot', t('拾獲 {item}', { item: itemLabel(gear.name) }))
         const left = missingUniques(h)
         if (left.length && Math.random() < 0.34) {
-          const u = makeUnique(left[rnd(left.length)], h.level, nextId())
+          const spec = left[rnd(left.length)]
+          const u = makeUnique(spec, h.level, nextId())
+          // 記進永久紀錄。少了這一行，賣掉之後它又會再掉一次 ——
+          // 那叫「一次只能有一件」，不是「獨一無二」。
+          recordUnique(h, spec.id)
           b.loot.push(u)
           say(b, 'loot', t('★ 掉落彩蛋裝備：{item}', { item: itemLabel(u.name) }))
         }
@@ -911,6 +919,10 @@ export function stepBattle(b: Battle, h: Hero): void {
 /** 把戰鬥結算進角色；回傳升了幾級 */
 export function collect(h: Hero, b: Battle): {
   levels: number; loot: Item[]; newPet?: Pet; secrets: string[]; allyUps: string[]
+  /** 這一場新解鎖的彩蛋夥伴名稱 */
+  secretAllies: string[]
+  /** 這一場跟著升級的彩蛋裝備名稱 */
+  uniquesGrown: string[]
 } {
   h.tally ??= { deathStreak: 0, crits: 0, superKills: 0, cleanClears: 0, breaks: 0 }
   h.tickets ??= { ally: 0, gear: 0 }
@@ -973,5 +985,17 @@ export function collect(h: Hero, b: Battle): {
   b.tickets = { ally: 0, gear: 0 }
   // 彩蛋條件都是累計值，戰鬥中途不可能達成，所以一場結算檢查一次就夠
   const got = checkSecrets(h).map((x) => x.name)
-  return { levels, loot, newPet: newPet ?? undefined, secrets: got, allyUps }
+  // 彩蛋夥伴同理，而且要在 checkSecrets 之後 ——
+  // 其中一隻的解鎖條件就是「把六個彩蛋技能全開」，順序反了會晚一場才拿到。
+  const allies = checkSecretAllies(h).map((k) => k.name)
+  // 等級變了就把「跟著等級走」的東西同步上來。
+  // 兩個都是冪等的，所以放在這裡一次做完最省事：
+  // 彩蛋裝備每種只有一件、彩蛋夥伴不能重抽，它們的數值鎖在取得那一刻的話，
+  // 早期拿到的等於注定要丟 —— 而你永遠拿不到第二件。
+  const grown = levels > 0 ? syncUniques(h) : []
+  if (levels > 0) syncSecretAllies(h)
+  return {
+    levels, loot, newPet: newPet ?? undefined,
+    secrets: got, allyUps, secretAllies: allies, uniquesGrown: grown,
+  }
 }

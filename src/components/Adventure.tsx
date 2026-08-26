@@ -15,11 +15,14 @@ import {
   xpForLevel, type Battle,
 } from '@/rpg/engine'
 import { SHOP, type BuyResult, type ShopEntry } from '@/rpg/shop'
-import { ALLY_BY_ID, recruitById, recruitCombatant, recruitXpForLevel } from '@/rpg/allies'
+import {
+  ALLY_BY_ID, SECRET_ALLIES, hasSecretAlly, recruitById, recruitCombatant, recruitXpForLevel,
+} from '@/rpg/allies'
 import { ALLY_PULL_GOLD, GEAR_PULL_GOLD, TEN, floorAt, pullAlly, pullGear, tenCost } from '@/rpg/gacha'
 import { HITSTOP, shake } from '@/rpg/battleFx'
 import {
-  ENHANCE_FX_MS, MAX_PLUS, drawEnhAlarm, drawEnhPop, drawEnhShards, drawEnhSparks,
+  CANNOT_ENHANCE_MSG, ENHANCE_FX_MS, MAX_PLUS, canEnhance,
+  drawEnhAlarm, drawEnhPop, drawEnhShards, drawEnhSparks,
   enhance, enhanceCost, odds, type EnhanceOutcome,
 } from '@/rpg/enhance'
 import { SECRETS } from '@/rpg/secrets'
@@ -32,7 +35,8 @@ import { commitOrder, guard, setFocus, stepTurn, drinkPotion, petXpForLevel } fr
 import {
   AFFIX_NAME, AFFIX_PCT, ALLY_CAT_NAME, ALLY_ROLE_COLOR, ALLY_ROLE_NAME,
   ATTRS, ATTR_NAME, LINES, LINE_NAME, RARITY_COLOR,
-  RARITY_NAME, SLOTS, SLOT_NAME, type Combatant, type Hero, type Item,
+  PARTY_CAP_MAX, PARTY_CAP_MIN,
+  RARITY_NAME, SLOTS, SLOT_NAME, partyCapOf, type Combatant, type Hero, type Item,
   type Line, type Rarity, type Slot,
 } from '@/rpg/types'
 import type { ToolStatus } from '@/types/data'
@@ -283,8 +287,10 @@ export default function Adventure({ tools }: Props) {
       if (b.xp || b.gold || b.loot.length) {
         const gained = collect(h, b)
         // 解鎖彩蛋比升級更值得報 —— 那是玩家不知道存在的東西，不講他不會發現
-        if (gained.secrets.length) flash(t('🔮 解鎖隱藏技能：{name}', { name: gained.secrets.map((x) => t(x)).join('、') }))
+        if (gained.secretAllies.length) flash(t('✦ 有人加入了：{name}', { name: gained.secretAllies.map((x) => t(x)).join('、') }))
+        else if (gained.secrets.length) flash(t('🔮 解鎖隱藏技能：{name}', { name: gained.secrets.map((x) => t(x)).join('、') }))
         else if (gained.levels > 0) flash(t('升到 Lv.{lv}！獲得技能點與屬性點', { lv: h.level }))
+        else if (gained.uniquesGrown.length) flash(t('✦ {name} 跟著你變強了', { name: gained.uniquesGrown.map((x) => t(x)).join('、') }))
         else if (gained.allyUps.length) flash(t('{who} 升級了', { who: gained.allyUps.map((x) => t(x)).join('、') }))
         saveHero(h)
         setHero({ ...h })
@@ -322,14 +328,26 @@ export default function Adventure({ tools }: Props) {
       return [c]
     })
 
-  /** 自動組隊：把隊伍補到指定人數（含自己）。優先挑等級高的，單機也進得去地城 */
+  /** 玩家設定的隊伍人數上限（含主角）。3～5，預設 4 */
+  const cap = partyCapOf(hero)
+  /** 還能再帶幾個。主角本人佔一格 */
+  const slotsLeft = Math.max(0, cap - 1 - party.length)
+
+  /**
+   * 自動組隊：把隊伍補到指定人數（含自己）。優先挑等級高的。
+   *
+   * `need` 一律先被玩家設定的上限夾住。地城的 partySize 是「建議人數」
+   * 不是「必須人數」—— 玩家把上限調到 3 之後，還硬塞 4 個人進去
+   * 等於那個設定是假的。人不夠就讓他自己承擔難度，那是他選的。
+   */
   const autoParty = (need: number): string[] => {
-    const picked = [...party]
+    const want = Math.min(need, cap)
+    const picked = party.slice(0, Math.max(0, want - 1))
     const rest = (hero.roster ?? [])
       .filter((r) => !picked.includes(r.id))
       .sort((a, b) => b.level - a.level)
     for (const r of rest) {
-      if (picked.length + 1 >= need) break
+      if (picked.length + 1 >= want) break
       picked.push(r.id)
     }
     return picked
@@ -344,7 +362,11 @@ export default function Adventure({ tools }: Props) {
    * 看起來就是組隊功能壞掉。這裡兩個一起修。
    */
   const setParty = (next: string[] | ((p: string[]) => string[])) => {
-    const members = typeof next === 'function' ? next(partyRef.current) : next
+    const raw = typeof next === 'function' ? next(partyRef.current) : next
+    // 上限在這裡守，不是只在按鈕上擋。
+    // 介面會改、也會有別的路徑呼叫（自動組隊、地城補位），
+    // 規則放在唯一的入口才不會有漏網的那一條。
+    const members = raw.slice(0, Math.max(0, partyCapOf(heroRef.current) - 1))
     partyRef.current = members
     setPartyState(members)
     update((h) => { h.party = members })
@@ -395,7 +417,7 @@ export default function Adventure({ tools }: Props) {
    */
   const nextBattle = (h: Hero, kind: 'field' | 'dungeon', placeId: string): Battle => {
     const dg = kind === 'dungeon' ? DUNGEONS.find((d) => d.id === placeId) : undefined
-    const need = dg?.partySize ?? 0
+    const need = Math.min(dg?.partySize ?? 0, partyCapOf(heroRef.current))
     const members = dg && partyRef.current.length + 1 < need ? autoParty(need) : partyRef.current
     return startBattle(h, kind, placeId, buildParty(members))
   }
@@ -506,7 +528,9 @@ export default function Adventure({ tools }: Props) {
     if (hero.level < dg.minLevel) return flash(t('等級不足，{name} 需要 Lv.{lv}', { name: t(dg.name), lv: dg.minLevel }))
     if (!confirmLeave()) return
     // 人不夠不擋你，直接叫 AI 夥伴補位
-    const members = party.length + 1 < dg.partySize ? autoParty(dg.partySize) : party
+    // 建議人數與玩家上限取小的那個 —— 上限是玩家設的，它說了算
+    const want = Math.min(dg.partySize, cap)
+    const members = party.length + 1 < want ? autoParty(want) : party
     if (members.length !== party.length) {
       const added = members.filter((k) => !party.includes(k))
         .map((k) => t(ALLY_BY_ID[recruitById(hero, k)?.kind ?? '']?.name ?? k)).join('、')
@@ -1212,7 +1236,7 @@ export default function Adventure({ tools }: Props) {
             <span className="text-xs font-medium tracking-widest text-mute">{t('🤝 AI 夥伴')}</span>
             <button
               className="ml-auto rounded border border-line2 px-2 py-1 text-[10px] text-mute hover:bg-elev"
-              onClick={() => setParty(autoParty(4))}
+              onClick={() => setParty(autoParty(cap))}
             >
               {t('自動組隊')}
             </button>
@@ -1230,14 +1254,23 @@ export default function Adventure({ tools }: Props) {
               // AI 龍才有本機工具狀態可以顯示；人形夥伴顯示稀有度
               const tail = joined ? t('已入隊')
                 : k.cat === 'ai' ? allyState(r.kind).why : t(RARITY_NAME[k.rarity])
+              // 隊伍滿了就按不動。不擋的話 setParty 會默默把他切掉 ——
+              // 按了有反應但人沒進來，那比按不動更難懂。
+              const full = !joined && slotsLeft <= 0
               return (
                 <button
                   key={r.id}
-                  title={`${t(k.desc)} · ${t(ALLY_CAT_NAME[k.cat])} · ${t(ALLY_ROLE_NAME[k.role])}`
-                    + ` · Lv.${r.level} ${r.xp}/${recruitXpForLevel(r.level)}`}
-                  className={`flex items-center gap-1.5 rounded border px-2 py-1 text-left text-xs ${joined ? 'border-emerald-300 dark:border-emerald-600 bg-emerald-50 dark:bg-emerald-950/40' : 'border-line hover:bg-elev'}`}
+                  disabled={full}
+                  title={full
+                    ? t('隊伍已滿（上限 {cap} 人，含你）。要換人先把某個夥伴請下場', { cap })
+                    : `${t(k.desc)} · ${t(ALLY_CAT_NAME[k.cat])} · ${t(ALLY_ROLE_NAME[k.role])}`
+                      + ` · Lv.${r.level} ${k.secret ? t('（跟著你的等級）') : `${r.xp}/${recruitXpForLevel(r.level)}`}`}
+                  className={`flex items-center gap-1.5 rounded border px-2 py-1 text-left text-xs ${joined ? 'border-emerald-300 dark:border-emerald-600 bg-emerald-50 dark:bg-emerald-950/40' : 'border-line hover:bg-elev'} ${full ? 'opacity-45' : ''}`}
                   onClick={() => setParty((p) => (joined ? p.filter((x) => x !== r.id) : [...p, r.id]))}
                 >
+                  {/* 彩蛋夥伴給一個記號。神話色在清單裡跟傳說的金色很接近，
+                      光靠顏色分不出「這隻是解鎖來的、不能重複取得」。 */}
+                  {k.secret && <span className="flex-none" style={{ color: tone(RARITY_COLOR.mythic) }}>✦</span>}
                   <span className="h-2 w-2 flex-none rounded-full" style={{ background: tone(k.color) }} />
                   <span className="flex-none font-medium" style={{ color: k.cat === 'human' ? tone(RARITY_COLOR[k.rarity]) : undefined }}>{t(k.name)}</span>
                   <span className="flex-none rounded px-1 text-[9px]" style={{ color: tone(ALLY_ROLE_COLOR[k.role]), border: `1px solid ${tone(ALLY_ROLE_COLOR[k.role])}55` }}>
@@ -1250,7 +1283,46 @@ export default function Adventure({ tools }: Props) {
               )
             })}
           </div>
-          <div className="mt-2 text-[10px] text-mute3">{t('隊伍 {n} 人（含你）', { n: party.length + 1 })}</div>
+          {/* 人數與上限。上限做成可設定而不是寫死，是因為這件事沒有唯一正解：
+              人少每個夥伴的存在感強、回合跑得快；人多容錯高、畫面熱鬧。
+              那是口味不是平衡問題。 */}
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-mute3">
+            <span>{t('隊伍 {n} / {cap} 人（含你）', { n: party.length + 1, cap })}</span>
+            <label className="ml-auto flex items-center gap-1">
+              <span>{t('上限')}</span>
+              <select
+                className="rounded border border-line2 bg-transparent px-1 py-0.5 text-[10px] text-ink2"
+                value={cap}
+                onChange={(e) => {
+                  const next = Number(e.target.value)
+                  update((h) => { h.partyCap = next })
+                  // 調小之後把超出的人請下場。留著的話畫面顯示「5 / 3 人」，
+                  // 而且下一場真的會帶五個 —— 那個設定就變成假的。
+                  if (partyRef.current.length > next - 1) setParty(partyRef.current.slice(0, next - 1))
+                }}
+              >
+                {Array.from({ length: PARTY_CAP_MAX - PARTY_CAP_MIN + 1 }, (_, i) => PARTY_CAP_MIN + i)
+                  .map((n) => <option key={n} value={n}>{t('{n} 人', { n })}</option>)}
+              </select>
+            </label>
+          </div>
+
+          {/* ── 彩蛋夥伴：沒解鎖也看得到線索 ──
+              全部藏起來的話，玩家不會知道有這回事，也就不會去追。
+              給線索但不說死，跟彩蛋技能同一套原則。 */}
+          {SECRET_ALLIES.some((k) => !hasSecretAlly(hero, k.id)) && (
+            <div className="mt-2 border-t border-line pt-2">
+              <div className="mb-1 text-[10px] text-mute2">{t('✦ 還沒現身的夥伴')}</div>
+              <div className="flex flex-col gap-0.5">
+                {SECRET_ALLIES.filter((k) => !hasSecretAlly(hero, k.id)).map((k) => (
+                  <div key={k.id} className="flex items-baseline gap-1.5 text-[10px] text-mute3">
+                    <span className="flex-none" style={{ color: tone(RARITY_COLOR.mythic) }}>✦</span>
+                    <span className="min-w-0 flex-1">{t(k.secret?.hint ?? '')}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* ── 寵物 ── */}
           <div className="mt-3 border-t border-line pt-2">
@@ -1480,16 +1552,18 @@ export default function Adventure({ tools }: Props) {
                     <span className="flex-none text-mute3">{itemScore(it)}</span>
                     <button
                       className="flex-none text-amber-700 dark:text-amber-400/90 hover:text-amber-300 disabled:opacity-50 dark:disabled:opacity-30"
-                      disabled={enhancing || (it.plus ?? 0) >= MAX_PLUS}
-                      title={t('強化到 +{p}：成功 {s}%，碎裂 {d}%，費用 {g} 金', {
-                        p: (it.plus ?? 0) + 1,
-                        s: Math.round(odds(it.plus ?? 0, hero).success * 100),
-                        d: Math.round(odds(it.plus ?? 0, hero).destroy * 100),
-                        g: enhanceCost(it),
-                      })}
+                      disabled={enhancing || !canEnhance(it) || (it.plus ?? 0) >= MAX_PLUS}
+                      title={!canEnhance(it)
+                        ? t(CANNOT_ENHANCE_MSG)
+                        : t('強化到 +{p}：成功 {s}%，碎裂 {d}%，費用 {g} 金', {
+                          p: (it.plus ?? 0) + 1,
+                          s: Math.round(odds(it.plus ?? 0, hero).success * 100),
+                          d: Math.round(odds(it.plus ?? 0, hero).destroy * 100),
+                          g: enhanceCost(it),
+                        })}
                       onClick={(e) => doEnhance(it, false, e.currentTarget)}
                     >⚒</button>
-                    {!!(hero.tickets?.protect ?? 0) && odds(it.plus ?? 0, hero).destroy > 0 && (
+                    {canEnhance(it) && !!(hero.tickets?.protect ?? 0) && odds(it.plus ?? 0, hero).destroy > 0 && (
                       <button
                         className="flex-none text-sky-700 dark:text-sky-400/90 hover:text-sky-300 disabled:opacity-50 dark:disabled:opacity-30"
                         disabled={enhancing}

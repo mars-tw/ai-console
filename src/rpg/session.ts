@@ -150,7 +150,8 @@ function beat() {
 
   if (b.xp || b.gold || b.loot.length) {
     const gained = collect(h, b)
-    if (gained.secrets.length) pending.push(`🔮 解鎖隱藏技能：${gained.secrets.join('、')}`)
+    if (gained.secretAllies.length) pending.push(`✦ 有人加入了：${gained.secretAllies.join('、')}`)
+    else if (gained.secrets.length) pending.push(`🔮 解鎖隱藏技能：${gained.secrets.join('、')}`)
     else if (gained.levels > 0) pending.push(`升到 Lv.${h.level}`)
     else if (gained.allyUps.length) pending.push(`${gained.allyUps.join('、')} 升級了`)
     saveHero(h)

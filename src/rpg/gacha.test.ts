@@ -217,7 +217,7 @@ describe('pullAlly 夥伴抽取與養成機制', () => {
     seededRandom(2026)
     const h = mkHero({ roster: [] })
 
-    const counts: Record<Rarity, number> = { crude: 0, common: 0, fine: 0, rare: 0, legend: 0 }
+    const counts: Record<Rarity, number> = { crude: 0, common: 0, fine: 0, rare: 0, legend: 0, mythic: 0 }
     for (let i = 0; i < 1000; i++) {
       const res = pullAlly(h)
       counts[res.kind.rarity]++
@@ -266,28 +266,25 @@ describe('pullGear 裝備抽取與彩蛋掉落', () => {
     const res = pullGear(h, nextId)
     expect(res.unique).toBe(true)
     expect(res.item.unique).toBeDefined()
-    expect(res.item.rarity).toBe('legend')
+    expect(res.item.rarity).toBe('mythic')
     expect(UNIQUES.some((u) => u.id === res.item.unique)).toBe(true)
   })
 
-  it('彩蛋全滿時：背包已集齊所有彩蛋裝時，不產出彩蛋裝而退回一般裝備', () => {
-    const h = mkHero({
-      bag: UNIQUES.map((u, idx) => ({
-        id: `u-${idx}`,
-        name: u.name,
-        slot: u.slot,
-        rarity: 'legend' as Rarity,
-        ilvl: 10,
-        atk: 100,
-        def: 0,
-        affixes: [],
-        unique: u.id,
-      })),
-    })
+  it('彩蛋全拿過時：不再產出彩蛋裝而退回一般裝備', () => {
+    // 依據是永久紀錄，不是背包 —— 賣掉之後也不該再掉
+    const h = mkHero({ bag: [], uniquesFound: UNIQUES.map((u) => u.id) })
 
     fixedRandom(0.001) // 極小隨機數
     const res = pullGear(h, nextId)
     expect(res.unique).toBe(false) // 由於 missingUniques 為空，退回一般裝備
+  })
+
+  it('抽到彩蛋裝時要記進永久紀錄，否則賣掉又會再抽到', () => {
+    const h = mkHero({ bag: [], uniquesFound: [] })
+    fixedRandom(0.001)
+    const res = pullGear(h, nextId)
+    expect(res.unique).toBe(true)
+    expect(h.uniquesFound).toContain(res.item.unique)
   })
 
   it('千抽統計：裝備稀有度分佈符合 common/fine > rare > legend', () => {
@@ -307,7 +304,7 @@ describe('pullGear 裝備抽取與彩蛋掉落', () => {
       })),
     })
 
-    const counts: Record<Rarity, number> = { crude: 0, common: 0, fine: 0, rare: 0, legend: 0 }
+    const counts: Record<Rarity, number> = { crude: 0, common: 0, fine: 0, rare: 0, legend: 0, mythic: 0 }
     for (let i = 0; i < 1000; i++) {
       const res = pullGear(h, nextId)
       counts[res.item.rarity]++

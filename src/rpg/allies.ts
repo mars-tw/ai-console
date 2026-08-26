@@ -50,15 +50,82 @@ const HUMAN_KINDS: AllyKind[] = [
   { id: 'bard', name: '諾拉', cat: 'human', role: 'support', line: 'faith', rarity: 'rare', color: '#fca5a5', art: 'ally-bard', desc: '吟遊詩人，一開口全隊都變強。' },
   { id: 'miko', name: '小雪', cat: 'human', role: 'support', line: 'magic', rarity: 'legend', color: '#f9a8d4', art: 'ally-miko', desc: '巫女，符咒一貼傷害就翻倍。' },
   { id: 'dragoon', name: '賽維爾', cat: 'human', role: 'dps', line: 'melee', rarity: 'legend', color: '#818cf8', art: 'ally-dragoon', desc: '龍騎士。躍起再落下的那一槍最痛。' },
+  // ── 傳說人物（第二批）──
+  // 前兩個傳說都是輸出／輔助，坦與補在傳說階完全空著 ——
+  // 於是「抽到傳說」對玩坦或玩補的人來說沒有意義。這批把四個定位補齊。
+  { id: 'paladin', name: '格里芬', cat: 'human', role: 'tank', line: 'faith', rarity: 'legend', color: '#fcd34d', art: 'ally-knight', desc: '聖騎士。他站的位置就是隊伍的底線。' },
+  { id: 'oracle', name: '緹雅', cat: 'human', role: 'healer', line: 'faith', rarity: 'legend', color: '#a7f3d0', art: 'ally-cleric', desc: '神諭者。她說「還撐得住」的時候，你就真的還撐得住。' },
+  { id: 'gunner', name: '雷恩', cat: 'human', role: 'dps', line: 'ranged', rarity: 'legend', color: '#fdba74', art: 'ally-ranger', desc: '火槍手。裝填很慢，但那一發從不落空。' },
 ]
 
-export const ALLY_KINDS: AllyKind[] = [...AI_KINDS, ...HUMAN_KINDS]
-export const ALLY_BY_ID = Object.fromEntries(ALLY_KINDS.map((k) => [k.id, k]))
-/** 抽卡池：只有人形夥伴。龍本來就送你了 */
-export const GACHA_POOL = HUMAN_KINDS
+/**
+ * 彩蛋夥伴：解鎖條件達成才會出現在名冊裡。
+ *
+ * 跟人形夥伴的三個差別，都是使用者明確要求的：
+ *   1. **不在抽卡池**，也不能重複取得 —— 解鎖一次就永遠在
+ *   2. **等級跟著主角走**（syncSecretAllies），不用另外練
+ *   3. 神話階，成長率高於傳說
+ *
+ * 條件沿用彩蛋技能那一套原則：做得到，但不會不小心達成。
+ *
+ * 美術上目前沿用既有的人形立繪 —— 這是**已知的妥協**，不是疏忽。
+ * 新立繪要走 tools/gen_sheets_grok.py 那條產圖線（另外的額度與時間），
+ * 在那之前寧可借圖，也不要讓它在戰場上變成一塊純色矩形
+ * （drawAlly 找不到圖時就是那樣）。
+ */
+const SECRET_KINDS: AllyKind[] = [
+  {
+    id: 'archivist', name: '零號檔案員', cat: 'human', role: 'support', line: 'magic',
+    rarity: 'mythic', color: '#f472b6', art: 'ally-mage',
+    desc: '她記得每一場你打過的仗，包括你以為沒人看見的那些。',
+    secret: {
+      hint: '打滿五百場戰鬥之後，會有人替你把紀錄整理好。',
+      test: (h) => (h.kills ?? 0) >= 500,
+    },
+  },
+  {
+    id: 'revenant', name: '不歸者', cat: 'human', role: 'tank', line: 'melee',
+    rarity: 'mythic', color: '#c084fc', art: 'ally-rogue',
+    desc: '倒下太多次的人，最後連死亡都懶得再理他。',
+    secret: {
+      hint: '倒下二十次還沒有關掉遊戲的人，會遇見他。',
+      test: (h) => (h.deaths ?? 0) >= 20,
+    },
+  },
+  {
+    id: 'smith', name: '爐心', cat: 'human', role: 'dps', line: 'melee',
+    rarity: 'mythic', color: '#fb7185', art: 'ally-dragoon',
+    desc: '在強化台前碎過的每一件裝備，都燒成了她手上那把鎚子。',
+    secret: {
+      hint: '碎掉十五件裝備之後，爐子裡會有東西站起來。',
+      test: (h) => (h.tally?.breaks ?? 0) >= 15,
+    },
+  },
+  {
+    id: 'chorus', name: '眾聲', cat: 'human', role: 'healer', line: 'faith',
+    rarity: 'mythic', color: '#67e8f9', art: 'ally-bard',
+    desc: '所有你收集過的彩蛋，最後都變成了同一個聲音。',
+    secret: {
+      hint: '把六個藏起來的技能全部解開。',
+      test: (h) => (h.secrets ?? []).length >= 6,
+    },
+  },
+]
 
-/** 稀有度 → 成長率。傳說長得快，但要練 */
-const GROWTH: Record<string, number> = { crude: 0.85, common: 0.95, fine: 1, rare: 1.12, legend: 1.28 }
+export const ALLY_KINDS: AllyKind[] = [...AI_KINDS, ...HUMAN_KINDS, ...SECRET_KINDS]
+export const ALLY_BY_ID = Object.fromEntries(ALLY_KINDS.map((k) => [k.id, k]))
+/**
+ * 抽卡池：只有人形夥伴。
+ * 龍本來就送你了；彩蛋夥伴要解鎖條件，抽得到的話「彩蛋」就沒有意義了。
+ */
+export const GACHA_POOL = HUMAN_KINDS
+/** 彩蛋夥伴圖鑑。介面要用它列出「還沒解鎖的那些長什麼樣」 */
+export const SECRET_ALLIES = SECRET_KINDS
+
+/** 稀有度 → 成長率。傳說長得快，但要練；神話更高，而且不用練 */
+const GROWTH: Record<string, number> = {
+  crude: 0.85, common: 0.95, fine: 1, rare: 1.12, legend: 1.28, mythic: 1.45,
+}
 /** 定位 → 數值配比。坦血厚傷害低，輸出反過來 */
 const ROLE_MULT: Record<AllyRole, { hp: number; atk: number; def: number }> = {
   tank: { hp: 1.55, atk: 0.75, def: 1.6 },
@@ -142,3 +209,50 @@ export function ensureRoster(h: Hero): void {
 }
 
 export const recruitById = (h: Hero, id: string) => h.roster?.find((r) => r.id === id)
+
+// ── 彩蛋夥伴 ────────────────────────────────────────
+
+/** 這個彩蛋夥伴解鎖了沒 */
+export const hasSecretAlly = (h: Hero, id: string) => !!h.secretAllies?.includes(id)
+
+/**
+ * 檢查有沒有新解鎖的彩蛋夥伴，回傳這次新開的那些。
+ * 跟彩蛋技能一樣，每次戰鬥結算後呼叫一次就夠 —— 條件都是累計值。
+ */
+export function checkSecretAllies(h: Hero): AllyKind[] {
+  h.secretAllies ??= []
+  h.roster ??= []
+  const got: AllyKind[] = []
+  for (const k of SECRET_KINDS) {
+    if (!k.secret || h.secretAllies.includes(k.id)) continue
+    if (!k.secret.test(h)) continue
+    h.secretAllies.push(k.id)
+    // id 直接用 kind id：每種只有一個，不需要區分實例，
+    // 而且這樣「不可重複取得」是資料結構本身保證的，不是靠檢查。
+    if (!h.roster.some((r) => r.id === k.id)) {
+      h.roster.push({ id: k.id, kind: k.id, level: Math.max(1, h.level), xp: 0 })
+    }
+    got.push(k)
+  }
+  return got
+}
+
+/**
+ * 彩蛋夥伴的等級跟著主角走。
+ *
+ * 為什麼不用經驗值：它們是「解鎖」來的，不是「抽」來的。
+ * 一個 Lv.40 的玩家解開條件之後拿到一隻 Lv.1 的神話夥伴，
+ * 那隻夥伴會在板凳上坐到天荒地老 —— 而且它不能重複取得，
+ * 所以連「多抽幾張餵經驗」這條路都沒有。
+ *
+ * 只往上不往下：主角重置或降級時不去砍夥伴的等級，
+ * 那沒有意義，只會讓人覺得被懲罰。冪等，讀檔與升級後各叫一次就好。
+ */
+export function syncSecretAllies(h: Hero): void {
+  if (!h.roster) return
+  for (const r of h.roster) {
+    const k = ALLY_BY_ID[r.kind]
+    if (!k?.secret) continue
+    if (r.level < h.level) { r.level = h.level; r.xp = 0 }
+  }
+}
