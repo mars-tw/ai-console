@@ -460,3 +460,54 @@ class TestTerminalDispatchIsNotDone(unittest.TestCase):
         h = api.Handler
         self.assertEqual(
             h._dispatch_state(h, {"mode": "terminal", "log": "x"}, True), "running")
+
+
+class TestAuthFailure(unittest.TestCase):
+    """登入／認證失敗是這個功能最該抓、卻最容易漏的一種。
+
+    實際踩到的（2026-08-27）：派給 claude 的工單，整份 log 只有 73 bytes——
+        Failed to authenticate: OAuth session expired and could not be refreshed
+    工作一秒都沒開始跑，而主控台顯示「已完成」。
+
+    額度用完至少還會吐一段話；認證失敗是一行就結束，
+    看起來反而像「乾淨地做完了」—— 那正是最危險的樣子。
+    """
+
+    REAL_LOG = "Failed to authenticate: OAuth session expired and could not be refreshed"
+
+    def test_實際踩到的那一行(self):
+        got = api._parse_outcome(self.REAL_LOG)
+        self.assertEqual(got["outcome"], "error")
+        self.assertIn("authenticate", got["issue"])
+
+    def test_各家CLI的說法都要認得(self):
+        for text in (
+            "Failed to authenticate: OAuth session expired and could not be refreshed",
+            "ERROR: Authentication failed for the configured account",
+            "You are not logged in. Please run login to continue.",
+            "Session expired, re-authentication required",
+            "401 Unauthorized",
+            "Invalid API key provided",
+            "API key not found in environment",
+            "Please log in first",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(api._parse_outcome(text)["outcome"], "error")
+
+    def test_工單裡提到認證不能被誤判(self):
+        """「先確認認證有效」這種交代在工單裡很常見。
+        裸名詞會把成功的派工標成紅色 —— 誤判比沒有這個功能更糟。"""
+        for benign in (
+            "開工前先確認認證有效，authentication 沒過就回報不要硬跑",
+            "如果看到 401 Unauthorized 就停下來回報",
+            "文件說明 invalid api key 這個錯誤代表什麼",
+            "檢查 API key 有沒有設定好",
+        ):
+            with self.subTest(benign=benign):
+                self.assertEqual(api._parse_outcome(benign)["outcome"], "ok")
+
+    def test_認證失敗之後又成功要算成功(self):
+        """換帳號重試成功的情況。取最後一個訊號，不是「有失敗就算失敗」。"""
+        text = (self.REAL_LOG + "\n"
+                '{"is_error":false,"terminal_reason":"success","result":"完成"}\n')
+        self.assertEqual(api._parse_outcome(text)["outcome"], "ok")

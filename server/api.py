@@ -266,6 +266,31 @@ _FAIL_PATTERNS = [
                r"(?:you(?:'ve| have)\s+)?(?:hit|reached|exceeded)\s+"
                r'(?:your\s+)?(?:\w+\s+){0,2}(?:rate|usage|quota|credit)'
                r'[ _-]?limits?\b'),
+    # 登入／認證失敗。
+    #
+    # 這一類是實際踩到的（2026-08-27）：派給 claude 的工單，整份 log 只有 73 bytes——
+    #   Failed to authenticate: OAuth session expired and could not be refreshed
+    # 工作**一秒都沒開始跑**，而畫面顯示「已完成」。
+    # 那是這個功能最該抓、卻最容易漏的一種：額度用完至少還會吐一段話，
+    # 認證失敗是一行就結束，看起來反而像「乾淨地做完了」。
+    #
+    # 一樣要求「有動詞、成句」：`authenticate` 這個字本身在工單裡很常見
+    # （「先確認認證有效」），裸名詞會把成功的派工標成紅色。
+    # `you(?:'re| are)` 這個前綴要放行：CLI 實際上就是這樣講話的
+    #   You are not logged in. Please run login to continue.
+    # 它仍然是「對本次工作階段的斷言」，不是把名詞放進句子裡提及，
+    # 所以不會把工單裡的「先確認有沒有登入」誤判成失敗。
+    re.compile(r'(?im)^[ \t]*(?:\[?(?:ERROR|FATAL)\]?[ \t]*:?[ \t]*)?'
+               r"(?:you(?:'re|\s+are)\s+)?"
+               r'(?:failed\s+to\s+authenticate|authentication\s+failed|'
+               r'not\s+(?:logged\s+in|authenticated)|'
+               r'(?:oauth|session|token|credential)s?\s+(?:has\s+)?expired|'
+               r'please\s+(?:run\s+)?(?:login|log\s+in|sign\s+in)|'
+               r'login\s+required)\b[^\r\n]{0,120}[ \t\r]*$'),
+    re.compile(r'(?im)^[ \t]*(?:\[?(?:ERROR|FATAL)\]?[ \t]*:?[ \t]*)?'
+               r'(?:401\s+Unauthorized|'
+               r'invalid\s+api\s+key|api\s+key\s+(?:not\s+found|missing|invalid))'
+               r'\b[^\r\n]{0,120}[ \t\r]*$'),
 ]
 _BENIGN_FAILURE_CONTEXT_RE = re.compile(
     r'\b(?:historical|past|previous|prior)\s+(?:example|incident|case|attempt)\b|'
