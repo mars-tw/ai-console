@@ -191,6 +191,9 @@ def plan(instruction: str, model: str, skills: dict[str, str] | None = None,
         "model": model,
         "messages": [{"role": "user", "content": PROMPT.format(skills=listing) + instruction}],
         "temperature": 0.2,
+        # ai-hub/ROUTER.md 要求所有地端聊天第一發就關推理；
+        # 否則 Qwen 會把 max_tokens 全花在 reasoning_content，永遠沒有可派的正文。
+        "reasoning": "off",
         # 地端很多是推理型模型，reasoning_content 會先吃掉額度。
         # 實測 27B 拆一個四步驟需求就用掉 1350 token 在推理上，
         # 額度不夠時 content 會是空的 —— 拆解就永遠失敗。留寬一點。

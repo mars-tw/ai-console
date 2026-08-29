@@ -6,9 +6,11 @@
 """
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -162,6 +164,22 @@ class TestPlanShortCircuits(unittest.TestCase):
     def test_可用清單只剩地端時退路也要跟著換(self):
         got = planner.plan("把測試跑一遍", "", available=["local"])
         self.assertEqual(got["steps"][0]["tool"], "local")
+
+    def test_地端拆解第一發關閉_reasoning(self):
+        captured = {}
+
+        class Response:
+            def read(self):
+                return b'{"choices":[{"message":{"content":"{\\"steps\\":[]}"}}]}'
+
+        def fake_open(request, timeout):
+            captured.update(json.loads(request.data.decode("utf-8")))
+            return Response()
+
+        with mock.patch.object(planner.urllib.request, "urlopen", side_effect=fake_open):
+            planner.plan("把測試跑一遍", "qwen/qwen3.5-4b", available=sorted(ALL))
+
+        self.assertEqual(captured["reasoning"], "off")
 
 
 

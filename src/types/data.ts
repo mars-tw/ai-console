@@ -36,17 +36,29 @@ export interface ConversationSummary {
   dispatch?: boolean
   resume: string
   hasMessages: boolean
-  /** 來源工具自己標記的封存（目前只有 Codex 有這個旗標） */
+  /** 來源工具自己標記的封存 */
   archived?: boolean
+  /** 來源桌面應用的權威側欄目前看得到這一列 */
+  inApp?: boolean
+  /** 來源桌面應用的釘選狀態 */
+  pinned?: boolean
+  /** 同一 session 的多份權威 metadata 互相矛盾，不能任選一份 */
+  metadataConflict?: boolean
+  /** 權威側欄只有 metadata，本機沒有可讀取的對話本文 */
+  metadataOnly?: boolean
+  /** 這列側欄狀態的權威來源 */
+  metadataSource?: string
   /**
    * 控制台的垃圾桶：主畫面預設不顯示，但檔案完全沒動，隨時看得回來。
    * 規則在 tools/indexer.py 的 trash_reason()：
+   *   no-messages     沒有可辨識的對話訊息
    *   archived        來源工具裡封存掉的
+   *   not-in-app      不在來源桌面應用的權威側欄
    *   not-active-tool 不是目前在用的那幾個 CLI
    *   stale           太久沒有動過
    */
   trashed?: boolean
-  trashReason?: 'archived' | 'not-active-tool' | 'stale' | ''
+  trashReason?: 'no-messages' | 'archived' | 'not-in-app' | 'not-active-tool' | 'stale' | ''
   dup?: boolean
   dupOf?: string
   dupOfTool?: string
@@ -66,6 +78,9 @@ export interface IndexData {
     archived?: number
     /** 被垃圾桶規則收起來的份數 */
     trashed?: number
+    pinned?: number
+    inApp?: number
+    metadataConflict?: number
   }
 }
 

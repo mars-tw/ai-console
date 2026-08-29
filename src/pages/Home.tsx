@@ -29,6 +29,11 @@ const PROJ_BADGE: Record<string, { label: string; cls: string }> = {
 }
 
 const WEEK_MS = 7 * 86400 * 1000
+const SOURCE_MANAGED_DELETE_TOOLS = new Set(['codex', 'qwen', 'kimi'])
+
+function canDeleteFromConsole(c: ConversationSummary): boolean {
+  return !SOURCE_MANAGED_DELETE_TOOLS.has(c.tool)
+}
 
 const TAIL_ERROR_TEXT: Record<string, string> = {
   invalid_id: '索引裡找不到這個對話',
@@ -410,6 +415,12 @@ export default function Home() {
 
   /** 刪除一個對話：伺服器把來源檔搬到回收區，可以救回來 */
   const removeConv = async (c: ConversationSummary) => {
+    // 這三家另有 DB/catalog/archive 作為權威側欄狀態；只搬本文會在重掃後
+    // 復活。按鈕本身也會隱藏，這層是避免舊畫面或未來呼叫誤走確認流程。
+    if (!canDeleteFromConsole(c)) {
+      showToast(t('請在 {tool} 來源應用中刪除這個對話', { tool: c.toolLabel }))
+      return
+    }
     if (!confirm(t('把「{title}」移到回收區？檔案會搬到 ~/.ai-console/trash，可以救回來。',
       { title: c.title.slice(0, 40) }))) return
     try {
@@ -731,8 +742,11 @@ export default function Home() {
       if (!q) {
         if (!showSubagent && c.subagent) return false
         if (!showDup && c.dup) return false
-        if (!showOld && c.mtime < cutoff) return false
-        if (!showDispatch && c.dispatch) return false
+        // 來源桌面側欄明確列出的對話是權威狀態：即使很舊，或標題看起來
+        // 像派工，也不能被控制台的推測式規則藏掉。使用者自己選的中文過濾
+        // 與子代理過濾仍照常套用。
+        if (!c.inApp && !showOld && c.mtime < cutoff) return false
+        if (!c.inApp && !showDispatch && c.dispatch) return false
         if (onlyCJK && !HAS_CJK.test(c.title)) return false
         return true
       }
@@ -753,7 +767,7 @@ export default function Home() {
     const scanned = new Date(index.generated_at).getTime() || 0
     const dirCutoff = activeDays > 0 && !q && scanned ? scanned - activeDays * 86400000 : 0
     return [...map.entries()]
-      .filter(([, convs]) => !dirCutoff || convs.some((c) => c.mtime >= dirCutoff))
+      .filter(([, convs]) => !dirCutoff || convs.some((c) => c.inApp || c.mtime >= dirCutoff))
       .map(([dir, convs]) => {
         // 該資料夾的主要工作線 = 成員中最常見的分類
         const counts = new Map<string, number>()
@@ -768,7 +782,9 @@ export default function Home() {
   const oldCount = useMemo(() => {
     if (!index) return 0
     const cutoff = indexNow - WEEK_MS
-    return index.conversations.filter((c) => c.mtime < cutoff && !c.subagent && !c.dup).length
+    return index.conversations.filter(
+      (c) => !c.inApp && c.mtime < cutoff && !c.subagent && !c.dup,
+    ).length
   }, [index, indexNow])
 
   const hubProjects = useMemo(() => {
@@ -1104,7 +1120,16 @@ export default function Home() {
                         className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
                       >
                         <span className="truncate text-sm">
+                          {c.pinned && <span className="mr-1" title={t('來源應用已釘選')}>📌</span>}
                           {c.title}
+                          {c.metadataConflict && (
+                            <span
+                              className="ml-1 rounded bg-amber-100 px-1 text-xs text-amber-700 dark:bg-amber-950 dark:text-amber-300"
+                              title={t('來源應用的多份 metadata 不一致，請回來源應用確認')}
+                            >
+                              {t('metadata 衝突')}
+                            </span>
+                          )}
                           {c.dup && <span className="ml-1 rounded bg-elev px-1 text-xs text-mute3">{t('副本')}→{c.dupOfTool}</span>}
                           {!!c.dupCount && <span className="ml-1 rounded bg-elev px-1 text-xs text-mute3">+{t('{n} 副本', { n: c.dupCount })}</span>}
                         </span>
@@ -1123,7 +1148,7 @@ export default function Home() {
                           {t('留著')}
                         </button>
                       )}
-                      {apiOk && (
+                      {apiOk && canDeleteFromConsole(c) && (
                         <button
                           className="flex-none rounded px-1 text-xs text-mute3 opacity-0 hover:text-red-500 focus-visible:text-red-500 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
                           title={t('移到回收區')}

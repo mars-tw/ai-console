@@ -16,11 +16,13 @@ AI 控制台 · 整合伺服器（僅綁定 127.0.0.1，無外部存取）
 import contextlib
 import datetime as _dt
 import json
+import math
 import mimetypes
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -50,6 +52,8 @@ LMS_BIN = Path.home() / ".lmstudio" / "bin" / "lms.exe"
 # 地端模型的把關腳本（載入前 / 載入後各問一次），路徑可由 config.json 覆蓋
 LOCAL_GATE = Path(_CFG.get("local_gate", str(Path.home() / "ai-hub" / "tools" / "local_gate.py")))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(APP_ROOT / "tools"))
+from index_lock import conversation_index_lock  # noqa: E402
 import planner   # noqa: E402
 import rules     # noqa: E402
 import schedule  # noqa: E402
@@ -118,6 +122,21 @@ def _lms_run(argv, **kw):
     return _run(argv, text=True, encoding="utf-8", errors="replace", **kw)
 
 
+def _tasklist_run(*, timeout: int):
+    """Windows ``tasklist`` 跟著系統 ANSI code page 輸出。
+
+    測試以 ``python -X utf8`` 執行時，單用 ``text=True`` 會誤拿 UTF-8
+    解讀 CP950，reader thread 被中文行程名擊潰後 stdout 變空，
+    存活中的派工就會被當成已結束。``mbcs`` 明確跟 Windows ANSI
+    code page 對齊；其他平台不會走 tasklist。
+    """
+    return _run(
+        ["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True,
+        encoding="mbcs" if os.name == "nt" else None, errors="replace",
+        timeout=timeout,
+    )
+
+
 # 一整批 pid 的存活狀態，快取幾秒。
 # /api/dispatches 每 8 秒被輪詢一次，而主控台與辦公室兩個分頁都在輪詢，
 # 沒有快取的話同一秒可能連問兩次。
@@ -147,7 +166,7 @@ def _alive_pids(pids: set) -> set:
         # 有人不在快取裡 —— 可能是新生的，重查一次才敢說它死了
     alive = set()
     try:
-        r = _run(["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=15)
+        r = _tasklist_run(timeout=15)
         for line in r.stdout.splitlines():
             parts = [p.strip('"') for p in line.split('","')]
             if len(parts) > 1 and parts[1].strip().isdigit():
@@ -1099,12 +1118,50 @@ def _claude_desktop_session_roots() -> list[Path]:
     ]
 
 
-def claude_desktop_cards(cli_id: str) -> list[Path]:
-    """對上 Claude Desktop 側欄卡（cliSessionId == jsonl 檔名）。"""
-    if not cli_id:
-        return []
-    seen: set[str] = set()
-    out: list[Path] = []
+def canonical_claude_session_id(cli_id: object) -> str:
+    """回傳 Claude Desktop 使用的 canonical UUID。
+
+    Desktop metadata 偶爾會把 UUID 寫成大寫或加上大括號；那仍是同一個
+    session。其他任意字串則不可拿來掃卡片或當交易鎖的 key。
+    """
+    raw = str(cli_id or "").strip()
+    if not raw:
+        raise ValueError("Claude 對話 id 為空")
+    try:
+        return str(uuid.UUID(raw))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError("Claude 對話 id 不是有效 UUID") from exc
+
+
+def _physical_file_identity(path: Path) -> tuple:
+    """辨識同一實體檔案的 Win32／Store alias，不靠路徑字串猜測。"""
+    st = path.stat()
+    # Windows 的 Python 會把 NTFS file id 放在 st_ino。測不到 file id 的
+    # 檔案系統才退回 real path；normcase 讓磁碟機代號大小寫不造成假副本。
+    if st.st_ino:
+        return ("inode", int(st.st_dev), int(st.st_ino))
+    return ("path", os.path.normcase(os.path.realpath(path)))
+
+
+def _claude_card_semantics(data: dict) -> dict:
+    """只比較會影響控制台側欄呈現的欄位。"""
+    return {
+        "archived": bool(data.get("isArchived")),
+        "title": str(data.get("title") or ""),
+        "cwd": str(data.get("cwd") or data.get("originCwd") or ""),
+    }
+
+
+def discover_claude_desktop_cards(cli_id: object) -> dict:
+    """找出一個 Claude session 的所有實體卡片與 metadata 衝突。
+
+    相同 inode 的 Store／Win32 alias 只回傳一次；真正不同的卡片則全部
+    保留。若這些卡片對側欄欄位的說法不一致，呼叫端會拿到明確的
+    ``metadataConflict``，而不是由 rglob 順序偷偷決定哪一份算數。
+    """
+    canonical = canonical_claude_session_id(cli_id)
+    seen: set[tuple] = set()
+    records: list[tuple[Path, dict]] = []
     for root in _claude_desktop_session_roots():
         if not root.is_dir():
             continue
@@ -1113,31 +1170,297 @@ def claude_desktop_cards(cli_id: str) -> list[Path]:
                 d = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
             except (OSError, json.JSONDecodeError):
                 continue
-            if str(d.get("cliSessionId") or "") != cli_id:
+            if not isinstance(d, dict):
                 continue
-            key = str(path.resolve())
+            try:
+                card_sid = canonical_claude_session_id(d.get("cliSessionId"))
+            except ValueError:
+                continue
+            if card_sid != canonical:
+                continue
+            try:
+                key = _physical_file_identity(path)
+            except OSError:
+                continue
             if key in seen:
                 continue
             seen.add(key)
-            out.append(path)
-    return out
+            records.append((path, d))
+
+    records.sort(key=lambda row: os.path.normcase(os.path.abspath(row[0])))
+    conflicts: dict[str, list[object]] = {}
+    for field in ("archived", "title", "cwd"):
+        values = {_claude_card_semantics(data)[field] for _, data in records}
+        if len(values) > 1:
+            conflicts[field] = sorted(values, key=lambda value: str(value))
+    return {
+        "sessionId": canonical,
+        "cards": [path for path, _ in records],
+        "metadataConflict": bool(conflicts),
+        "conflicts": conflicts,
+    }
 
 
-def drop_index_conv(conv_id: str) -> None:
+def claude_desktop_cards(cli_id: object) -> list[Path]:
+    """相容舊呼叫端：回傳已按實體檔案去重的 Claude Desktop 卡片。"""
+    return discover_claude_desktop_cards(cli_id)["cards"]
+
+
+_INDEX_LOCK = threading.RLock()
+_CLAUDE_LOCKS_GUARD = threading.Lock()
+_CLAUDE_SESSION_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _claude_session_lock(session_id: str) -> threading.RLock:
+    """同一個 Claude session 的 archive/delete 必須序列化。"""
+    with _CLAUDE_LOCKS_GUARD:
+        return _CLAUDE_SESSION_LOCKS.setdefault(session_id, threading.RLock())
+
+
+def _load_index_data() -> dict:
+    data, _ = _load_index_snapshot()
+    return data
+
+
+def _load_index_snapshot() -> tuple[dict, bytes]:
+    raw = INDEX_JSON.read_bytes()
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict) or not isinstance(data.get("conversations"), list):
+        raise ValueError("index.json 格式不合法")
+    return data, raw
+
+
+def _recompute_index_stats(data: dict) -> None:
+    """由目前 conversations 重算所有可由列資料推出的 aggregate。"""
+    conversations = data.get("conversations") or []
+    stats = data.setdefault("stats", {})
+    stats.update({
+        "total": len(conversations),
+        "subagent": sum(bool(c.get("subagent")) for c in conversations),
+        "duplicates": sum(bool(c.get("dup")) for c in conversations),
+        "archived": sum(bool(c.get("archived")) for c in conversations),
+        "trashed": sum(bool(c.get("trashed")) for c in conversations),
+        "dispatch": sum(
+            bool(c.get("dispatch")) and not bool(c.get("subagent")) and not bool(c.get("dup"))
+            for c in conversations
+        ),
+    })
+    stats["unique"] = stats["total"] - stats["duplicates"]
+    optional = {
+        "pinned": "pinned",
+        "inApp": "inApp",
+        "metadataConflict": "metadataConflict",
+    }
+    for stat_name, field in optional.items():
+        if stat_name in stats or any(field in c for c in conversations):
+            stats[stat_name] = sum(bool(c.get(field)) for c in conversations)
+
+
+def _duplicate_survivor_rank(entry: dict) -> tuple:
+    """刪除正本後挑選新正本；排序必須穩定且偏好可用的桌面對話。"""
+    tool_priority = {"codex": 0, "kimi": 1, "claude": 2,
+                     "grok": 3, "cursor": 4, "qwen": 5}
+    return (
+        bool(entry.get("inApp")),
+        not bool(entry.get("subagent")),
+        bool(entry.get("hasMessages")),
+        float(entry.get("mtime") or 0),
+        -tool_priority.get(str(entry.get("tool") or ""), 9),
+        str(entry.get("id") or ""),
+    )
+
+
+def _repair_orphan_duplicate_links(conversations: list[dict]) -> None:
+    """刪除正本後，提升一個 survivor 並重建所有 dupCount。
+
+    索引器會讓副本用 ``dupOf`` 指向正本。直接刪掉正本會留下不可達的
+    副本，前端又預設隱藏 dup，結果整組像被刪光。這裡只修 orphan 群組，
+    不重新判定原本彼此獨立的跨工具 active cards。
+    """
+    by_id = {str(c.get("id")): c for c in conversations if c.get("id")}
+    orphan_groups: dict[str, list[dict]] = {}
+    for entry in conversations:
+        target = str(entry.get("dupOf") or "")
+        if entry.get("dup") and target not in by_id:
+            key = str(entry.get("sessionId") or f"missing:{target}")
+            orphan_groups.setdefault(key, []).append(entry)
+
+    for group in orphan_groups.values():
+        promoted = max(group, key=_duplicate_survivor_rank)
+        promoted.pop("dup", None)
+        promoted.pop("dupOf", None)
+        promoted.pop("dupOfTool", None)
+        promoted.pop("dupCount", None)
+        for survivor in group:
+            if survivor is promoted:
+                continue
+            survivor["dup"] = True
+            survivor["dupOf"] = promoted["id"]
+            survivor["dupOfTool"] = promoted.get("toolLabel") or promoted.get("tool") or ""
+
+    # 非副本不該殘留舊指標；所有正本的 dupCount 一律由目前連結重算。
+    for entry in conversations:
+        entry.pop("dupCount", None)
+        if not entry.get("dup"):
+            entry.pop("dup", None)
+            entry.pop("dupOf", None)
+            entry.pop("dupOfTool", None)
+
+    by_id = {str(c.get("id")): c for c in conversations if c.get("id")}
+    for entry in conversations:
+        if not entry.get("dup"):
+            continue
+        canonical = by_id.get(str(entry.get("dupOf") or ""))
+        if canonical is None:
+            # 缺 sessionId 的異常資料仍 fail-open：提升它，不能讓 UI 永久隱藏。
+            entry.pop("dup", None)
+            entry.pop("dupOf", None)
+            entry.pop("dupOfTool", None)
+            continue
+        canonical["dupCount"] = int(canonical.get("dupCount") or 0) + 1
+
+
+def _stage_bytes(path: Path, payload: bytes) -> Path:
+    """在目標同目錄建立唯一暫存檔，供 os.replace 原子換入。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(raw_tmp)
     try:
-        data = json.loads(INDEX_JSON.read_text(encoding="utf-8"))
-        before = len(data.get("conversations", []))
-        data["conversations"] = [c for c in data["conversations"] if c["id"] != conv_id]
-        if len(data["conversations"]) != before:
-            st = data.setdefault("stats", {})
-            st["total"] = max(0, (st.get("total") or before) - 1)
-            INDEX_JSON.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    except (OSError, json.JSONDecodeError):
-        pass
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return tmp
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
-def lms_installed_models():
-    """磁碟上已安裝、而且路由表認得的模型（回傳 lms 給的 modelKey 原字串）
+def _replace_file(staged: Path, target: Path) -> None:
+    os.replace(staged, target)
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    staged = _stage_bytes(
+        path, json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+    )
+    try:
+        _replace_file(staged, path)
+    finally:
+        with contextlib.suppress(OSError):
+            staged.unlink()
+
+
+def _preflight_claude_cards(cards: list[Path], session_id: str) -> list[dict]:
+    """在任何寫入前完整讀過所有卡片，並保留 rollback 所需原始 bytes。"""
+    snapshots = []
+    for card in cards:
+        raw = card.read_bytes()
+        data = json.loads(raw.decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError(f"Claude 卡片不是 JSON object：{card.name}")
+        if canonical_claude_session_id(data.get("cliSessionId")) != session_id:
+            raise ValueError(f"Claude 卡片在交易前已換成別的 session：{card.name}")
+        if "isArchived" in data and not isinstance(data["isArchived"], bool):
+            raise ValueError(f"Claude 卡片的 isArchived 不是布林值：{card.name}")
+        snapshots.append({"path": card, "raw": raw, "data": data})
+    return snapshots
+
+
+def _rollback_replaced_files(snapshots: list[dict]) -> list[str]:
+    failed: list[str] = []
+    for snapshot in reversed(snapshots):
+        path = snapshot["path"]
+        try:
+            _atomic_write_bytes(path, snapshot["raw"])
+        except Exception:
+            failed.append(str(path))
+    return failed
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    staged = _stage_bytes(path, payload)
+    try:
+        _replace_file(staged, path)
+    finally:
+        with contextlib.suppress(OSError):
+            staged.unlink()
+
+
+def _set_index_archive_state(entry: dict, archived: bool) -> None:
+    entry["archived"] = archived
+    if archived:
+        previous = str(entry.get("trashReason") or "")
+        if previous and previous != "archived":
+            entry["archivePreviousTrashReason"] = previous
+        entry["trashed"] = True
+        entry["trashReason"] = "archived"
+        return
+
+    # 解除封存只移除「因封存而進垃圾桶」的狀態；原本就是 stale、
+    # not-in-app 等原因的仍然留在垃圾桶。
+    if entry.get("trashReason") != "archived":
+        return
+    previous = str(entry.pop("archivePreviousTrashReason", "") or "")
+    if (not previous and not entry.get("metadataOnly")
+            and not entry.get("hasMessages", True)):
+        previous = "no-messages"
+    if not previous and entry.get("inApp") is False:
+        previous = "not-in-app"
+    entry["trashReason"] = previous
+    entry["trashed"] = bool(previous)
+
+
+def drop_index_conv(conv_id: str) -> bool:
+    """原子移除索引列；失敗會往外拋，禁止回報假成功。"""
+    # 鎖順序固定：process RLock → cross-process lock。refresh 只拿前者再
+    # 等待會自行拿後者的 indexer child，因此不可反過來造成 ABBA deadlock。
+    with _INDEX_LOCK, conversation_index_lock(timeout=60.0):
+        data, original = _load_index_snapshot()
+        try:
+            _index_without_conversation(data, conv_id)
+        except KeyError:
+            return False
+        if INDEX_JSON.read_bytes() != original:
+            raise RuntimeError("index.json 在交易期間已變更")
+        _atomic_write_json(INDEX_JSON, data)
+        return True
+
+
+def _move_path(source: Path, destination: Path) -> None:
+    import shutil
+    shutil.move(str(source), str(destination))
+
+
+def _rollback_moves(moves: list[tuple[Path, Path]]) -> list[str]:
+    """把已搬入控制台回收區的檔案盡力搬回原位。"""
+    failed: list[str] = []
+    for original, moved in reversed(moves):
+        if not moved.exists():
+            continue
+        try:
+            original.parent.mkdir(parents=True, exist_ok=True)
+            _move_path(moved, original)
+        except Exception:
+            failed.append(str(original))
+    return failed
+
+
+def _index_without_conversation(data: dict, conv_id: str) -> dict:
+    before = len(data["conversations"])
+    data["conversations"] = [c for c in data["conversations"] if c.get("id") != conv_id]
+    if len(data["conversations"]) == before:
+        raise KeyError(conv_id)
+    _repair_orphan_duplicate_links(data["conversations"])
+    _recompute_index_stats(data)
+    return data
+
+
+def lms_installed_model_records():
+    """磁碟上已安裝、而且路由表認得的模型（保留 lms 的精確大小）。
 
     「已安裝」「已載入」「API 伺服器開著」是三件不同的事，要分開問。
     實測踩到的故障：lms ls --llm --json 明明列得出完整的模型，但
@@ -1175,8 +1498,8 @@ def lms_installed_models():
         try:
             size = int(size)
         except (TypeError, ValueError):
-            size = 0
-        if size > 0:
+            size = None
+        if size is not None and size > 0:
             if size < rule["min_gb"] * (1024 ** 3) * 0.9:
                 continue
         elif not model_complete(key):
@@ -1184,8 +1507,15 @@ def lms_installed_models():
             # 兩邊都驗不出完整檔案就 fail closed，不把半套模型放進白名單。
             continue
         seen.add(key)
-        out.append(key)                              # 原字串，不重組也不改寫
+        # 不用 min_gb 或檔案掃描值代填大小。RAM 准入只能相信 lms 回報的
+        # sizeBytes；缺值仍可出現在「已安裝」清單，但冷載入會 fail closed。
+        out.append({"modelKey": key, "sizeBytes": size if size and size > 0 else None})
     return out
+
+
+def lms_installed_models():
+    """相容既有 API：只回傳 lms 的 modelKey 原字串。"""
+    return [r["modelKey"] for r in lms_installed_model_records()]
 
 
 def lms_models():
@@ -1199,13 +1529,57 @@ def lms_models():
     return lms_installed_models()
 
 
-def _lms_ps():
+def _lms_ps_strict():
+    """嚴格讀取已載入模型；任何未知狀態都往外拋。
+
+    mutation 路徑不能把逾時、非零退出或壞 JSON 當成「目前沒載模型」，
+    否則下一步冷載入就可能取代外來實例。唯讀 UI 可用下面的 fail-soft
+    wrapper，但載入、卸載與清理一律用這個版本。
+    """
     if not LMS_BIN.exists():
-        return []
+        raise RuntimeError(f"找不到 lms 執行檔（{LMS_BIN}）")
     try:
         r = _lms_run([str(LMS_BIN), "ps", "--json"], capture_output=True, timeout=15)
-        data = json.loads(r.stdout or "[]")
-        return [m for m in data if isinstance(m, dict)]
+    except Exception as exc:
+        raise RuntimeError(f"無法讀取 LM Studio 載入狀態：{exc}") from exc
+    if r.returncode != 0:
+        detail = ((r.stderr or r.stdout) or "").strip()[-300:]
+        raise RuntimeError(f"無法讀取 LM Studio 載入狀態（rc={r.returncode}）："
+                           f"{detail or 'lms ps 非零退出'}")
+    raw = (r.stdout or "").strip()
+    if not raw:
+        raise RuntimeError("LM Studio 載入狀態為空白輸出，狀態未知")
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("LM Studio 載入狀態不是合法 JSON，狀態未知") from exc
+    if isinstance(data, dict):
+        if isinstance(data.get("models"), list):
+            data = data["models"]
+        elif isinstance(data.get("data"), list):
+            data = data["data"]
+        else:
+            raise RuntimeError("LM Studio 載入狀態格式未知（預期 model list）")
+    if not isinstance(data, list):
+        raise RuntimeError("LM Studio 載入狀態格式未知（預期 model list）")
+    out = []
+    for row in data:
+        if not isinstance(row, dict):
+            raise RuntimeError("LM Studio 載入狀態含非物件項目，狀態未知")
+        model_key = row.get("modelKey")
+        identifier = row.get("identifier")
+        if not isinstance(model_key, str) or not model_key.strip():
+            raise RuntimeError("LM Studio 載入實例缺少 modelKey，狀態未知")
+        if not isinstance(identifier, str) or not identifier.strip():
+            raise RuntimeError("LM Studio 載入實例缺少可驗證的 identifier，狀態未知")
+        out.append(row)
+    return out
+
+
+def _lms_ps():
+    """唯讀 UI 探測用的 fail-soft wrapper；mutation 不得使用。"""
+    try:
+        return _lms_ps_strict()
     except Exception:
         return []
 
@@ -1238,6 +1612,10 @@ def lms_loaded_keys():
 # 所有 GET 端點一律維持唯讀 —— 一個惡意網頁的
 # <img src="http://127.0.0.1:5177/api/models"> 不該在使用者機器上載起一個 27B。
 LMS_RUNTIME = "llama.cpp-win-x86_64-avx2@2.24.0"
+LMS_COLD_LOAD_TIMEOUT_S = 180
+LMS_COLD_LOAD_OVERHEAD = 1.15
+LMS_COLD_LOAD_RESERVE_GIB = 8.0
+_GIB = 1024 ** 3
 _LIFECYCLE_MUTEX = "Local" + chr(92) + "CodexLocalModelLifecycleV1"
 _LIFECYCLE_WAIT_S = 5.0
 _LIFECYCLE_FALLBACK = threading.Lock()
@@ -1376,6 +1754,158 @@ def _owned_identifier(model: str) -> str:
     return f"ai-console-{key}"
 
 
+def available_physical_ram_bytes() -> int | None:
+    """回傳作業系統目前可用的實體 RAM；測不到就回 None。
+
+    Windows 直接問 GlobalMemoryStatusEx，不把總 RAM 或 swap 誤當成可冷載入
+    的空間。Linux 等平台先讀 MemAvailable，再退到 POSIX sysconf。所有後備
+    都是標準庫且唯讀；任何不明狀態由呼叫端 fail closed。
+    """
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = MEMORYSTATUSEX()
+            status.dwLength = ctypes.sizeof(status)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.GlobalMemoryStatusEx.argtypes = (ctypes.POINTER(MEMORYSTATUSEX),)
+            kernel32.GlobalMemoryStatusEx.restype = ctypes.c_int
+            if kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                available = int(status.ullAvailPhys)
+                if available > 0:
+                    return available
+        except Exception:
+            pass
+
+    # Linux 的 MemAvailable 包含可回收 page cache，比 MemFree 更貼近「現在能
+    # 給模型多少」。讀不到再試 POSIX 的 available physical pages。
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+            if line.startswith("MemAvailable:"):
+                available = int(line.split()[1]) * 1024
+                if available > 0:
+                    return available
+                break
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+        available = pages * page_size
+        return available if available > 0 else None
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+_RAM_AUTO = object()
+
+
+def cold_load_admission(record: dict | None, available_bytes=_RAM_AUTO) -> dict:
+    """判斷一個尚未載入的模型能否在目前 RAM 下安全冷載入。"""
+    if available_bytes is _RAM_AUTO:
+        available_bytes = available_physical_ram_bytes()
+    try:
+        available = int(available_bytes) if available_bytes is not None else None
+    except (TypeError, ValueError):
+        available = None
+    if available is not None and available <= 0:
+        available = None
+
+    model = str((record or {}).get("modelKey") or "")
+    try:
+        size = int((record or {}).get("sizeBytes"))
+    except (TypeError, ValueError):
+        size = 0
+    required = (math.ceil(size * LMS_COLD_LOAD_OVERHEAD
+                          + LMS_COLD_LOAD_RESERVE_GIB * _GIB)
+                if size > 0 else None)
+    admitted = bool(required is not None and available is not None and available >= required)
+    if required is None:
+        reason = "lms 未回報 sizeBytes，冷載入准入失敗"
+    elif available is None:
+        reason = "無法取得目前可用實體記憶體，冷載入准入失敗"
+    elif not admitted:
+        reason = (f"可用實體記憶體 {available / _GIB:.2f} GiB，"
+                  f"冷載入至少需要 {required / _GIB:.2f} GiB")
+    else:
+        reason = (f"可用實體記憶體 {available / _GIB:.2f} GiB，"
+                  f"冷載入至少需要 {required / _GIB:.2f} GiB")
+    return {
+        "model": model,
+        "model_size_bytes": size if size > 0 else None,
+        "model_size_gib": round(size / _GIB, 2) if size > 0 else None,
+        "available_ram_bytes": available,
+        "available_ram_gib": round(available / _GIB, 2) if available is not None else None,
+        "required_ram_bytes": required,
+        "required_ram_gib": round(required / _GIB, 2) if required is not None else None,
+        "admitted": admitted,
+        "reason": reason,
+    }
+
+
+def _require_cold_load_admission(record: dict | None) -> dict:
+    admission = cold_load_admission(record)
+    if not admission["admitted"]:
+        model = admission["model"] or "未知模型"
+        raise RuntimeError(f"{model} 未通過 RAM 冷載入准入：{admission['reason']}；未嘗試載入")
+    return admission
+
+
+def _cleanup_owned_lms_load(identifier: str) -> str:
+    """清理本次 cold load 的 owned identifier，並做嚴格事後 readback。"""
+    before_error = ""
+    try:
+        before = _lms_ps_strict()
+    except Exception as exc:
+        before = None
+        before_error = str(exc)
+    if before is not None and not any(
+            str(row.get("identifier") or "") == identifier for row in before):
+        return (f"清理確認：嚴格 readback 已確認 owned 實例 {identifier} 不存在，"
+                "未執行卸載")
+
+    unload_error = ""
+    try:
+        result = _lms_run([str(LMS_BIN), "unload", identifier],
+                          capture_output=True, timeout=60)
+    except Exception as exc:
+        result = None
+        unload_error = f"lms unload 發生例外：{exc}"
+    if result is not None and result.returncode != 0:
+        detail = ((result.stderr or result.stdout) or "").strip()[-200:]
+        unload_error = (f"lms unload rc={result.returncode}："
+                        f"{detail or '非零退出'}")
+
+    try:
+        after = _lms_ps_strict()
+    except Exception as exc:
+        prefix = f"；清理前 readback 也失敗：{before_error}" if before_error else ""
+        return (f"清理未驗證：owned 實例 {identifier} 的事後 readback 失敗：{exc}"
+                f"{prefix}"
+                + (f"；{unload_error}" if unload_error else ""))
+    still_present = any(str(row.get("identifier") or "") == identifier for row in after)
+    if unload_error:
+        state = "且嚴格 readback 顯示仍存在" if still_present else "；嚴格 readback 顯示目前不存在"
+        return f"清理失敗：owned 實例 {identifier} 的 {unload_error}{state}"
+    if still_present:
+        return (f"清理失敗：lms unload 回報成功，但嚴格 readback 顯示 owned 實例 "
+                f"{identifier} 仍存在")
+    return f"清理成功：已卸載 owned 實例 {identifier}，且嚴格 readback 已確認不存在"
+
+
 def ensure_lms_chat_model(model: str) -> str:
     """把地端對話要用的模型準備好，回傳真正要送進 payload 的名字
 
@@ -1392,15 +1922,17 @@ def ensure_lms_chat_model(model: str) -> str:
     """
     if not LMS_BIN.exists():
         raise RuntimeError(f"找不到 lms 執行檔（{LMS_BIN}）")
-    installed = lms_installed_models()
+    installed_records = lms_installed_model_records()
+    installed = [record["modelKey"] for record in installed_records]
     if not installed:
         raise RuntimeError("lms ls 列不出任何已登錄的模型")
     if model not in installed:
         raise ValueError(f"模型不在本機已安裝清單內，拒絕載入：{str(model)[:80]!r}")
+    record = next(record for record in installed_records if record["modelKey"] == model)
 
     with _lifecycle_lock():
         # 鎖外面看到的狀態可能已經過期（別的流程剛載完或剛卸載），重問一次
-        loaded = _lms_ps()
+        loaded = _lms_ps_strict()
         mine = [m for m in loaded if m.get("modelKey") == model]
         others = [m for m in loaded if m.get("modelKey") != model]
         if others or len(mine) > 1:
@@ -1413,6 +1945,10 @@ def ensure_lms_chat_model(model: str) -> str:
             # 識別碼優先：載入時可以用 --identifier 取任意名字，
             # 拿模型名去打 /v1 會找不到那個實例。
             return mine[0].get("identifier") or model
+        # 要放在 gate/runtime/server 之前：RAM 明顯不足時不能先產生任何載入
+        # 相關寫入。之後在真正 lms load 前還會再量一次，避免等待把關期間
+        # 記憶體已被其他工作吃掉。
+        _require_cold_load_admission(record)
         ok, note = _run_gate()
         if not ok:
             raise RuntimeError(f"地端把關未放行：{note}")
@@ -1420,26 +1956,25 @@ def ensure_lms_chat_model(model: str) -> str:
         _lms_runtime_select()
         _lms_server_start()
         ident = _owned_identifier(model)
+        _require_cold_load_admission(record)
         try:
             # --ttl 300：閒置五分鐘自動釋放，不會讓這次對話永久佔住記憶體
             r = _lms_run([str(LMS_BIN), "load", model, "-y", "--gpu", "off",
                           "-c", "8192", "--ttl", "300", "--identifier", ident],
-                         capture_output=True, timeout=300)
+                         capture_output=True, timeout=LMS_COLD_LOAD_TIMEOUT_S)
         except Exception as e:
-            raise RuntimeError(f"載入模型失敗：{e}")
+            cleanup = _cleanup_owned_lms_load(ident)
+            raise RuntimeError(f"載入模型失敗：{e}；{cleanup}")
         if r.returncode != 0:
-            raise RuntimeError("載入模型失敗：" + ((r.stderr or r.stdout) or "").strip()[-300:])
+            cleanup = _cleanup_owned_lms_load(ident)
+            raise RuntimeError("載入模型失敗："
+                               + ((r.stderr or r.stdout) or "").strip()[-300:]
+                               + f"；{cleanup}")
 
         ok, note = _run_gate("--post-load-identifier", ident)
         if not ok:
-            # 只卸載自己剛剛載的那一個。這裡絕不會出現 --all：
-            # 同一時間可能有別的流程也載了東西，全卸等於砸別人的場。
-            try:
-                _lms_run([str(LMS_BIN), "unload", ident],
-                         capture_output=True, timeout=60)
-            except Exception:
-                pass
-            raise RuntimeError(f"載入後把關未放行，已卸載自己載入的實例：{note}")
+            cleanup = _cleanup_owned_lms_load(ident)
+            raise RuntimeError(f"載入後把關未放行：{note}；{cleanup}")
         return ident
 
 
@@ -1458,7 +1993,7 @@ def model_complete(model_id: str) -> bool:
 def detect_heavy_job():
     """偵測產片/渲染等大型工作：進程名特徵或單進程記憶體過高"""
     try:
-        r = _run(["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=20)
+        r = _tasklist_run(timeout=20)
         for line in r.stdout.splitlines():
             parts = [p.strip('"') for p in line.split('","')]
             if len(parts) < 5:
@@ -1496,10 +2031,8 @@ def faster_model_hint(current: str, available: list[str]) -> str:
 def planner_model():
     """挑一個拆解派工用的模型
 
-    刻意不走 route_model()：那裡偵測到大型工作（產片、渲染）就會降級到 4B，
-    而 4B 拆不出結構化的派工計畫 —— 實測會把提示詞的範例整段抄回來。
-    拆解只是一次幾秒的短呼叫，不像影片管線是持續佔用，所以這裡優先挑有能力的，
-    真的只剩小模型才用小模型。
+    刻意不走 route_model()：拆解端只會呼叫已經可用的 API 模型，不負責
+    冷載入；選擇順序仍與 ai-hub 的一般工作路由一致。
 
     但「有能力」要讓位給「已經載入」。lms_models() 列的是磁碟上有的，
     照偏好清單挑等於常常點到一個沒載入的 —— LM Studio 就得臨時載，
@@ -1509,23 +2042,15 @@ def planner_model():
     所以先看 lms ps，已經載入的又夠格就直接用它。
     """
     available = [m for m in lms_models() if model_complete(m)]
-    # 順序照「多久拿得到能用的產出」排，不是照參數量、也不是照 tok/s 排。
-    #
-    # 這台機器（CPU 推論）三個模型的實測：
-    #   kimi-linear-48b-a3b-instruct   9.3 tok/s   推理 0 tok    3 秒交稿  ← 最快拿到東西
-    #   qwen3.6-35b-a3b               14.9 tok/s   推理 100%     永遠空的
-    #   qwen3.8-27b（dense）            3.7 tok/s   推理大量      61 秒一句話
-    #
-    # 中間那個原本被我排在第一位，因為它 tok/s 最高 —— 但它是推理型，
-    # 給到 1500 tokens 還是全花在 reasoning_content 上，content 一個字都不吐，
-    # 連 /no_think 都關不掉。tok/s 高但吐不出東西等於零。
-    # instruct 版沒有這個問題，所以排最前面。
-    capable = ("kimi-linear-48b", "qwen3-coder-next", "qwen3.8-27b",
-               "gpt-oss-120b", "qwen3.6-35b")
+    # 一般結構化工作依 ai-hub/ROUTER.md：3.6 → 4B。Kimi 只屬於
+    # long 路徑，不再因為曾經跑得快就被一般拆解冷載入。
+    capable = ("qwen3.6-35b", "qwen3.5-4b", "qwen3-coder-next", "qwen3.8-27b")
     loaded = [m for m in lms_loaded_keys() if m]
     for m in loaded:
         if any(c in m for c in capable):
             return m
+    if loaded:
+        return loaded[0]  # 有外來常駐模型時不另挑冷模型去互踢
     for want in capable:
         for m in available:
             if want in m:
@@ -1534,17 +2059,11 @@ def planner_model():
     return (loaded[0] if loaded else (available[0] if available else ""))
 
 
-# 任務鏈：順序照「多久拿得到能用的產出」排，不是照參數量或 tok/s。
-#
-# 這台機器是 CPU 推論（GPU0 影片管線專屬、GPU1 只放得下 4B），實測：
-#   kimi-linear-48b-a3b-instruct   9.3 tok/s  推理 0 tok   3 秒交稿
-#   qwen3.6-35b-a3b               14.9 tok/s  推理 100%    永遠吐不出 content
-#   qwen3.8-27b（dense）            3.7 tok/s  推理大量     61 秒一句話
-# 所以 instruct 版的 MoE 排在最前面：tok/s 不是最高的，但它真的會交東西。
+# 任務鏈以 ai-hub/ROUTER.md §5 為準；Kimi 僅在 long 路徑。
 _CHAINS = {
-    "coding": ["qwen3-coder-next", "kimi-linear-48b", "qwen3.8-27b"],
-    "long": ["kimi-linear-48b", "qwen3.8-27b"],
-    "general": ["kimi-linear-48b", "qwen3.8-27b", "gpt-oss-120b"],
+    "coding": ["qwen3-coder-next", "qwen3.8-27b", "qwen3.6-35b", "qwen3.5-4b"],
+    "long": ["kimi-linear-48b"],
+    "general": ["qwen3.6-35b", "qwen3.5-4b"],
 }
 
 
@@ -1553,19 +2072,42 @@ def chains_all():
 
 
 def chains_for(task: str):
-    return _CHAINS.get(task, []) + _CHAINS["general"]
+    order = list(_CHAINS.get(task, []))
+    if task != "general":
+        order.extend(_CHAINS["general"])
+    return list(dict.fromkeys(order))
 
 
 def route_model(task: str = "general"):
     """依任務類型 + 系統狀態自動選模型，回傳 (model, reason, signals)"""
-    available = [m for m in lms_models() if model_complete(m)]
+    records = lms_installed_model_records()
+    available = [record["modelKey"] for record in records]
     loaded = lms_loaded_keys()          # 比對模型名，不是識別碼
     heavy = detect_heavy_job()
-    signals = {"loaded": loaded, "heavy_job": heavy, "available": len(available)}
+    available_ram = available_physical_ram_bytes()
+    admissions = {
+        record["modelKey"]: cold_load_admission(record, available_ram)
+        for record in records if record["modelKey"] not in loaded
+    }
+    cold_available = [model for model in available
+                      if model in loaded or admissions[model]["admitted"]]
+    rejected = [admission for admission in admissions.values()
+                if not admission["admitted"]]
+    signals = {
+        "loaded": loaded,
+        "heavy_job": heavy,
+        "available": len(available),
+        "available_ram_bytes": available_ram,
+        "available_ram_gib": round(available_ram / _GIB, 2) if available_ram else None,
+        "cold_load_overhead": LMS_COLD_LOAD_OVERHEAD,
+        "cold_load_reserve_gib": LMS_COLD_LOAD_RESERVE_GIB,
+        "cold_admitted": [m for m, admission in admissions.items() if admission["admitted"]],
+        "cold_rejected": rejected,
+    }
 
     def pick(cands):
         for c in cands:
-            for m in available:
+            for m in cold_available:
                 if c in m:
                     return m
         return None
@@ -1581,10 +2123,14 @@ def route_model(task: str = "general"):
     # 遠不如「不要重載」值錢。何況現在是 CPU 推論，降級省的不是顯卡而是
     # CPU，而已經常駐的模型不會因為換成小的就少佔記憶體（要先卸再載）。
     if loaded:
-        for c in chains_for(task):
-            for m in loaded:
-                if m and c in m:
-                    return m, "沿用已載入的模型（避免冷載入與互踢）", signals
+        if len(loaded) == 1:
+            current = loaded[0]
+            if current in available and any(c in current for c in chains_for(task)):
+                return current, "沿用已載入的模型（避免冷載入與互踢）", signals
+            if current in available:
+                return current, "沿用目前唯一已載入的模型（不冷載入其他模型取代它）", signals
+        names = "、".join(str(model) for model in loaded[:3])
+        return "", f"LM Studio 已載入外來或混合模型（{names}），不會冷載入另一個模型取代它", signals
 
     # 2. 大型工作進行中且手上沒有現成模型 → 挑輕量的，避免搶資源
     if heavy:
@@ -1592,16 +2138,45 @@ def route_model(task: str = "general"):
         if m:
             return m, f"偵測到大型工作進行中（{heavy}），自動改用輕量模型避免搶資源", signals
 
-    # 3. 任務鏈
-    chains = chains_all()
-    for t in ([task] if task in chains else []) + ["general"]:
-        m = pick(chains.get(t, []))
-        if m:
-            note = next((x["note"] for x in MODEL_TABLE if x["match"] in m), "")
-            return m, f"依任務鏈選擇（{note}）", signals
-    if available:
-        return available[0], "僅存的可用模型", signals
+    # 3. 任務鏈；long 的 Kimi 若過不了 RAM，會自然接 general 的 3.6/4B。
+    order = chains_for(task)
+    m = pick(order)
+    if m:
+        note = next((x["note"] for x in MODEL_TABLE if x["match"] in m), "")
+        skipped = []
+        for want in order:
+            if want in m:
+                break
+            skipped.extend(a for key, a in admissions.items()
+                           if want in key and not a["admitted"])
+        if skipped:
+            first = skipped[0]
+            return m, (f"RAM 准入排除 {first['model']}（{first['reason']}），"
+                       f"改用 {m}（{note}）"), signals
+        return m, f"依任務鏈選擇（{note}）", signals
+    if cold_available:
+        return cold_available[0], "僅存且通過 RAM 准入的可用模型", signals
+    if rejected:
+        return "", f"沒有模型通過 RAM 冷載入准入：{rejected[0]['reason']}", signals
     return "", "找不到可用模型（LM Studio 未啟動或無完整模型）", signals
+
+
+def lms_chat_request_payload(model: str, messages: list, max_tokens: int = 1024) -> dict:
+    """建立 `/api/chat` 第一發送給 LM Studio 的 payload。"""
+    return {
+        "model": model,
+        "messages": [
+            {"role": message.get("role", "user"),
+             "content": str(message.get("content", ""))[:4000]}
+            for message in messages[-14:]
+            if isinstance(message, dict)
+            and message.get("role") in ("user", "assistant", "system")
+        ],
+        "max_tokens": int(max_tokens),
+        # 推理型 Qwen 的第一發若不關閉 reasoning，可能把 max_tokens 全耗在
+        # reasoning_content 而 content 為空。權威路由規則要求第一發即關閉。
+        "reasoning": "off",
+    }
 
 
 def build_launch(conv):
@@ -2093,8 +2668,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/api/refresh":
             try:
-                r = _run([sys.executable, str(INDEXER)], capture_output=True,
-                                   text=True, timeout=300, cwd=str(APP_ROOT))
+                # 同進程的 archive/delete 先結束，才啟動 indexer。父進程不能
+                # 再拿 cross-process lock：child 會在整個 build 期間自行持有它。
+                with _INDEX_LOCK:
+                    r = _run([sys.executable, str(INDEXER)], capture_output=True,
+                             text=True, timeout=300, cwd=str(APP_ROOT))
                 return self._json({"ok": r.returncode == 0, "out": (r.stdout or r.stderr)[-500:]})
             except Exception as e:
                 return self._json({"ok": False, "error": str(e)}, 500)
@@ -2160,12 +2738,11 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json({"ok": False, "error": f"地端模型無法使用：{e}"}, 502)
             try:
-                payload = json.dumps({
-                    "model": resolved,
-                    "messages": [{"role": m.get("role", "user"), "content": str(m.get("content", ""))[:4000]}
-                                 for m in messages[-14:] if m.get("role") in ("user", "assistant", "system")],
-                    "max_tokens": int(body.get("max_tokens", 1024)),
-                }, ensure_ascii=False).encode("utf-8")
+                payload = json.dumps(
+                    lms_chat_request_payload(
+                        resolved, messages, body.get("max_tokens", 1024)),
+                    ensure_ascii=False,
+                ).encode("utf-8")
                 req = urllib.request.Request(
                     "http://127.0.0.1:1234/v1/chat/completions", data=payload,
                     headers={"Content-Type": "application/json; charset=utf-8"})
@@ -2394,99 +2971,294 @@ class Handler(BaseHTTPRequestHandler):
     TRASH = Path.home() / ".ai-console" / "trash"
 
     def do_conv_delete(self):
-        """刪除一個對話：把來源檔搬到回收區
-
-        路徑一律從索引查，不接受呼叫端指定 —— 否則這就變成
-        「叫本機 API 搬走任意檔案」的漏洞。
-        """
+        """把可安全處理的對話來源與桌面卡當成同一筆交易移到回收區。"""
         body = self._body()
         conv_id = str(body.get("id", "")).strip()
         if not conv_id:
             return self._json({"ok": False, "error": "需要 id"}, 400)
-        conv = find_conv(conv_id)
+        try:
+            conv = find_conv(conv_id)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            return self._json({"ok": False, "error": f"讀取索引失敗：{exc}"}, 500)
         if not conv:
             return self._json({"ok": False, "error": "找不到這個對話"}, 404)
 
-        src = Path(conv.get("path", ""))
-        home = Path.home().resolve()
-        extras: list[Path] = []
-        if conv.get("tool") == "claude":
-            extras = claude_desktop_cards(str(conv.get("sessionId") or ""))
+        tool = str(conv.get("tool") or "")
+        # 這三家還有 DB/catalog/state/archive 等權威側欄 metadata。只搬 jsonl
+        # 會在下次掃描復活，甚至留下半份對話；控制台不直接改它們的內部狀態。
+        if tool in {"codex", "qwen", "kimi"}:
+            return self._json({
+                "ok": False,
+                "error": f"{tool} 對話含來源應用的權威側欄狀態，請在來源應用中刪除",
+                "sourceAppRequired": True,
+            }, 409)
 
-        # jsonl 已不在時仍要把桌面板殘卡清掉，否則側欄會掛著刪不掉
-        if src.exists():
+        session_id = ""
+        lookup = {"cards": [], "metadataConflict": False, "conflicts": {}}
+        if tool == "claude":
             try:
-                if not src.resolve().is_relative_to(home):
-                    return self._json({"ok": False, "error": "路徑不在家目錄內，拒絕"}, 400)
-            except (OSError, ValueError):
-                return self._json({"ok": False, "error": "路徑無法解析"}, 400)
-            self.TRASH.mkdir(parents=True, exist_ok=True)
-            stamp = time.strftime("%Y%m%d-%H%M%S")
-            dest = self.TRASH / f"{stamp}_{conv.get('tool', 'x')}_{src.name}"
-            try:
-                import shutil
-                shutil.move(str(src), str(dest))
-            except OSError as e:
-                return self._json({"ok": False, "error": f"搬移失敗：{e}"}, 500)
-        else:
-            dest = None
+                session_id = canonical_claude_session_id(conv.get("sessionId"))
+            except ValueError as exc:
+                return self._json({"ok": False, "error": str(exc)}, 400)
 
-        for card in extras:
-            try:
-                if not card.resolve().is_relative_to(home):
-                    continue
-            except (OSError, ValueError):
-                continue
-            self.TRASH.mkdir(parents=True, exist_ok=True)
-            stamp = time.strftime("%Y%m%d-%H%M%S")
-            cdest = self.TRASH / f"{stamp}_claude-card_{card.name}"
-            try:
-                import shutil
-                shutil.move(str(card), str(cdest))
-            except OSError:
-                continue
+        lock = _claude_session_lock(session_id) if session_id else contextlib.nullcontext()
+        transaction_locks = contextlib.ExitStack()
+        try:
+            transaction_locks.enter_context(lock)
+            transaction_locks.enter_context(_INDEX_LOCK)
+            transaction_locks.enter_context(conversation_index_lock(timeout=60.0))
+        except TimeoutError:
+            transaction_locks.close()
+            return self._json({
+                "ok": False, "error": "對話索引正在由其他程序更新，請稍後重試",
+                "busy": True,
+            }, 409)
+        except OSError as exc:
+            transaction_locks.close()
+            return self._json({"ok": False, "error": f"無法取得對話索引鎖：{exc}"}, 500)
+        with transaction_locks:
+            if tool == "claude":
+                lookup = discover_claude_desktop_cards(session_id)
+                if lookup["metadataConflict"]:
+                    return self._json({
+                        "ok": False,
+                        "error": "Claude Desktop 的多份側欄卡 metadata 不一致，已停止刪除",
+                        "metadataConflict": True,
+                        "conflicts": lookup["conflicts"],
+                    }, 409)
+                try:
+                    card_snapshots = _preflight_claude_cards(lookup["cards"], session_id)
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                    return self._json({"ok": False, "error": f"Claude 卡片預檢失敗：{exc}"}, 409)
+            else:
+                card_snapshots = []
 
-        drop_index_conv(conv_id)
-        return self._json({"ok": True, "trash": str(dest) if dest else "card-only"})
+            raw_source = str(conv.get("path") or "").strip()
+            source = Path(raw_source) if raw_source else None
+            had_source = bool(source is not None and source.exists())
+            home = Path.home().resolve()
+            targets: list[Path] = []
+            if source is not None and source.exists():
+                try:
+                    resolved = source.resolve()
+                    if not resolved.is_relative_to(home):
+                        return self._json({"ok": False, "error": "路徑不在家目錄內，拒絕"}, 400)
+                    if not resolved.is_file():
+                        return self._json({"ok": False, "error": "來源不是一般檔案，拒絕"}, 400)
+                except (OSError, ValueError):
+                    return self._json({"ok": False, "error": "路徑無法解析"}, 400)
+                targets.append(source)
+
+            targets.extend(snapshot["path"] for snapshot in card_snapshots)
+            unique_targets: list[Path] = []
+            seen_targets: set[tuple] = set()
+            for target in targets:
+                try:
+                    if not target.resolve().is_relative_to(home):
+                        return self._json({"ok": False, "error": "卡片路徑不在家目錄內，拒絕"}, 400)
+                    identity = _physical_file_identity(target)
+                except (OSError, ValueError):
+                    return self._json({"ok": False, "error": "來源在交易前消失"}, 409)
+                if identity not in seen_targets:
+                    seen_targets.add(identity)
+                    unique_targets.append(target)
+
+            # jsonl 已不在時仍可處理 card-only；兩者都沒有才是真正找不到。
+            if not unique_targets:
+                return self._json({"ok": False, "error": "來源檔與桌面板卡片都不存在"}, 404)
+
+            with _INDEX_LOCK:
+                try:
+                    index_data, original_index = _load_index_snapshot()
+                    fresh = next(
+                        (entry for entry in index_data["conversations"]
+                         if entry.get("id") == conv_id), None,
+                    )
+                    if fresh is None:
+                        raise KeyError(conv_id)
+                    if (str(fresh.get("tool") or "") != tool
+                            or str(fresh.get("path") or "") != str(conv.get("path") or "")
+                            or str(fresh.get("sessionId") or "") != str(conv.get("sessionId") or "")):
+                        return self._json({
+                            "ok": False, "error": "索引列在交易期間已變更，請重新整理後再試",
+                        }, 409)
+                    index_data = _index_without_conversation(index_data, conv_id)
+                    index_stage = _stage_bytes(
+                        INDEX_JSON,
+                        json.dumps(index_data, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                    )
+                except KeyError:
+                    return self._json({"ok": False, "error": "索引已變更，請重新整理後再試"}, 409)
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                    return self._json({"ok": False, "error": f"索引預檢失敗：{exc}"}, 500)
+
+                moved: list[tuple[Path, Path]] = []
+                destinations: list[str] = []
+                try:
+                    self.TRASH.mkdir(parents=True, exist_ok=True)
+                    # 卡片在 preflight 後若被 Desktop 改過，就不再碰任何來源。
+                    for snapshot in card_snapshots:
+                        if snapshot["path"].read_bytes() != snapshot["raw"]:
+                            raise RuntimeError(f"卡片在交易期間被修改：{snapshot['path'].name}")
+                    stamp = time.strftime("%Y%m%d-%H%M%S")
+                    for target in unique_targets:
+                        destination = self.TRASH / (
+                            f"{stamp}_{uuid.uuid4().hex[:10]}_{tool or 'x'}_{target.name}"
+                        )
+                        _move_path(target, destination)
+                        moved.append((target, destination))
+                        destinations.append(str(destination))
+                    if INDEX_JSON.read_bytes() != original_index:
+                        raise RuntimeError("索引在交易期間被其他程序更新")
+                    _replace_file(index_stage, INDEX_JSON)
+                except (OSError, RuntimeError) as exc:
+                    rollback_failed = _rollback_moves(moved)
+                    return self._json({
+                        "ok": False,
+                        "error": f"刪除交易失敗：{exc}",
+                        "partial": bool(rollback_failed),
+                        "rolledBack": not rollback_failed,
+                        "rollbackFailed": rollback_failed,
+                    }, 500)
+                finally:
+                    with contextlib.suppress(OSError):
+                        index_stage.unlink()
+
+        return self._json({
+            "ok": True,
+            "trash": destinations[0] if len(destinations) == 1 else destinations,
+            "cardOnly": not had_source,
+        })
 
     def do_conv_archive(self):
-        """封存 Claude Desktop 側欄卡：寫 isArchived，不刪 jsonl。"""
+        """交易式同步 Claude Desktop 卡片與控制台索引的封存狀態。"""
         body = self._body()
         conv_id = str(body.get("id", "")).strip()
-        archived = bool(body.get("archived", True))
+        if "archived" in body and not isinstance(body["archived"], bool):
+            return self._json({"ok": False, "error": "archived 必須是布林值"}, 400)
+        archived = body.get("archived", True)
         if not conv_id:
             return self._json({"ok": False, "error": "需要 id"}, 400)
-        conv = find_conv(conv_id)
+        try:
+            conv = find_conv(conv_id)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            return self._json({"ok": False, "error": f"讀取索引失敗：{exc}"}, 500)
         if not conv:
             return self._json({"ok": False, "error": "找不到這個對話"}, 404)
         if conv.get("tool") != "claude":
-            return self._json({"ok": False, "error": "目前只支援 Claude 桌面板封存"}, 400)
-        cards = claude_desktop_cards(str(conv.get("sessionId") or ""))
-        if not cards:
-            return self._json({"ok": False, "error": "找不到桌面板對話卡"}, 404)
-        n = 0
-        for card in cards:
-            try:
-                data = json.loads(card.read_text(encoding="utf-8"))
-                data["isArchived"] = archived
-                tmp = card.with_suffix(".json.tmp")
-                tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-                tmp.replace(card)
-                n += 1
-            except (OSError, json.JSONDecodeError) as e:
-                return self._json({"ok": False, "error": f"寫入失敗：{e}"}, 500)
+            return self._json({
+                "ok": False,
+                "error": "此來源有自己的權威封存狀態，請在來源應用中封存",
+                "sourceAppRequired": True,
+            }, 409)
+
         try:
-            data = json.loads(INDEX_JSON.read_text(encoding="utf-8"))
-            for c in data.get("conversations", []):
-                if c["id"] == conv_id:
-                    c["archived"] = archived
-                    c["trashed"] = archived or c.get("trashed")
-                    if archived:
-                        c["trashReason"] = "archived"
-            INDEX_JSON.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        except (OSError, json.JSONDecodeError):
-            pass
-        return self._json({"ok": True, "cards": n, "archived": archived})
+            session_id = canonical_claude_session_id(conv.get("sessionId"))
+        except ValueError as exc:
+            return self._json({"ok": False, "error": str(exc)}, 400)
+
+        transaction_locks = contextlib.ExitStack()
+        try:
+            transaction_locks.enter_context(_claude_session_lock(session_id))
+            transaction_locks.enter_context(_INDEX_LOCK)
+            transaction_locks.enter_context(conversation_index_lock(timeout=60.0))
+        except TimeoutError:
+            transaction_locks.close()
+            return self._json({
+                "ok": False, "error": "對話索引正在由其他程序更新，請稍後重試",
+                "busy": True,
+            }, 409)
+        except OSError as exc:
+            transaction_locks.close()
+            return self._json({"ok": False, "error": f"無法取得對話索引鎖：{exc}"}, 500)
+        with transaction_locks:
+            lookup = discover_claude_desktop_cards(session_id)
+            if not lookup["cards"]:
+                return self._json({"ok": False, "error": "找不到桌面板對話卡"}, 404)
+            if lookup["metadataConflict"]:
+                return self._json({
+                    "ok": False,
+                    "error": "Claude Desktop 的多份側欄卡 metadata 不一致，已停止封存",
+                    "metadataConflict": True,
+                    "conflicts": lookup["conflicts"],
+                }, 409)
+
+            staged_cards: list[tuple[dict, Path]] = []
+            index_stage: Path | None = None
+            try:
+                snapshots = _preflight_claude_cards(lookup["cards"], session_id)
+                index_data, original_index = _load_index_snapshot()
+                index_entry = next(
+                    (entry for entry in index_data["conversations"] if entry.get("id") == conv_id),
+                    None,
+                )
+                if index_entry is None:
+                    return self._json({"ok": False, "error": "索引已變更，請重新整理後再試"}, 409)
+                try:
+                    fresh_session_id = canonical_claude_session_id(index_entry.get("sessionId"))
+                except ValueError:
+                    return self._json({"ok": False, "error": "索引裡的 Claude session id 已失效"}, 409)
+                if index_entry.get("tool") != "claude" or fresh_session_id != session_id:
+                    return self._json({
+                        "ok": False, "error": "索引列在交易期間已變更，請重新整理後再試",
+                    }, 409)
+                _set_index_archive_state(index_entry, archived)
+                _recompute_index_stats(index_data)
+
+                for snapshot in snapshots:
+                    updated = dict(snapshot["data"])
+                    updated["cliSessionId"] = session_id
+                    updated["isArchived"] = archived
+                    payload = json.dumps(updated, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                    staged_cards.append((snapshot, _stage_bytes(snapshot["path"], payload)))
+                index_stage = _stage_bytes(
+                    INDEX_JSON,
+                    json.dumps(index_data, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                for _, staged in staged_cards:
+                    with contextlib.suppress(OSError):
+                        staged.unlink()
+                if index_stage is not None:
+                    with contextlib.suppress(OSError):
+                        index_stage.unlink()
+                return self._json({"ok": False, "error": f"封存預檢失敗：{exc}"}, 500)
+
+            replaced: list[dict] = []
+            try:
+                for snapshot, staged in staged_cards:
+                    if snapshot["path"].read_bytes() != snapshot["raw"]:
+                        raise RuntimeError(f"卡片在交易期間被修改：{snapshot['path'].name}")
+                    _replace_file(staged, snapshot["path"])
+                    replaced.append(snapshot)
+                # 只有所有卡片都成功後才換入索引；索引失敗也會把卡片回滾。
+                if INDEX_JSON.read_bytes() != original_index:
+                    raise RuntimeError("索引在交易期間被其他程序更新")
+                assert index_stage is not None
+                _replace_file(index_stage, INDEX_JSON)
+            except (OSError, RuntimeError) as exc:
+                rollback_failed = _rollback_replaced_files(replaced)
+                return self._json({
+                    "ok": False,
+                    "error": f"封存交易失敗：{exc}",
+                    "partial": bool(rollback_failed),
+                    "rolledBack": not rollback_failed,
+                    "rollbackFailed": rollback_failed,
+                }, 500)
+            finally:
+                for _, staged in staged_cards:
+                    with contextlib.suppress(OSError):
+                        staged.unlink()
+                if index_stage is not None:
+                    with contextlib.suppress(OSError):
+                        index_stage.unlink()
+
+        return self._json({
+            "ok": True,
+            "cards": len(snapshots),
+            "archived": archived,
+            "sessionId": session_id,
+        })
 
     def do_plan(self):
         """一句話 → 派工計畫。只回計畫，不動手 —— 派工是使用者按下去才發生的。"""
@@ -2676,7 +3448,8 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.dumps({"model": model, "messages": [
                     {"role": "system", "content": "你是 AI 辦公室的地端值班夥伴，雲端工具都在休息。直接、簡潔地用繁體中文執行使用者的指令或回答。"},
                     {"role": "user", "content": task},
-                ], "max_tokens": 2048}, ensure_ascii=False).encode("utf-8")
+                ], "max_tokens": 2048, "reasoning": "off"},
+                    ensure_ascii=False).encode("utf-8")
                 req = urllib.request.Request("http://127.0.0.1:1234/v1/chat/completions",
                                              data=payload, headers={"Content-Type": "application/json; charset=utf-8"})
                 resp = json.loads(urllib.request.urlopen(req, timeout=280).read())

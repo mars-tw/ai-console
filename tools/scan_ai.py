@@ -51,6 +51,99 @@ NOISE_DIRS = {
 NOISE_RE = re.compile(r"^(cache|caches|logs?|crash|telemetry|metrics|updates?|"
                       r"backups?|downloads?|models?|images?|screenshots?)$", re.I)
 
+# 這些不只是雜訊，而是可能帶有 cookie、token、密碼或瀏覽器
+# session 的儲存區。掃描器的原則是「找對話」，不是「所有 JSON / SQLite
+# 都看一眼」；因此這些名稱必須 fail closed，連目錄都不進入。
+#
+# 不可把一般的 sessions / session-state 放進來，它們正是 Claude、Kimi
+# 等工具的正常對話來源。只擋「Session Storage」與 Chromium 專有名稱。
+SENSITIVE_DIR_NAMES = {
+    "bridge store",
+    "auth", "authentication", "authorization", "oauth", "oauth2",
+    "token", "tokens", "credential", "credentials", "secret", "secrets",
+    "cookie", "cookies", "cookie store",
+    "network", "indexeddb", "local storage", "session storage",
+    "browser storage", "web storage", "webstorage",
+    "login data", "safe storage", "secure storage",
+    "keychain", "keychains", "keyring", "keyrings", "password store",
+    "service worker", "shared dictionary", "trust tokens",
+    "extension state", "extension rules", "sync extension settings",
+    "safe browsing",
+    # HOME 下的密鑰／雲端憑證儲存，以及會被另外當成 parent
+    # 列舉的聚合設定目錄。排除聚合根不會阻止其子工具被單獨掃到。
+    "ssh", "gnupg", "aws", "azure", "kube", "docker", "pki",
+    "password-store",
+}
+# ~/.config 與 ~/.local 是候選父目錄，其內各工具會被另外列舉。
+# 只排除這兩個「點開頭的聚合根」，不能排除一般名為 local /
+# config 的子目錄，否則可能會遺漏工具的正常對話。
+AGGREGATE_CANDIDATE_DIRS = {".config", ".local"}
+SENSITIVE_DIR_RE = re.compile(
+    r"^(?:bridge|auth(?:entication|orization)?|oauth2?|tokens?|credentials?|"
+    r"secrets?|cookies?|keychains?|keyrings?|password)[ ._-]?"
+    r"(?:store|storage|cache|data|database|db)$",
+    re.I,
+)
+
+# 有些 Chromium 檔案（例如 Cookies）沒有副檔名，目前不會被 sniff；
+# 仍在這裡明確拒絕，避免未來放寬副檔名時悄悄讀到。
+SENSITIVE_FILE_NAMES = {
+    "bridge store", "cookies", "cookies journal", "cookie store",
+    "login data", "login data journal", "web data", "web data journal",
+    "network persistent state", "transport security", "trust tokens",
+    "local state", "preferences", "secure preferences",
+    "indexeddb", "local storage", "session storage", "browser storage",
+    "web storage", "webstorage",
+}
+SENSITIVE_FILE_RE = re.compile(
+    r"^\.?(?:(?:access|refresh|id|api|bearer|session)[ ._-])?"
+    r"(?:auth(?:entication|orization)?|oauth2?|tokens?|credentials?|"
+    r"secrets?|api[ ._-]?keys?|keychains?|keyrings?)"
+    r"(?:[ ._-].*)?(?:\.(?:jsonl?|ndjson|sqlite3?|db))?$",
+    re.I,
+)
+SENSITIVE_SESSION_FILE_RE = re.compile(
+    r"^(?:current|last)[ ._-](?:session|tabs)(?:[ ._-].*)?$|"
+    r"^session[ ._-](?:token|cookie|secret|key)(?:[ ._-].*)?$",
+    re.I,
+)
+
+
+def _normalise_store_name(name: str) -> str:
+    """把儲存區名稱正規化，讓 Local_Storage / local-storage 也擋得住。"""
+    return re.sub(r"[\s._-]+", " ", name.casefold()).strip()
+
+
+def is_excluded_dir(name: str) -> bool:
+    """敏感儲存目錄必須在 os.walk 進入前被剪掉。"""
+    normal = _normalise_store_name(name)
+    return (
+        normal in SENSITIVE_DIR_NAMES
+        or bool(SENSITIVE_DIR_RE.fullmatch(name))
+    )
+
+
+def is_excluded_candidate(name: str) -> bool:
+    """不可直接掃描的候選；聚合根仍可作為 parent 列舉子工具。"""
+    return name.casefold() in AGGREGATE_CANDIDATE_DIRS or is_excluded_dir(name)
+
+
+def is_excluded_file(name: str) -> bool:
+    """檔名顯示它是憑證或瀏覽器儲存時，連 stat 都不做。"""
+    normal = _normalise_store_name(name)
+    stem = name
+    for suffix in (".sqlite3", ".sqlite", ".ndjson", ".jsonl", ".json", ".db"):
+        if stem.casefold().endswith(suffix):
+            stem = stem[:-len(suffix)]
+            break
+    normal_stem = _normalise_store_name(stem)
+    return (
+        normal in SENSITIVE_FILE_NAMES
+        or normal_stem in SENSITIVE_FILE_NAMES
+        or bool(SENSITIVE_FILE_RE.fullmatch(name))
+        or bool(SENSITIVE_SESSION_FILE_RE.fullmatch(name))
+    )
+
 # 名字看起來就像放對話的目錄 —— 走訪時優先進去。
 # 沒有這個排序，嗅探預算會被 .claude/plugins、.grok/bundled 之類的雜檔吃光，
 # 還沒走到 projects/、sessions/ 就沒額度了（實測就是這樣漏掉 Claude 與 Grok）。
@@ -111,7 +204,12 @@ def candidate_parents() -> list[Path]:
 
 
 def is_noise(name: str) -> bool:
-    return name in NOISE_DIRS or bool(NOISE_RE.match(name))
+    # NOISE_DIRS 原先是大小寫敏感，例如 indexeddb 會漏掉。
+    return (
+        any(name.casefold() == item.casefold() for item in NOISE_DIRS)
+        or bool(NOISE_RE.fullmatch(name))
+        or is_excluded_candidate(name)
+    )
 
 
 def looks_like_message(obj) -> bool:
@@ -186,6 +284,9 @@ def sniff_db(path: Path) -> bool:
 
 
 def sniff(path: Path) -> bool:
+    # 防止其他呼叫者繞過 scan_candidate() 的檔名過濾。
+    if is_excluded_file(path.name):
+        return False
     ext = path.suffix.lower()
     if ext in DB_EXT:
         return sniff_db(path)
@@ -217,6 +318,10 @@ def common_root(paths: list[Path], cand: Path) -> Path:
 
 def scan_candidate(cand: Path, deadline: float, deep: bool) -> dict | None:
     """走訪一個候選目錄，回傳偵測結果（不像 AI 工具就回 None）"""
+    # scan_candidate 也是可公開呼叫的單元，不能只倚賴 scan() 的上層過濾。
+    if is_excluded_candidate(cand.name):
+        return None
+
     hits: list[Path] = []
     exts: set[str] = set()
     dirs_seen = 0
@@ -231,6 +336,8 @@ def scan_candidate(cand: Path, deadline: float, deep: bool) -> dict | None:
         depth = len(d.relative_to(cand).parts)
         if depth >= MAX_DEPTH:
             dirnames[:] = []
+        # os.walk 只會在這份清單保留目錄後才往下 scandir；必須在
+        # 這裡原地剪枝，不可等進入後才略過檔案。
         dirnames[:] = [n for n in dirnames if not is_noise(n)]
         # 像對話目錄的先走，雜項後走
         dirnames.sort(key=lambda n: (0 if PRIORITY_RE.match(n) else 1, n.lower()))
@@ -238,6 +345,9 @@ def scan_candidate(cand: Path, deadline: float, deep: bool) -> dict | None:
         if dirs_seen > max_dirs:
             break
         for fn in filenames:
+            # 擋在副檔名、stat 與 sniff 之前，保證敏感檔不會被開啟。
+            if is_excluded_file(fn):
+                continue
             ext = Path(fn).suffix.lower()
             if ext not in CONV_EXT and ext not in DB_EXT:
                 continue
@@ -291,6 +401,10 @@ def scan(deep: bool = False) -> list[dict]:
     seen_dirs: set[Path] = set()
 
     for parent in candidate_parents():
+        # AI_CONSOLE_SCAN_DIRS 也可能被指到過寬或敏感的根；即使是
+        # 顯式設定，憑證儲存仍不可被當成 parent 列舉。
+        if is_excluded_dir(parent.name):
+            continue
         try:
             children = sorted(p for p in parent.iterdir() if p.is_dir())
         except OSError:

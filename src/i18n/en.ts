@@ -464,6 +464,10 @@ export const EN: Record<string, string> = {
   '已移到回收區': 'Moved to trash',
   '刪除失敗：{err}': 'Delete failed: {err}',
   '把「{title}」移到回收區？檔案會搬到 ~/.ai-console/trash，可以救回來。': 'Move "{title}" to trash? The file goes to ~/.ai-console/trash and can be restored.',
+  '請在 {tool} 來源應用中刪除這個對話': 'Delete this conversation in the {tool} source app.',
+  '來源應用已釘選': 'Pinned in the source app',
+  '來源應用的多份 metadata 不一致，請回來源應用確認': 'Source metadata disagrees; check the source app',
+  'metadata 衝突': 'Metadata conflict',
 
   // ── 派工產出 ───────────────────────────────────
   '點一下看這次派工的產出': "Click to see this dispatch's output",
