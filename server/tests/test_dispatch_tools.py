@@ -3,7 +3,7 @@
 
 兩件事都來自同一次實際操作：派給 kimi 的兩張工單擺了半小時，
 畫面上一直寫「進行中」，實際上是「那個終端視窗沒有人按」。
-把其中一件改派給會自己跑的 gemini 之後，同一份工單有了兩個持有者，
+把其中一件改派給會自己跑的工具之後，同一份工單有了兩個持有者，
 而介面上沒有任何辦法把前一件收掉。
 """
 from __future__ import annotations
@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -63,6 +64,26 @@ class TestCloudChain(unittest.TestCase):
         for tool in api.Handler.CLOUD_CHAIN:
             self.assertIn(tool, api.Handler.DISPATCH_TOOLS)
 
+    def test_agy_gemini不在工作派工或接力路由(self):
+        self.assertNotIn("gemini", api.Handler.CLOUD_CHAIN)
+        self.assertNotIn("gemini", api.Handler.DISPATCH_TOOLS)
+        self.assertNotIn("gemini", api.Handler.FOLLOWUP_TOOLS)
+        self.assertNotIn("gemini", api.Handler.KNOWN_TOOLS)
+
+
+class TestBinAvailability(unittest.TestCase):
+    def test_fallback_tool_name_does_not_claim_installed(self):
+        with mock.patch.dict(api.BIN, {"ghost": "ghost"}, clear=False), \
+                mock.patch("shutil.which", return_value=None):
+            self.assertFalse(api._bin_available("ghost"))
+
+    def test_existing_resolved_executable_is_available(self):
+        with tempfile.TemporaryDirectory(prefix="acbin_") as tmp:
+            exe = Path(tmp) / "tool.exe"
+            exe.write_bytes(b"MZ")
+            with mock.patch.dict(api.BIN, {"ghost": str(exe)}, clear=False):
+                self.assertTrue(api._bin_available("ghost"))
+
 
 class TestDispatchTools(unittest.TestCase):
     """/api/dispatch/tools：畫面上要看得出「派出去之後還需不需要你」"""
@@ -71,8 +92,13 @@ class TestDispatchTools(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="actools_"))
         self._status = api.STATUS_JSON
         self._bin = dict(api.BIN)
+        self.available = set()
+        self._available_patch = mock.patch.object(
+            api, "_bin_available", side_effect=lambda tool: tool in self.available)
+        self._available_patch.start()
 
     def tearDown(self):
+        self._available_patch.stop()
         api.STATUS_JSON = self._status
         api.BIN.clear()
         api.BIN.update(self._bin)
@@ -91,44 +117,44 @@ class TestDispatchTools(unittest.TestCase):
 
     def test_終端工具要標成終端(self):
         self._status_file()
-        api.BIN.update({"gemini": "gemini.cmd", "kimi": "kimi.cmd"})
+        self.available = {"kimi"}
         got = {x["id"]: x["mode"] for x in self._call()["tools"]}
         self.assertEqual(got.get("kimi"), "terminal")
-        self.assertEqual(got.get("gemini"), "headless")
+        self.assertNotIn("gemini", got, "agy/Gemini 不可從工作派工 UI 繞過治理")
 
     def test_沒裝的工具不列出來(self):
         # 列出來的話使用者會選，選了才發現派不出去
         self._status_file()
-        api.BIN.clear()
-        api.BIN["gemini"] = "gemini.cmd"
+        self.available = {"qwen"}
         ids = [x["id"] for x in self._call()["tools"]]
-        self.assertIn("gemini", ids)
+        self.assertIn("qwen", ids)
         self.assertNotIn("claude", ids)
+        self.assertNotIn("gemini", ids)
 
     def test_限流的工具照列但標記出來(self):
         """不是把它藏起來 —— 使用者知道自己裝了 claude，
         清單裡突然沒有它，比寫著「額度用完」更讓人困惑。"""
         self._status_file(limited=["claude"])
-        api.BIN.update({"claude": "claude.cmd", "gemini": "gemini.cmd"})
+        self.available = {"claude", "qwen"}
         by = {x["id"]: x for x in self._call()["tools"]}
         self.assertTrue(by["claude"]["limited"])
-        self.assertFalse(by["gemini"]["limited"])
+        self.assertFalse(by["qwen"]["limited"])
 
     def test_地端永遠在清單裡而且不會限流(self):
-        self._status_file(limited=["claude", "codex", "gemini", "qwen"])
-        api.BIN.clear()
+        self._status_file(limited=["claude", "codex", "qwen"])
+        self.available = set()
         by = {x["id"]: x for x in self._call()["tools"]}
         self.assertIn("local", by)
         self.assertFalse(by["local"]["limited"])
 
     def test_直接講出自動現在會挑到誰(self):
         self._status_file(limited=["claude", "codex"])
-        api.BIN.update({"claude": "c", "codex": "c", "gemini": "g", "qwen": "q"})
-        self.assertEqual(self._call()["auto"], "gemini")
+        self.available = {"claude", "codex", "qwen"}
+        self.assertEqual(self._call()["auto"], "qwen")
 
     def test_全部限流時自動退回地端(self):
-        self._status_file(limited=["claude", "codex", "gemini", "qwen"])
-        api.BIN.update({"claude": "c", "codex": "c", "gemini": "g", "qwen": "q"})
+        self._status_file(limited=["claude", "codex", "qwen"])
+        self.available = {"claude", "codex", "qwen"}
         self.assertEqual(self._call()["auto"], "local")
 
 

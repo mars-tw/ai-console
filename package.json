@@ -1,7 +1,7 @@
 {
   "name": "ai-console",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "AI 控制台 - 跨工具對話與派工中心",
   "main": "electron/main.cjs",
   "type": "module",

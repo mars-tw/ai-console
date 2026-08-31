@@ -28,9 +28,22 @@ DEFAULT_RULE_FILES = [
     HOME / ".claude" / "CLAUDE.md",
 ]
 DEFAULT_SKILL_DIRS = [
+    HOME / ".agents" / "skills",
     HOME / ".claude" / "skills",
     HOME / ".codex" / "skills",
+    HOME / ".grok" / "skills",
+    HOME / ".qwen" / "skills",
+    HOME / ".kimi-code" / "skills",
 ]
+
+GOVERNANCE_SKILL_DIR = HOME / ".agents" / "skills"
+TOOL_SKILL_DIRS = {
+    "claude": HOME / ".claude" / "skills",
+    "codex": HOME / ".codex" / "skills",
+    "grok": HOME / ".grok" / "skills",
+    "qwen": HOME / ".qwen" / "skills",
+    "kimi": HOME / ".kimi-code" / "skills",
+}
 
 # 技能 frontmatter 只取 name 與 description
 # 中文沒有空白可以斷詞。用「連續中文片段」當 token 是錯的 —— 貪婪匹配會把
@@ -38,11 +51,28 @@ DEFAULT_SKILL_DIRS = [
 # 這裡改成標準做法：中文切 2-gram 與 3-gram，英數字照常斷詞。
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}")
 _CJK_RUN_RE = re.compile(r"[一-鿿]+")
+_NEGATIVE_TRIGGER_RE = re.compile(
+    r"(?:不要觸發|不得觸發|不適用於|do\s+not\s+(?:use|trigger)|don't\s+(?:use|trigger)|not\s+for)\s*[:：]?",
+    re.IGNORECASE,
+)
+
+# frontmatter 常用英文寫領域名稱，而使用者用中文下工單。只補可明確互換的
+# 技術詞，不做自由聯想；否則 matcher 會再次把「看起來相關」冒充成命中。
+_TOKEN_ALIASES = {
+    "建立": "build", "建置": "build", "響應式": "responsive", "回應式": "responsive",
+    "首頁": "homepage", "網站": "website", "外掛": "plugin", "佈景": "theme",
+    "區塊": "block", "技能": "skill", "匯入": "import", "對話": "conversation",
+    "翻譯": "translation", "繁體中文": "traditional-chinese",
+}
+_GENERIC_MATCH_TOKENS = {
+    # 語言名稱不是工作類型；否則「翻譯成繁體中文」會誤掛文章撰寫技能。
+    "繁體", "體中", "中文", "繁體中", "體中文", "英文", "traditional-chinese",
+}
 
 # 命中的詞不是等值的：技能描述常常是英文而工作是中文，這時
 # 「wordpress」這種專有名詞是唯一的橋樑，權重必須遠高於「把這」這類 2-gram。
 _WEIGHT = {"word": 4, "gram3": 2, "gram2": 1}
-MIN_SCORE = 15         # 用標註過的案例掃出來的，不是拍腦袋定的
+MIN_SCORE = 12         # 三個彼此獨立的英文專有詞已是足夠的明確證據
 MIN_RARE = 2           # 至少要有幾個罕見詞命中（擋掉長工單累積出來的假命中）
 
 
@@ -62,9 +92,11 @@ def rule_files(extra: list[str] | None = None) -> list[Path]:
     return seen
 
 
-def load_skills(dirs: list[str] | None = None) -> list[dict]:
+def load_skills(dirs: list[str | Path] | None = None, *, include_defaults: bool = True) -> list[dict]:
     """掃出所有技能：{name, description, path}"""
-    roots = [Path(d).expanduser() for d in (dirs or [])] + DEFAULT_SKILL_DIRS
+    roots = [Path(d).expanduser() for d in (dirs or [])]
+    if include_defaults:
+        roots += DEFAULT_SKILL_DIRS
     out: list[dict] = []
     for root in roots:
         if not root.is_dir():
@@ -125,12 +157,54 @@ def _frontmatter(text: str) -> dict[str, str]:
 def _tokens(text: str) -> set[str]:
     """英數字照詞斷；中文切 2-gram + 3-gram"""
     text = text or ""
-    out = {m.group(0).lower() for m in _WORD_RE.finditer(text)}
+    out: set[str] = set()
+    for match in _WORD_RE.finditer(text):
+        word = match.group(0).lower()
+        out.add(word)
+        # skill name 常是 build-responsive-wordpress；完整 slug 要保留，
+        # 也要拆成三個真正能和工單相交的術語。
+        out.update(part for part in re.split(r"[-_]", word) if len(part) >= 3)
     for run in _CJK_RUN_RE.findall(text):
         for n in (2, 3):
             for i in range(len(run) - n + 1):
                 out.add(run[i:i + n])
+    for phrase, alias in _TOKEN_ALIASES.items():
+        if phrase in text:
+            out.add(alias)
     return out
+
+
+def _skill_token_contract(skill: dict) -> tuple[set[str], set[str]]:
+    """把 description 的正向與「不要觸發」條款分開，負向命中一律否決。"""
+    description = str(skill.get("description") or "")
+    marker = _NEGATIVE_TRIGGER_RE.search(description)
+    positive = description[:marker.start()] if marker else description
+    negative = description[marker.end():] if marker else ""
+    return _tokens(f"{skill.get('name', '')} {positive}"), _tokens(negative)
+
+
+def _skill_name_negated(task: str, name: str) -> bool:
+    folded = task.casefold()
+    escaped = re.escape(name.casefold())
+    named = rf"\$?{escaped}(?![a-z0-9_-])"
+    return bool(
+        re.search(rf"(?:不要|不得|禁止|勿|只是提到|do\s+not|don't|never|mention\s+only)[^。；;\n]{{0,24}}{named}", folded)
+        or re.search(rf"{named}[^。；;\n]{{0,24}}(?:不要啟用|不要使用|不得使用|禁止使用|do\s+not\s+(?:use|enable))", folded)
+    )
+
+
+def _explicitly_requested(task: str, name: str) -> bool:
+    """只有「請用／啟用／$name」算指名；否定或只是提到名稱不算。"""
+    folded = task.casefold()
+    escaped = re.escape(name.casefold())
+    named = rf"\$?{escaped}(?![a-z0-9_-])"
+    if _skill_name_negated(task, name):
+        return False
+    if re.search(rf"\${escaped}(?![a-z0-9_-])", folded):
+        return True
+    return bool(re.search(
+        rf"(?:請用|使用|啟用|套用|務必用|use|enable|apply)[\s：:]*{named}", folded,
+    ))
 
 
 def match_skills(task: str, skills: list[dict], limit: int = 3) -> list[dict]:
@@ -139,29 +213,54 @@ def match_skills(task: str, skills: list[dict], limit: int = 3) -> list[dict]:
     用 description 與工作內容的 token 交集當分數。技能的 description 本來就
     寫著「什麼時候該用我」，所以拿它比對比拿 name 比對準得多。
     """
-    tt = _tokens(task)
+    tt = _tokens(task) - _GENERIC_MATCH_TOKENS
     if not tt:
         return []
+    explicit = []
+    for skill in skills:
+        name = str(skill.get("name") or "").strip()
+        if not name:
+            continue
+        if _explicitly_requested(task, name):
+            explicit.append(skill)
+    if len(explicit) >= limit:
+        return explicit[:limit]
     # 先算每個詞出現在幾個技能裡。出現在一堆技能裡的詞（code、file、產出）
     # 沒有鑑別力，出現在一兩個技能裡的（wordpress、蝦皮）才是真訊號。
-    docs = [(s, _tokens(f"{s['name']} {s['description']}")) for s in skills]
+    docs = []
+    explicit_ids = {id(skill) for skill in explicit}
+    for skill in skills:
+        if id(skill) in explicit_ids:
+            continue
+        if _skill_name_negated(task, str(skill.get("name") or "")):
+            continue
+        positive, negative = _skill_token_contract(skill)
+        docs.append((skill, positive - _GENERIC_MATCH_TOKENS,
+                     negative - _GENERIC_MATCH_TOKENS))
     df: dict[str, int] = {}
-    for _, st in docs:
+    for _, st, _ in docs:
         for tok in st & tt:
             df[tok] = df.get(tok, 0) + 1
 
     scored: list[tuple[float, dict]] = []
     total = max(1, len(docs))
-    for s, st in docs:
+    for s, st, negative in docs:
         if not st:
             continue
+        negative_hits = tt & negative
+        if any((len(tok) >= 4 if tok.isascii() else len(tok) >= 2)
+               for tok in negative_hits):
+            continue
         hits = tt & st
+        name_hits = tt & (_tokens(str(s.get("name") or "")) - _GENERIC_MATCH_TOKENS)
         score = 0.0
         rare = 0
         for tok in hits:
             d = df.get(tok, 1)
-            # 標準 IDF：log(技能總數 / 出現在幾個技能)
-            score += _weight(tok) * math.log(total / max(1, d))
+            # 加 1 的 IDF：技能庫只有一個時也不會全部得到 0 分。
+            # 保守性仍由 MIN_SCORE + MIN_RARE 雙門檻負責；單一常見詞
+            # 不可能因這個平滑項就命中。
+            score += _weight(tok) * (1.0 + math.log(total / max(1, d)))
             # 「罕見」還要「有實質內容」才算證據。
             # 技能庫只有幾十個，IDF 對常見虛詞完全不可靠 ——
             # 實測「任何」「只要」「怎麼」都被算成罕見詞，
@@ -172,18 +271,37 @@ def match_skills(task: str, skills: list[dict], limit: int = 3) -> list[dict]:
         # 實測「你是使用者體驗測試員…」因為「使用者」這種到處都有的詞
         # 就掛上了「蝦皮短影音」。所以再加一條硬性條件：
         # 至少要有兩個「只出現在一兩個技能裡」的詞命中，才算真的相關。
-        if score >= MIN_SCORE and rare >= MIN_RARE:
+        strong_name_hits = sum(
+            1 for tok in name_hits
+            if (len(tok) >= 4 if tok.isascii() else len(tok) >= 3)
+        )
+        if score >= MIN_SCORE and (rare >= MIN_RARE or strong_name_hits >= 2):
             scored.append((score, s))
     scored.sort(key=lambda x: -x[0])
-    return [s for _, s in scored[:limit]]
+    return explicit + [s for _, s in scored[:max(0, limit - len(explicit))]]
 
 
-def preamble(task: str, tool: str, cfg: dict | None = None) -> str:
+def _dispatch_skill_dirs(tool: str, cfg: dict) -> list[Path]:
+    """Only governance + the selected tool's live skill root apply to a dispatch."""
+    candidates = [Path(value).expanduser() for value in (cfg.get("skill_dirs") or [])]
+    candidates.append(GOVERNANCE_SKILL_DIR)
+    if tool in TOOL_SKILL_DIRS:
+        candidates.append(TOOL_SKILL_DIRS[tool])
+    seen: list[Path] = []
+    for candidate in candidates:
+        if candidate not in seen:
+            seen.append(candidate)
+    return seen
+
+
+def preamble(task: str, tool: str, cfg: dict | None = None,
+             matched_skills: list[dict] | None = None,
+             skill_dirs: list[Path] | None = None) -> str:
     """組出要加在工單前面的執行前置。沒有任何規範或技能時回空字串。"""
     cfg = cfg or {}
     files = rule_files(cfg.get("rule_files"))
-    dirs_exist = any(d.is_dir() for d in
-                     ([Path(x).expanduser() for x in (cfg.get("skill_dirs") or [])] + DEFAULT_SKILL_DIRS))
+    candidates = skill_dirs if skill_dirs is not None else _dispatch_skill_dirs(tool, cfg)
+    dirs_exist = any(d.is_dir() for d in candidates)
     if not files and not dirs_exist:
         return ""
 
@@ -198,21 +316,29 @@ def preamble(task: str, tool: str, cfg: dict | None = None) -> str:
                      "若本工單與規範衝突，停下來回報衝突，不要自行折衷。")
         step += 1
 
-    # 技能：路徑交給執行者自己判斷，我方的比對只當提示。
-    # 理由是這台機器上 41 個技能裡有 24 個都提到 WordPress ——
-    # 關鍵字比對在這種技能庫裡選不出正確的那一個，硬選只會誤導。
-    dirs = [d for d in ([Path(p).expanduser() for p in (cfg.get("skill_dirs") or [])]
-                        + DEFAULT_SKILL_DIRS) if d.is_dir()]
+    # 技能：保守比對只列出真正命中的技能，而且一定給完整
+    # SKILL.md 路徑，不只給一個名字讓工作 AI 猜。沒有把握時仍保留
+    # 目錄＋frontmatter 的原生判斷方式，不為了「看起來有掛技能」而誤報。
+    dirs = [d for d in candidates if d.is_dir()]
+    matched_skills = matched_skills or []
+    if matched_skills:
+        lines.append(f"{step}. 這件工作已保守命中下列技能；"
+                     "執行前必須逐一讀完指定的 SKILL.md 並照流程做：")
+        lines += [f"   - {s['name']}: {s['path']}" for s in matched_skills]
+        step += 1
     if dirs:
-        lines.append(f"{step}. 技能：先掃過下列目錄裡每個 SKILL.md 的 frontmatter，"
-                     "只要 description 命中這件工作就啟用它，並照它的流程做：")
+        lines.append(f"{step}. 其他技能仍以 frontmatter 為準：掃過下列目錄裡"
+                     "每個 SKILL.md，只有 description 明確命中這件工作才啟用：")
         lines += [f"   - {d}" for d in dirs]
         for idx in (d / "SKILLS-INDEX.md" for d in dirs):
             if idx.exists():
                 lines.append(f"   （索引：{idx}）")
         step += 1
 
-    lines.append(f"{step}. 對外發布、付款、刪除資料等不可逆動作，一律先回報並等待授權，不要自行執行。")
+    lines.append(
+        f"{step}. 依 POLICY 的當次授權邊界執行：內容發布已有 standing grant 時照閘門自動進行；"
+        "只有金流／付款／交易、帳號設定、大量刪除、新平台首次接入等紅線，才停下等待當次授權。"
+    )
     lines.append("")
     lines.append("【工單】")
     return "\n".join(lines) + "\n"
@@ -238,13 +364,13 @@ def _neutralize(task: str) -> str:
 def wrap(task: str, tool: str, cfg: dict | None = None) -> tuple[str, list[str]]:
     """回傳 (加了前置的工單, 命中的技能名稱)
 
-    第二個回傳值現在恆為空。原本會用關鍵字比對挑幾個技能當「提示」，
-    但調了很多輪都調不準：技能庫只有 41 個，IDF 對常見詞完全不可靠，
-    結果一份 UX 稽核工單被掛上「蝦皮短影音」。錯的提示比沒有提示更糟 ——
-    它會把執行者引到錯的方向。
-    現在只給技能目錄與索引，讓執行者自己用 frontmatter 判斷，那本來就是
-    技能系統原生的比對方式，比我在外面猜可靠得多。
+    第二個回傳值是實際經過保守門檻命中的技能名稱。一般工單沒有
+    足夠的罕見詞證據就回空，由執行者再依目錄中的 frontmatter 判斷。
     """
+    cfg = cfg or {}
     safe = _neutralize(task)
-    pre = preamble(safe, tool, cfg)
-    return (pre + safe if pre else safe), []
+    dirs = _dispatch_skill_dirs(tool, cfg)
+    skills = load_skills(dirs, include_defaults=False)
+    matched = match_skills(safe, skills)
+    pre = preamble(safe, tool, cfg, matched, dirs)
+    return (pre + safe if pre else safe), [s["name"] for s in matched]

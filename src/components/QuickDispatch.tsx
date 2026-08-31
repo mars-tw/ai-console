@@ -47,22 +47,27 @@ function modeNote(m: DispatchTool['mode']): string {
   return t('會自己跑完')
 }
 
-export default function QuickDispatch({
-  conv, recent, text, setText, onToast, disabled,
-}: {
+export interface QuickDispatchProps {
   conv: { title: string; projectDir: string } | null
   recent: Msg[]
-  text: string
-  setText: (s: string) => void
   onToast: (s: string) => void
   disabled?: boolean
-}) {
+}
+
+/**
+ * 這是一個「會真的執行工作」的獨立輸入區，不接收聊天輸入框的 value/setter。
+ * 兩種意圖在型別層就分開，呼叫端不可能再把提問草稿誤當成工單送出。
+ */
+export default function QuickDispatch({
+  conv, recent, onToast, disabled,
+}: QuickDispatchProps) {
   const [tools, setTools] = useState<DispatchTool[]>([])
   const [auto, setAuto] = useState('')
   const [tool, setTool] = useState('auto')
   const [sending, setSending] = useState(false)
   const [result, setResult] = useState<{ ok: boolean; msg: string; warn?: boolean } | null>(null)
   const [withCtx, setWithCtx] = useState(true)
+  const [taskDraft, setTaskDraft] = useState('')
 
   // 引導狀態
   const [guiding, setGuiding] = useState(false)
@@ -86,7 +91,7 @@ export default function QuickDispatch({
   // 換一份對話就把引導收掉。上一份對話問到一半的答案套到新的對話上，
   // 會產出一份看起來很完整但講的是別件事的工單 —— 那是最難發現的錯。
   useEffect(() => {
-    setGuiding(false); setStep(0); setAnswers({}); setResult(null)
+    setGuiding(false); setStep(0); setAnswers({}); setResult(null); setTaskDraft('')
   }, [conv?.projectDir, conv?.title])
 
   useEffect(() => { if (guiding) stepRef.current?.focus() }, [guiding, step])
@@ -101,15 +106,16 @@ export default function QuickDispatch({
       dir: conv?.projectDir,
       recent: withCtx ? recent : undefined,
     })
-    setText(order)
+    setTaskDraft(order)
     setGuiding(false)
     setStep(0)
-    onToast(t('工單已經寫進下面的輸入框，可以再改，改完按「派工」'))
+    onToast(t('工單已經寫進執行區，可以再修改，確認後按「開始執行」'))
   }
 
   const send = async () => {
-    const task = text.trim()
+    const task = taskDraft.trim()
     if (!task || sending) return
+    if (!window.confirm(t('這會真的交給 AI 執行工作，可能讀寫專案檔案。確定要開始嗎？'))) return
     setSending(true)
     setResult(null)
     try {
@@ -136,7 +142,7 @@ export default function QuickDispatch({
         parts.push(t('已經交給 {who}，它會自己跑完。到主控台可以看進度。', { who }))
       }
       setResult({ ok: true, msg: parts.join(' '), warn: d.mode === 'terminal' })
-      setText('')
+      setTaskDraft('')
     } catch (e) {
       setResult({ ok: false, msg: t('派工失敗：{err}', { err: String(e) }) })
     } finally {
@@ -147,7 +153,11 @@ export default function QuickDispatch({
   const picked = tools.find((x) => x.id === tool)
 
   return (
-    <div className="mt-2 rounded-md border border-line bg-elev/50 p-2">
+    <section className="mt-3 rounded-lg border border-line2 bg-elev/50 p-3" aria-labelledby="quick-dispatch-title">
+      <div className="mb-2">
+        <h3 id="quick-dispatch-title" className="text-sm font-semibold">⚡ {t('交給 AI 執行')}</h3>
+        <p className="mt-0.5 text-xs text-mute2">{t('這裡會真的開始工作，不是傳送問題。請寫清楚希望 AI 完成什麼。')}</p>
+      </div>
       {guiding && cur ? (
         <div>
           <div className="mb-1.5 flex items-center gap-2">
@@ -204,44 +214,55 @@ export default function QuickDispatch({
           </div>
         </div>
       ) : (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-medium">⚡ {t('直接派工')}</span>
-          <select
-            aria-label={t('派給哪個工具')}
-            className="rounded-md border border-line2 bg-panel px-2 py-1 text-xs text-ink2 [&>option]:bg-panel [&>option]:text-ink2"
-            value={tool}
-            onChange={(e) => setTool(e.target.value)}
-          >
-            <option value="auto">
-              {auto ? t('🤖 自動（現在會給 {who}）', { who: auto }) : t('🤖 自動')}
-            </option>
-            {tools.map((x) => (
-              <option key={x.id} value={x.id} disabled={x.limited}>
-                {x.label}{x.limited ? t('（額度用完）') : ` — ${modeNote(x.mode)}`}
+        <div>
+          <label className="mb-1 block text-xs font-medium text-ink2" htmlFor="qd-task">
+            {t('要 AI 完成什麼？')}
+          </label>
+          <textarea
+            id="qd-task"
+            className="min-h-20 w-full rounded-md border border-line bg-panel px-3 py-2 text-sm outline-none focus:border-line3"
+            placeholder={t('例：整理這段對話的結論，更新專案文件，並跑過測試確認沒有問題。')}
+            value={taskDraft}
+            onChange={(e) => setTaskDraft(e.target.value)}
+          />
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <select
+              aria-label={t('派給哪個工具')}
+              className="rounded-md border border-line2 bg-panel px-2 py-1 text-xs text-ink2 [&>option]:bg-panel [&>option]:text-ink2"
+              value={tool}
+              onChange={(e) => setTool(e.target.value)}
+            >
+              <option value="auto">
+                {auto ? t('🤖 自動（現在會給 {who}）', { who: auto }) : t('🤖 自動')}
               </option>
-            ))}
-          </select>
-          <button
-            className="rounded-md border border-line px-2 py-1 text-xs hover:bg-elev"
-            title={t('不知道工單怎麼寫的話，用四個問題帶你寫完')}
-            onClick={() => { setGuiding(true); setStep(0) }}
-          >
-            🧭 {t('引導我寫')}
-          </button>
-          {recent.length > 0 && (
-            <label className="flex items-center gap-1 text-xs text-mute2">
-              <input type="checkbox" checked={withCtx} onChange={(e) => setWithCtx(e.target.checked)} />
-              {t('帶上這段對話當背景')}
-            </label>
-          )}
-          <button
-            className="ml-auto rounded-md bg-ink px-3 py-1.5 text-xs text-invink hover:bg-ink2 disabled:opacity-40"
-            disabled={disabled || sending || !text.trim()}
-            title={picked?.mode === 'terminal' ? t('這個工具派出去之後還要你到終端按一下') : undefined}
-            onClick={send}
-          >
-            {sending ? '…' : t('派工')}
-          </button>
+              {tools.map((x) => (
+                <option key={x.id} value={x.id} disabled={x.limited}>
+                  {x.label}{x.limited ? t('（額度用完）') : ` — ${modeNote(x.mode)}`}
+                </option>
+              ))}
+            </select>
+            <button
+              className="rounded-md border border-line px-2 py-1 text-xs hover:bg-elev"
+              title={t('不知道工單怎麼寫的話，用四個問題帶你寫完')}
+              onClick={() => { setGuiding(true); setStep(0) }}
+            >
+              🧭 {t('引導我寫')}
+            </button>
+            {recent.length > 0 && (
+              <label className="flex items-center gap-1 text-xs text-mute2">
+                <input type="checkbox" checked={withCtx} onChange={(e) => setWithCtx(e.target.checked)} />
+                {t('帶上這段對話當背景')}
+              </label>
+            )}
+            <button
+              className="ml-auto rounded-md bg-ink px-4 py-2 text-xs font-medium text-invink hover:bg-ink2 disabled:opacity-40"
+              disabled={disabled || sending || !taskDraft.trim()}
+              title={picked?.mode === 'terminal' ? t('這個工具派出去之後還要你到終端按一下') : undefined}
+              onClick={send}
+            >
+              {sending ? t('正在交付…') : t('開始執行')}
+            </button>
+          </div>
         </div>
       )}
       {result && (
@@ -255,6 +276,6 @@ export default function QuickDispatch({
           {result.msg}
         </div>
       )}
-    </div>
+    </section>
   )
 }

@@ -1,10 +1,14 @@
+/* eslint-disable react-refresh/only-export-components -- 新手路由與搜尋規則需有聚焦單元測試 */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { ConversationDetail, ConversationSummary, IndexData } from '@/types/data'
 import Adventure from '@/components/Adventure'
+import AskAI from '@/components/AskAI'
 import Console from '@/components/Console'
+import ConversationSync from '@/components/ConversationSync'
 import Office from '@/components/Office'
 import QuickDispatch from '@/components/QuickDispatch'
+import SkillCenter from '@/components/SkillCenter'
 import { t, useLang } from '@/i18n'
 import LangSwitch from '@/components/LangSwitch'
 
@@ -30,6 +34,71 @@ const PROJ_BADGE: Record<string, { label: string; cls: string }> = {
 
 const WEEK_MS = 7 * 86400 * 1000
 const SOURCE_MANAGED_DELETE_TOOLS = new Set(['codex', 'qwen', 'kimi'])
+
+export const BEGINNER_ACTIONS = [
+  '找回舊對話',
+  '直接問 AI',
+  '交給 AI 執行',
+  '管理 AI 技能',
+] as const
+
+export function originalAiActionLabel(): string {
+  return '在原本的 AI 開啟'
+}
+
+interface ConversationFilters {
+  showTrash: boolean
+  showSubagent: boolean
+  showDup: boolean
+  showOld: boolean
+  showDispatch: boolean
+  onlyCJK: boolean
+  cutoff: number
+}
+
+/** 搜尋結果也要說實話：這個函式是「目前過濾條件看不看得到」的單一準則。 */
+export function conversationPassesFilters(
+  conversation: ConversationSummary,
+  filters: ConversationFilters,
+  kept = false,
+): boolean {
+  const inTrash = Boolean(conversation.trashed) && !kept
+  if (filters.showTrash !== inTrash) return false
+  if (!filters.showSubagent && conversation.subagent) return false
+  if (!filters.showDup && conversation.dup) return false
+  if (!conversation.inApp && !filters.showOld && conversation.mtime < filters.cutoff) return false
+  // 來源桌面側欄明確存在的對話比推測式 dispatch 分類更權威。
+  if (!conversation.inApp && !filters.showDispatch && conversation.dispatch) return false
+  if (filters.onlyCJK && !HAS_CJK.test(conversation.title)) return false
+  return true
+}
+
+export function conversationMatchesSearch(conversation: ConversationSummary, query: string): boolean {
+  const q = query.trim().toLowerCase()
+  if (!q) return true
+  return conversation.title.toLowerCase().includes(q)
+    || conversation.path.toLowerCase().includes(q)
+    || conversation.projectDir.toLowerCase().includes(q)
+}
+
+/** 系統指令和 worker 封包不是新手想找的對話摘要，但原資料仍完整保留。 */
+export function beginnerSearchSnippets<T extends { role: string; text: string }>(snippets: T[]): T[] {
+  const technical = /^(?:<system|<environment_context|<developer|message type:|task_id:|#\s*agents\.md|you are an agent in a team)/i
+  return snippets.filter((snippet) => (
+    (snippet.role === 'user' || snippet.role === 'assistant') && !technical.test(snippet.text.trim())
+  ))
+}
+
+export function shouldShowSearchNoResults(
+  titleCount: number,
+  contentCount: number,
+  hiddenCount: number,
+  busy: boolean,
+  contentUnavailable = false,
+): boolean {
+  return !busy && !contentUnavailable
+    && titleCount === 0 && contentCount === 0 && hiddenCount === 0
+}
 
 function canDeleteFromConsole(c: ConversationSummary): boolean {
   return !SOURCE_MANAGED_DELETE_TOOLS.has(c.tool)
@@ -203,13 +272,18 @@ export default function Home() {
   const [contentHits, setContentHits] = useState<{ id: string; snippets: { role: string; text: string }[] }[]>([])
   const [contentBusy, setContentBusy] = useState(false)
   const [contentTruncated, setContentTruncated] = useState(false)
+  const [contentSearchUnavailable, setContentSearchUnavailable] = useState(false)
+  const [contentSearchPartial, setContentSearchPartial] = useState(false)
+  const [contentQuery, setContentQuery] = useState('')
+  const [searchRevealAll, setSearchRevealAll] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
   /** id → 對話。內容搜尋只回 id 與摘要，標題與工具名要從索引補回來 */
   const contentById = useMemo(
     () => new Map((index?.conversations ?? []).map((c) => [c.id, c])),
     [index],
   )
-  const [viewMode, setViewMode] = useState<'list' | 'console' | 'office' | 'rpg'>('list')
+  const [viewMode, setViewMode] = useState<'list' | 'ask' | 'console' | 'office' | 'rpg' | 'skills'>('list')
+  const [syncOpen, setSyncOpen] = useState(false)
   /**
    * 側欄開合。
    *
@@ -221,7 +295,8 @@ export default function Home() {
   const [sidebarPref, setSidebarPref] = useState<Record<string, boolean>>(() => {
     try { return JSON.parse(localStorage.getItem('ac_sidebar') || '{}') } catch { return {} }
   })
-  const sidebarOpen = sidebarPref[viewMode] ?? (viewMode === 'list')
+  const sidebarOpen = sidebarPref[viewMode]
+    ?? (viewMode === 'list' && (typeof window === 'undefined' || window.innerWidth >= 640))
   const setSidebarOpen = (v: boolean) => {
     setSidebarPref((s) => {
       const next = { ...s, [viewMode]: v }
@@ -248,6 +323,7 @@ export default function Home() {
     setChatSecs(0)
     setRouteInfo('')
     setSelectedId(id)
+    setSyncOpen(false)
   }
 
   useEffect(() => { localStorage.setItem('ac_showSub', showSubagent ? '1' : '0') }, [showSubagent])
@@ -300,7 +376,7 @@ export default function Home() {
    * 刻意只做四件事，不做一整套組合鍵：記不住的快捷鍵等於不存在。
    *   /        跳到搜尋
    *   Esc      清掉搜尋（在搜尋框裡）
-   *   Ctrl+1~4 切分頁
+   *   Ctrl+1~6 切分頁
    *   Ctrl+B   收合／展開側欄
    *
    * 在輸入框裡時完全不攔截，除了 Ctrl 組合 —— 打字打到一半被搶走焦點
@@ -328,9 +404,9 @@ export default function Home() {
       const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
         || el.tagName === 'SELECT' || el.isContentEditable)
       if (e.ctrlKey || e.metaKey) {
-        if (e.key >= '1' && e.key <= '4') {
+        if (e.key >= '1' && e.key <= '6') {
           e.preventDefault()
-          a.setViewMode((['list', 'console', 'office', 'rpg'] as const)[Number(e.key) - 1])
+          a.setViewMode((['list', 'ask', 'console', 'office', 'rpg', 'skills'] as const)[Number(e.key) - 1])
           return
         }
         if (e.key.toLowerCase() === 'b') { e.preventDefault(); a.setSidebarOpen(!a.sidebarOpen) }
@@ -363,18 +439,41 @@ export default function Home() {
    */
   useEffect(() => {
     const q = search.trim()
-    if (!apiOk || q.length < 2) { setContentHits([]); setContentBusy(false); return }
+    setContentHits([])
+    setContentTruncated(false)
+    setContentSearchUnavailable(false)
+    setContentSearchPartial(false)
+    setContentQuery(q)
+    if (q.length < 2) { setContentBusy(false); return }
+    if (!apiOk) {
+      setContentBusy(false)
+      setContentSearchUnavailable(true)
+      return
+    }
     const ac = new AbortController()
     setContentBusy(true)
     const timer = setTimeout(() => {
       fetch(`/api/search?q=${encodeURIComponent(q)}`, { signal: ac.signal })
-        .then((r) => (r.ok ? r.json() : null))
+        .then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+          return r.json()
+        })
         .then((d) => {
-          if (!d?.ok) return
+          if (!d?.ok) throw new Error(d?.error || 'content search unavailable')
+          if (ac.signal.aborted) return
           setContentHits(d.hits || [])
           setContentTruncated(Boolean(d.truncated))
+          setContentSearchPartial(Boolean(d.partial))
+          setContentSearchUnavailable(false)
         })
-        .catch(() => { /* 中止或 API 沒回應：清單維持原狀就好 */ })
+        .catch(() => {
+          if (!ac.signal.aborted) {
+            setContentHits([])
+            setContentTruncated(false)
+            setContentSearchPartial(false)
+            setContentSearchUnavailable(true)
+          }
+        })
         .finally(() => { if (!ac.signal.aborted) setContentBusy(false) })
     }, 250)
     return () => { clearTimeout(timer); ac.abort() }
@@ -435,21 +534,6 @@ export default function Home() {
         showToast(t('已移到回收區'))
       } else showToast(t('刪除失敗：{err}', { err: d.error || '' }))
     } catch { showToast(t('控制 API 無回應')) }
-  }
-
-  const refresh = async () => {
-    setBusy('refresh')
-    try {
-      const r = await fetch('/api/refresh', { method: 'POST' })
-      const d = await r.json()
-      if (d.ok) {
-        reloadIndex()
-        showToast(t('已重新掃描全部工具'))
-      } else {
-        showToast(t('掃描失敗：{err}', { err: d.error || d.out || '' }))
-      }
-    } catch { showToast(t('控制 API 無回應')) }
-    setBusy('')
   }
 
   const launch = async (c: ConversationSummary) => {
@@ -729,28 +813,15 @@ export default function Home() {
     if (!index) return [] as { dir: string; line: string; convs: ConversationSummary[] }[]
     const q = search.trim().toLowerCase()
     const cutoff = indexNow - WEEK_MS
+    const filters: ConversationFilters = {
+      showTrash, showSubagent, showDup, showOld, showDispatch, onlyCJK, cutoff,
+    }
     const filtered = index.conversations.filter((c) => {
       if (deleted.has(c.id)) return false
-      // 有搜尋字串時豁免所有隱藏過濾器。
-      // 原本只有資料夾層級豁免，對話層級的「一週未使用」照樣擋 ——
-      // 結果搜兩週前的對話永遠是空的，但東西明明還在。
-      // 垃圾桶是獨立的一個視圖，不是額外的過濾器 ——
-      // 打開時「只」看垃圾桶裡的，關著時完全不出現。
-      // 混在一起的話，看垃圾桶還要自己分辨哪些是垃圾桶裡的，等於沒有分。
-      const inTrash = !!c.trashed && !kept.has(c.id)
-      if (showTrash !== inTrash) return false
-      if (!q) {
-        if (!showSubagent && c.subagent) return false
-        if (!showDup && c.dup) return false
-        // 來源桌面側欄明確列出的對話是權威狀態：即使很舊，或標題看起來
-        // 像派工，也不能被控制台的推測式規則藏掉。使用者自己選的中文過濾
-        // 與子代理過濾仍照常套用。
-        if (!c.inApp && !showOld && c.mtime < cutoff) return false
-        if (!c.inApp && !showDispatch && c.dispatch) return false
-        if (onlyCJK && !HAS_CJK.test(c.title)) return false
-        return true
-      }
-      return c.title.toLowerCase().includes(q) || c.path.toLowerCase().includes(q) || c.projectDir.toLowerCase().includes(q)
+      // 搜尋不再暗中繞過過濾器。若命中被收起的對話，畫面會明說
+      // 數量並給一鍵顯示；否則同時顯示「搜得到」和「找不到」會讓新手無所適從。
+      if (!searchRevealAll && !conversationPassesFilters(c, filters, kept.has(c.id))) return false
+      return conversationMatchesSearch(c, q)
     })
     const map = new Map<string, ConversationSummary[]>()
     for (const c of filtered) {
@@ -776,8 +847,62 @@ export default function Home() {
         return { dir, line, convs }
       })
       .sort((a, b) => (b.convs[0]?.mtime ?? 0) - (a.convs[0]?.mtime ?? 0))
-  }, [index, indexNow, search, showSubagent, showDup, showOld, showDispatch, showTrash,
-      onlyCJK, kept, activeDays, deleted])
+  }, [index, indexNow, search, searchRevealAll, showSubagent, showDup, showOld, showDispatch,
+      showTrash, onlyCJK, kept, activeDays, deleted])
+
+  const searchFilters = useMemo<ConversationFilters>(() => ({
+    showTrash,
+    showSubagent,
+    showDup,
+    showOld,
+    showDispatch,
+    onlyCJK,
+    cutoff: indexNow - WEEK_MS,
+  }), [showTrash, showSubagent, showDup, showOld, showDispatch, onlyCJK, indexNow])
+
+  /** 標題命中先列，而且完全相等／從標題開頭的結果排前面。 */
+  const titleSearchResults = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return [] as ConversationSummary[]
+    return groups.flatMap((group) => group.convs).sort((a, b) => {
+      const titleA = a.title.toLowerCase()
+      const titleB = b.title.toLowerCase()
+      const score = (title: string) => title === q ? 0 : title.startsWith(q) ? 1 : title.includes(q) ? 2 : 3
+      return score(titleA) - score(titleB) || b.mtime - a.mtime
+    })
+  }, [groups, search])
+
+  const titleSearchIds = useMemo(() => new Set(titleSearchResults.map((c) => c.id)), [titleSearchResults])
+
+  /** 內容命中只列現在看得到的對話，並去掉已在標題區出現的重複項。 */
+  const currentContentHits = useMemo(
+    () => contentQuery === search.trim() ? contentHits : [],
+    [contentQuery, search, contentHits],
+  )
+
+  const visibleContentHits = useMemo(() => currentContentHits.flatMap((hit) => {
+    const conversation = contentById.get(hit.id)
+    if (!conversation || deleted.has(hit.id) || titleSearchIds.has(hit.id)) return []
+    if (!searchRevealAll && !conversationPassesFilters(conversation, searchFilters, kept.has(hit.id))) return []
+    const snippets = beginnerSearchSnippets(hit.snippets)
+    return snippets.length ? [{ ...hit, snippets }] : []
+  }), [currentContentHits, contentById, deleted, titleSearchIds, searchRevealAll, searchFilters, kept])
+
+  /** 不說「找不到」：有命中只是被目前篩選收起時，告訴使用者真實數量。 */
+  const hiddenSearchCount = useMemo(() => {
+    if (!search.trim() || searchRevealAll || !index) return 0
+    const matched = new Set<string>()
+    for (const conversation of index.conversations) {
+      if (!deleted.has(conversation.id) && conversationMatchesSearch(conversation, search)) matched.add(conversation.id)
+    }
+    for (const hit of currentContentHits) if (!deleted.has(hit.id)) matched.add(hit.id)
+    let hidden = 0
+    for (const id of matched) {
+      const conversation = contentById.get(id)
+      if (conversation && !conversationPassesFilters(conversation, searchFilters, kept.has(id))) hidden += 1
+    }
+    return hidden
+  }, [search, searchRevealAll, index, deleted, currentContentHits, contentById, searchFilters, kept])
 
   const oldCount = useMemo(() => {
     if (!index) return 0
@@ -813,8 +938,9 @@ export default function Home() {
   const tabs = (
     <div className="flex flex-none items-center gap-1 overflow-x-auto border-b border-line px-3 py-1.5">
       {([
-        ['list', t('📋 對話')], ['console', t('🎙️ 主控台')],
+        ['list', t('📋 對話')], ['ask', t('💬 問 AI')], ['console', t('🎙️ 派工主控台')],
         ['office', t('🎮 辦公室')], ['rpg', t('⚔️ 冒險')],
+        ['skills', t('🧩 AI 技能')],
       ] as const).map(([m, label]) => (
         <button
           key={m}
@@ -832,32 +958,33 @@ export default function Home() {
     <div className="flex h-screen flex-col bg-panel text-ink">
       <main className="flex min-w-0 flex-1 flex-col">
         {tabs}
-        {viewMode === 'console' ? (
+        {viewMode === 'ask' ? (
+          <AskAI />
+        ) : viewMode === 'console' ? (
           <Console />
         ) : viewMode === 'office' ? (
           <Office tools={liveTools ?? {}} projects={[]} conversations={[]} onDispatch={launch} busyId={busy} />
         ) : viewMode === 'rpg' ? (
           <Adventure tools={liveTools ?? {}} />
+        ) : viewMode === 'skills' ? (
+          <SkillCenter />
         ) : (
-          <div className="flex flex-1 items-center justify-center p-8">
-            <div className="max-w-md text-center">
-              {error ? (
-                <>
-                  <p role="alert" className="mb-2 text-sm text-red-600">{t('索引載入失敗：{err}', { err: error })}</p>
-                  <p className="mb-4 text-xs text-mute2">{t('第一次使用要先掃描一次，才會有對話清單。其他三個分頁不需要索引，現在就能用。')}</p>
-                  <button
-                    className="rounded-md border border-line2 px-4 py-1.5 text-sm hover:bg-elev disabled:opacity-40"
-                    disabled={busy === 'refresh'}
-                    onClick={refresh}
-                  >
-                    {busy === 'refresh' ? t('掃描中…') : t('掃描建立索引')}
-                  </button>
-                </>
-              ) : (
-                <p role="status" aria-live="polite" className="text-sm text-mute2">{t('正在掃描全部 AI 對話…')}</p>
-              )}
+          error ? (
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <p role="alert" className="mx-auto mt-5 max-w-4xl px-6 text-sm text-red-600">
+                {t('對話清單尚未建立：{err}', { err: error })}
+              </p>
+              <ConversationSync
+                index={null}
+                apiOk={apiOk}
+                onComplete={(next) => { setIndex(normalize(next)); setError('') }}
+              />
             </div>
-          </div>
+          ) : (
+            <div className="flex flex-1 items-center justify-center p-8">
+              <p role="status" aria-live="polite" className="text-sm text-mute2">{t('正在載入對話清單…')}</p>
+            </div>
+          )
         )}
       </main>
     </div>
@@ -865,7 +992,7 @@ export default function Home() {
 
   return (
     <div className="flex h-screen flex-col bg-panel text-ink">
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
         {/* ── 側欄 ───────────────────────────
             在「📋 對話」以外的分頁預設收起來。
             那三個分頁跟對話清單沒有關係，但側欄照樣佔走 320px ——
@@ -877,7 +1004,7 @@ export default function Home() {
             寬度也跟著視窗走：固定 320px 在 700px 寬的視窗會吃掉 46%，
             主區只剩 380px —— 連四個分頁鈕都排不下（實測溢出 387>380）。 */}
         {sidebarOpen && (
-        <aside className="flex w-64 flex-none flex-col border-r border-line lg:w-80">
+        <aside className="absolute inset-y-0 left-0 z-20 flex w-[min(20rem,calc(100vw-2rem))] flex-none flex-col border-r border-line bg-panel shadow-xl sm:relative sm:z-auto sm:w-64 sm:shadow-none lg:w-80">
           <div className="border-b border-line p-3">
             <div className="mb-2 flex items-baseline justify-between gap-2">
               <h1 className="text-lg font-medium">{t('AI 控制台')}</h1>
@@ -897,11 +1024,11 @@ export default function Home() {
             <div className="mb-2 flex items-center gap-2">
               <button
                 className="rounded-md border border-line px-3 py-1 text-xs hover:bg-elev disabled:opacity-40"
-                disabled={!apiOk || busy === 'refresh'}
-                onClick={refresh}
-                title={apiOk ? t('重新掃描全部工具的對話') : t('控制 API 沒有回應。桌面版重開一次即可；開發模式請確認 npm run dev 還在跑')}
+                disabled={!apiOk}
+                onClick={() => { setViewMode('list'); setSyncOpen(true) }}
+                title={apiOk ? t('匯入或同步四個 AI 的對話') : t('控制 API 沒有回應。桌面版重開一次即可；開發模式請確認 npm run dev 還在跑')}
               >
-                {busy === 'refresh' ? t('掃描中…') : t('↻ 重新掃描')}
+                {t('↻ 匯入／同步對話')}
               </button>
               {!apiOk && <span role="status" className="text-xs text-amber-600">{t('控制 API 離線（檢視模式）')}</span>}
             </div>
@@ -909,10 +1036,13 @@ export default function Home() {
               ref={searchRef}
               className="w-full rounded-md border border-line bg-transparent px-3 py-1.5 text-sm outline-none focus:border-line3"
               placeholder={t('搜尋標題與內容…（按 / 跳到這裡）')}
+              aria-label={t('搜尋舊對話')}
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Escape') { setSearch(''); e.currentTarget.blur() } }}
+              onChange={(e) => { setSearch(e.target.value); setSearchRevealAll(false) }}
+              onKeyDown={(e) => { if (e.key === 'Escape') { setSearch(''); setSearchRevealAll(false); e.currentTarget.blur() } }}
             />
+            <details className="mt-2 rounded-md border border-line px-2 py-1.5">
+              <summary className="cursor-pointer text-xs text-mute2">{t('進階篩選與整理')}</summary>
             {(index.stats.trashed ?? 0) > 0 && (
               <button
                 className={`mt-2 flex w-full items-center gap-2 rounded-md px-2 py-1 text-xs ${
@@ -967,88 +1097,116 @@ export default function Home() {
               </select>
               {t('有動過的資料夾')}
             </label>
+            </details>
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto">
-            {/* 內容命中放在最上面，而且不受任何過濾條件影響。
-                放在下面或跟著過濾走的話，會發生「明明搜到了卻看不到」——
-                跟先前「命中的對話被關在收合資料夾裡」是同一種錯。 */}
-            {search.trim().length >= 2 && (contentBusy || contentHits.length > 0) && (
-              <div className="border-b border-line2 bg-elev/40">
+            {search.trim() && titleSearchResults.length > 0 && (
+              <section aria-labelledby="title-search-heading" className="border-b border-line2">
+                <h2 id="title-search-heading" className="px-3 py-1.5 text-[11px] font-medium text-ink3">
+                  {t('對話清單找到 {n} 份（標題符合的排前面）', { n: titleSearchResults.length })}
+                </h2>
+                {titleSearchResults.map((conversation) => (
+                  <button
+                    key={conversation.id}
+                    className={`flex w-full items-center gap-2 border-t border-line2 px-3 py-2 text-left text-xs hover:bg-elev ${selectedId === conversation.id ? 'bg-elev' : ''}`}
+                    onClick={() => selectConversation(conversation.id)}
+                  >
+                    <span className="min-w-0 flex-1 truncate font-medium">{markHits(conversation.title, search)}</span>
+                    <span className="flex-none text-[10px] text-mute3">{conversation.toolLabel}</span>
+                  </button>
+                ))}
+              </section>
+            )}
+
+            {search.trim().length >= 2 && (contentBusy || visibleContentHits.length > 0) && (
+              <section aria-labelledby="content-search-heading" className="border-b border-line2 bg-elev/40">
                 <div className="flex items-center gap-2 px-3 py-1.5 text-[11px] text-mute2">
-                  <span>🔎 {t('對話內容裡找到')}</span>
+                  <h2 id="content-search-heading">🔎 {t('對話內容裡找到')}</h2>
                   <span className="font-medium text-ink3">
-                    {contentBusy ? t('搜尋中…') : t('{n} 份', { n: contentHits.length })}
+                    {contentBusy ? t('搜尋中…') : t('{n} 份', { n: visibleContentHits.length })}
                   </span>
                   {contentTruncated && !contentBusy && (
-                    <span className="text-mute3">{t('（只列前 {n} 份）', { n: contentHits.length })}</span>
+                    <span className="text-mute3">{t('（只列前 {n} 份）', { n: currentContentHits.length })}</span>
                   )}
                 </div>
-                {contentHits.map((h) => {
-                  const conv = contentById.get(h.id)
+                {visibleContentHits.map((hit) => {
+                  const conversation = contentById.get(hit.id)
                   return (
                     <button
-                      key={h.id}
-                      className={`flex w-full flex-col gap-0.5 border-t border-line2 px-3 py-2 text-left hover:bg-elev ${
-                        selectedId === h.id ? 'bg-elev' : ''}`}
-                      onClick={() => selectConversation(h.id)}
+                      key={hit.id}
+                      className={`flex w-full flex-col gap-0.5 border-t border-line2 px-3 py-2 text-left hover:bg-elev ${selectedId === hit.id ? 'bg-elev' : ''}`}
+                      onClick={() => selectConversation(hit.id)}
                     >
                       <span className="flex items-center gap-2 text-xs">
-                        <span className="min-w-0 flex-1 truncate font-medium">
-                          {conv?.title || h.id}
-                        </span>
-                        {conv && <span className="flex-none text-[10px] text-mute3">{conv.toolLabel}</span>}
+                        <span className="min-w-0 flex-1 truncate font-medium">{conversation?.title || hit.id}</span>
+                        {conversation && <span className="flex-none text-[10px] text-mute3">{conversation.toolLabel}</span>}
                       </span>
-                      {h.snippets.map((s, i) => (
+                      {hit.snippets.map((snippet, i) => (
                         <span key={i} className="line-clamp-2 text-[11px] leading-snug text-mute2">
-                          <span className="text-mute3">{s.role === 'user' ? t('你：') : t('AI：')}</span>
-                          {markHits(s.text, search)}
+                          <span className="text-mute3">{snippet.role === 'user' ? t('你：') : t('AI：')}</span>
+                          {markHits(snippet.text, search)}
                         </span>
                       ))}
                     </button>
                   )
                 })}
+              </section>
+            )}
+
+            {search.trim().length >= 2 && contentSearchUnavailable && (
+              <div role="status" aria-live="polite" className="border-b border-line2 bg-amber-50 px-3 py-3 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+                {t('對話內容搜尋暫時無法使用；目前只顯示標題找到的結果。')}
               </div>
             )}
-            {groups.length === 0 && (
-              // 過濾條件太緊時整個側欄會是空的，沒有提示的話看起來就像程式壞了
+
+            {search.trim().length >= 2 && contentSearchPartial && (
+              <div role="status" aria-live="polite" className="border-b border-line2 bg-amber-50 px-3 py-3 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+                {t('部分對話內容無法搜尋；目前結果可能不完整。')}
+              </div>
+            )}
+
+            {search.trim() && hiddenSearchCount > 0 && (
+              <div role="status" aria-live="polite" className="border-b border-line2 bg-amber-50 px-3 py-3 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+                <p>{t('另外找到 {n} 份，但被目前的進階篩選收起來。', { n: hiddenSearchCount })}</p>
+                <button
+                  className="mt-2 rounded-md border border-amber-400 px-2.5 py-1 font-medium hover:bg-amber-100 dark:hover:bg-amber-900"
+                  onClick={() => setSearchRevealAll(true)}
+                >
+                  {t('顯示這 {n} 份結果', { n: hiddenSearchCount })}
+                </button>
+              </div>
+            )}
+
+            {search.trim() && shouldShowSearchNoResults(
+              titleSearchResults.length,
+              visibleContentHits.length,
+              hiddenSearchCount,
+              contentBusy,
+              contentSearchUnavailable || contentSearchPartial,
+            ) && (
               <div role="status" aria-live="polite" className="px-3 py-6 text-center text-xs text-mute3">
-                <div>{search.trim() ? t('找不到符合的對話') : t('目前的過濾條件下沒有東西')}</div>
-                <div className="mt-1 text-mute2">
-                  {t('索引裡共有 {n} 份對話', { n: index.conversations.length })}
-                </div>
-                {/* 「只顯示有中文的對話」是預設開啟的，而它正是最容易把清單清空的那一個。
-                    不點名的話，對話多為英文的人只會看到「沒有東西」+ 索引有幾百份，
-                    兩句互相矛盾，然後去懷疑掃描器 —— 實際上只是一個過濾器開著。 */}
-                {onlyCJK && !search.trim() && (
-                  <div className="mt-2">
-                    <div className="text-amber-600 dark:text-amber-400">
-                      {t('已套用「只顯示有中文的對話」過濾')}
-                    </div>
-                    <button
-                      className="mt-1 rounded border border-line2 px-2 py-0.5 hover:bg-elev"
-                      onClick={() => setOnlyCJK(false)}
-                    >
-                      {t('關掉這個過濾')}
-                    </button>
-                  </div>
-                )}
+                {search.trim().length >= 2
+                  ? t('標題和對話內容都沒有找到「{query}」。', { query: search.trim() })
+                  : t('標題沒有找到「{query}」；輸入至少 2 個字才會再搜對話內容。', { query: search.trim() })}
+              </div>
+            )}
+
+            {!search.trim() && groups.length === 0 && (
+              <div role="status" aria-live="polite" className="px-3 py-6 text-center text-xs text-mute3">
+                <div>{t('目前的進階篩選沒有符合的對話')}</div>
                 <button
                   className="mt-3 rounded border border-line2 px-3 py-1 hover:bg-elev"
                   onClick={() => {
                     setActiveDays(0); setShowOld(true); setShowSubagent(true)
-                    setShowDup(true); setShowDispatch(true); setSearch('')
-                    // onlyCJK 與 showTrash 也要重設。漏掉它們的話：
-                    // 機器上主要是英文對話的人，或正好切在垃圾桶視圖的人，
-                    // 按了「重設所有過濾條件」還是 0 筆，畫面繼續叫他重設 —— 死循環。
-                    setOnlyCJK(false); setShowTrash(false)
+                    setShowDup(true); setShowDispatch(true); setOnlyCJK(false); setShowTrash(false)
                   }}
                 >
-                  {t('重設所有過濾條件')}
+                  {t('重設所有進階篩選')}
                 </button>
               </div>
             )}
-            {groups.map(({ dir, line, convs }) => {
+            {!search.trim() && groups.map(({ dir, line, convs }) => {
               const hub = hubProjects.get(line)
               // 專案分組預設收合：一台機器上動輒上百個專案，全展開要滾很久。
               // 但搜尋時要強制展開 —— 不然搜完只看到一列「▸ 📁 資料夾 (3)」，
@@ -1189,7 +1347,9 @@ export default function Home() {
             它會跟著內容一起捲走，等於沒有浮動。 */}
         <main className="relative flex min-w-0 flex-1 flex-col">
           {tabs}
-          {viewMode === 'console' ? (
+          {viewMode === 'ask' ? (
+            <AskAI />
+          ) : viewMode === 'console' ? (
             <Console />
           ) : viewMode === 'office' ? (
             <Office
@@ -1201,13 +1361,74 @@ export default function Home() {
             />
           ) : viewMode === 'rpg' ? (
             <Adventure tools={liveTools ?? index.tools} />
+          ) : viewMode === 'skills' ? (
+            <SkillCenter />
+          ) : syncOpen ? (
+            <ConversationSync
+              index={index}
+              apiOk={apiOk}
+              onComplete={(next) => { setIndex(normalize(next)); setError('') }}
+              onClose={() => setSyncOpen(false)}
+            />
           ) : !selected ? (
-            <div className="flex flex-1 items-center justify-center text-mute3">
-              <div className="text-center">
-                <p className="mb-2 text-lg">{t('從左側選一個對話')}</p>
-                <p className="text-sm">{t('共 {n} 份正本對話 · {tools} 個工具 · {groups} 個專案資料夾', { n: index.stats.unique ?? index.stats.total, tools: Object.keys(index.tools).length, groups: groups.length })}</p>
+            <section aria-labelledby="beginner-home-title" className="min-h-0 flex-1 overflow-y-auto px-4 py-8 sm:px-8">
+              <div className="mx-auto max-w-3xl">
+                <p className="text-sm text-mute2">{t('AI 控制台')}</p>
+                <h1 id="beginner-home-title" className="mt-1 text-2xl font-semibold text-ink">
+                  {t('你現在想做什麼？')}
+                </h1>
+                <p className="mt-2 text-sm leading-6 text-mute2">
+                  {t('不需要先懂模型、指令或資料夾，選一件事就能開始。')}
+                </p>
+
+                <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                  <button
+                    className="min-h-28 rounded-xl border border-line bg-panel p-4 text-left shadow-sm hover:border-line3 hover:bg-elev focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                    onClick={() => {
+                      setSidebarOpen(true)
+                      setSyncOpen(false)
+                      setTimeout(() => searchRef.current?.focus(), 0)
+                    }}
+                  >
+                    <span className="block text-lg font-medium text-ink">🔎 {t(BEGINNER_ACTIONS[0])}</span>
+                    <span className="mt-2 block text-sm leading-5 text-mute2">{t('輸入記得的一句話；若還沒出現，再按左側「匯入／同步對話」。')}</span>
+                  </button>
+                  <button
+                    className="min-h-28 rounded-xl border border-line bg-panel p-4 text-left shadow-sm hover:border-line3 hover:bg-elev focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                    onClick={() => setViewMode('ask')}
+                  >
+                    <span className="block text-lg font-medium text-ink">💬 {t(BEGINNER_ACTIONS[1])}</span>
+                    <span className="mt-2 block text-sm leading-5 text-mute2">{t('直接問一個問題；AI 只會回答，不會執行工作。')}</span>
+                  </button>
+                  <button
+                    className="min-h-28 rounded-xl border border-line bg-panel p-4 text-left shadow-sm hover:border-line3 hover:bg-elev focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                    onClick={() => setViewMode('console')}
+                  >
+                    <span className="block text-lg font-medium text-ink">⚡ {t(BEGINNER_ACTIONS[2])}</span>
+                    <span className="mt-2 block text-sm leading-5 text-mute2">{t('把想完成的結果寫清楚，再確認交給 AI 動手。')}</span>
+                  </button>
+                  <button
+                    className="min-h-28 rounded-xl border border-line bg-panel p-4 text-left shadow-sm hover:border-line3 hover:bg-elev focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                    onClick={() => setViewMode('skills')}
+                  >
+                    <span className="block text-lg font-medium text-ink">🧩 {t(BEGINNER_ACTIONS[3])}</span>
+                    <span className="mt-2 block text-sm leading-5 text-mute2">{t('匯入、檢查並管理每個 AI 可用的技能。')}</span>
+                  </button>
+                </div>
+
+                <details className="mt-6 rounded-lg border border-line px-4 py-3 text-sm text-mute2">
+                  <summary className="cursor-pointer font-medium text-ink3">{t('進階資料與數量')}</summary>
+                  <p className="mt-3">
+                    {t('目前有 {n} 份正本對話、{tools} 個 AI 來源、{groups} 個專案資料夾。', {
+                      n: index.stats.unique ?? index.stats.total,
+                      tools: Object.keys(index.tools).length,
+                      groups: groups.length,
+                    })}
+                  </p>
+                  <p className="mt-1 text-xs text-mute3">{t('篩選、子代理與重複副本都放在左側的「進階篩選與整理」。')}</p>
+                </details>
               </div>
-            </div>
+            </section>
           ) : (
             <>
               <header className="flex-none border-b border-line px-5 py-3">
@@ -1215,27 +1436,33 @@ export default function Home() {
                   <h2 className="min-w-0 flex-1 truncate text-base font-medium">{selected.title}</h2>
                   <span className="flex-none rounded-full bg-elev px-2 py-0.5 text-xs text-mute2">{selected.toolLabel}</span>
                 </div>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-mute3">
+                <div className="flex flex-wrap items-center gap-3 text-xs text-mute3">
                   <span>{relTime(selected.mtime)}</span>
-                  <span className="max-w-[40%] truncate" title={selected.path}>{selected.path}</span>
-                  {apiOk && selected.resume && (
+                  {selected.resume && (
                     <button
-                      className="rounded bg-ink px-2 py-0.5 text-invink hover:bg-ink2 disabled:opacity-40"
-                      disabled={busy === selected.id}
+                      className="rounded-md bg-ink px-3 py-1.5 text-sm font-medium text-invink hover:bg-ink2 disabled:opacity-40"
+                      disabled={!apiOk || busy === selected.id}
                       onClick={() => launch(selected)}
                     >
-                      {busy === selected.id ? t('啟動中…') : t('▶ 接續此對話')}
+                      {busy === selected.id ? t('開啟中…') : t(originalAiActionLabel())}
                     </button>
                   )}
-                  {selected.resume && (
-                    <button className="rounded border border-line px-2 py-1 hover:bg-elev" onClick={() => copy(selected.resume, 'resume')}>
-                      {copied === 'resume' ? t('已複製 ✓') : t('複製接續指令：{cmd}', { cmd: selected.resume })}
-                    </button>
-                  )}
-                  <button className="rounded border border-line px-2 py-1 hover:bg-elev" onClick={() => copy(selected.path, 'path')}>
-                    {copied === 'path' ? '已複製 ✓' : '複製檔案路徑'}
-                  </button>
+                  {!apiOk && selected.resume && <span className="text-amber-600">{t('控制 API 離線，重開控制台後即可開啟。')}</span>}
                 </div>
+                <details className="mt-2 text-xs text-mute3">
+                  <summary className="cursor-pointer hover:text-ink3">{t('進階資訊')}</summary>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-elev p-2">
+                    <span className="max-w-full break-all" title={selected.path}>{selected.path}</span>
+                    {selected.resume && (
+                      <button className="rounded border border-line px-2 py-1 hover:bg-panel" onClick={() => copy(selected.resume, 'resume')}>
+                        {copied === 'resume' ? t('已複製 ✓') : t('複製原 AI 開啟指令')}
+                      </button>
+                    )}
+                    <button className="rounded border border-line px-2 py-1 hover:bg-panel" onClick={() => copy(selected.path, 'path')}>
+                      {copied === 'path' ? t('已複製 ✓') : t('複製檔案路徑')}
+                    </button>
+                  </div>
+                </details>
               </header>
 
               <div
@@ -1244,7 +1471,12 @@ export default function Home() {
                 onScroll={onMsgScroll}
               >
                 {!selected.hasMessages ? (
-                  <p className="text-mute3">此對話檔較大（{fmtSize(selected.size)}），未匯出訊息內容；可用接續指令回原工具查看。</p>
+                  <section aria-labelledby="large-conversation-title" className="mx-auto max-w-xl rounded-xl border border-line bg-elev p-5">
+                    <h3 id="large-conversation-title" className="font-medium text-ink">{t('這份對話請回原本的 AI 查看')}</h3>
+                    <p className="mt-2 text-sm leading-6 text-mute2">
+                      {t('對話檔較大（{size}），控制台沒有複製訊息內容。請按上方「在原本的 AI 開啟」，對話就會回到原處。', { size: fmtSize(selected.size) })}
+                    </p>
+                  </section>
                 ) : detailLoading ? (
                   <p role="status" aria-live="polite" className="text-mute3">{t('載入訊息中…')}</p>
                 ) : detail ? (
@@ -1262,8 +1494,8 @@ export default function Home() {
                     ) : detailTailState === 'fallback' ? (
                       <p role="alert" className="text-center text-xs text-amber-600 dark:text-amber-400">
                         {selected.resume
-                          ? t('最新訊息載入失敗：{err}。目前顯示索引匯出的前段；仍可用「接續此對話」回原工具查看。', { err: detailTailError })
-                          : t('最新訊息載入失敗：{err}。目前顯示索引匯出的前段；可複製上方檔案路徑回原工具查看。', { err: detailTailError })}
+                          ? t('最新訊息載入失敗：{err}。目前顯示索引匯出的前段；仍可用「在原本的 AI 開啟」回原處查看。', { err: detailTailError })
+                          : t('最新訊息載入失敗：{err}。目前顯示索引匯出的前段；可從「進階資訊」複製檔案路徑。', { err: detailTailError })}
                       </p>
                     ) : detail.truncated ? (
                       <p className="text-center text-xs text-mute3">
@@ -1370,18 +1602,14 @@ export default function Home() {
                         {chatBusy ? '…' : '送出'}
                       </button>
                     </div>
-                    {/* 同一個輸入框有兩個出口：往上是地端模型現在回你一句，
-                        往下是把它變成工單交出去做。刻意共用文字 ——
-                        「先問地端模型、覺得可行再派出去」是真實會發生的順序，
-                        中間不該有一次複製貼上。 */}
+                    {/* 問問題與交工作是兩個不同意圖。QuickDispatch 有自己的工作草稿，
+                        不會把上面還沒送出的問題當成可執行工單。 */}
                     <QuickDispatch
                       conv={selected ? { title: selected.title, projectDir: selected.projectDir } : null}
                       recent={(detail?.messages || []).slice(-6).map((m) => ({
                         role: m.role === 'assistant' ? 'assistant' : 'user',
                         text: m.text,
                       }))}
-                      text={chatInput}
-                      setText={setChatInput}
                       onToast={showToast}
                     />
                   </div>

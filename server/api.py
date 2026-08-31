@@ -14,22 +14,30 @@ AI 控制台 · 整合伺服器（僅綁定 127.0.0.1，無外部存取）
   GET  /api/conv/tail?id=... — 從 canonical index 安全讀取對話真正尾端
 """
 import contextlib
+import base64
+import binascii
 import datetime as _dt
+import hashlib
+import io
 import json
 import math
 import mimetypes
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 
@@ -60,6 +68,718 @@ import schedule  # noqa: E402
 from conversation_tail import ConversationTailError, load_indexed_tail  # noqa: E402
 
 PORT = 5177
+
+# 技能中心只會接觸這六個公開技能根目錄。這份表不含登入、帳號、
+# token 或瀏覽器 profile，也不會從設定檔推測使用者身分。
+SKILL_TARGETS = {
+    "governance": {"label": "全域治理（唯讀來源）", "parts": (".agents", "skills")},
+    "claude": {"label": "Claude", "parts": (".claude", "skills")},
+    "codex": {"label": "Codex", "parts": (".codex", "skills")},
+    "grok": {"label": "Grok", "parts": (".grok", "skills")},
+    "qwen": {"label": "Qwen", "parts": (".qwen", "skills")},
+    "kimi": {"label": "Kimi", "parts": (".kimi-code", "skills")},
+}
+# 全域治理技能會被所有派工工具共同讀取，風險範圍不同於單一 AI。
+# 新手匯入精靈只允許安裝到單一工具根目錄；治理根目錄保留為唯讀來源。
+SKILL_IMPORT_TARGETS = ("claude", "codex", "grok", "qwen", "kimi")
+
+# 對話同步卡片只探測對話／側欄資料根，不碰 auth、帳號、瀏覽器 profile。
+# 每個來源保留兩條安全路徑，讓「工具沒安裝」「真的 0 份」「讀取失敗」
+# 能夠分開呈現，而不是一律猜成 0。
+CONVERSATION_SOURCE_ROOTS = {
+    "codex": ((".codex", "sessions"), (".codex", "state_5.sqlite")),
+    "claude": ((".claude", "projects"),
+               ("AppData", "Roaming", "Claude", "claude-code-sessions"),
+               ("AppData", "Local", "Packages", "Claude_pzs8sxrjxfjjc", "LocalCache",
+                "Roaming", "Claude", "claude-code-sessions")),
+    "qwen": ((".qwen", "projects"), (".craft-agent", "workspaces")),
+    "kimi": ((".kimi-code", "sessions"),
+              ("AppData", "Roaming", "kimi-desktop", "kimi-agent")),
+}
+CONVERSATION_SOURCE_LABELS = {
+    "codex": "Codex", "claude": "Claude", "qwen": "Qwen", "kimi": "Kimi",
+}
+
+# JSON body 的總上限為 2 MiB；base64 會多約 1/3，所以壓縮檔再收緊。
+# 這些上限是技能說明與少量輔助檔的尺度，不是一般檔案上傳器。
+MAX_SKILL_ARCHIVE_BYTES = 768 * 1024
+MAX_SKILL_UNPACKED_BYTES = 1024 * 1024
+MAX_SKILL_FILE_BYTES = 512 * 1024
+MAX_SKILL_FILES = 80
+MAX_SKILL_PATH_CHARS = 220
+MAX_SKILL_PATH_DEPTH = 8
+MAX_SKILL_ZIP_RATIO = 40
+
+_SKILL_IMPORT_LOCK = threading.Lock()
+_WINDOWS_RESERVED_NAMES = {
+    "con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
+_SENSITIVE_SKILL_NAMES = {
+    ".env", "auth.json", "credentials.json", "credential.json", "secrets.json",
+    "secret.json", "token.json", "tokens.json", "id_rsa", "id_ed25519",
+    "private_key", "private-key", "key.pem", "account.json", "accounts.json",
+    "cookie", "cookies", "cookies.json",
+}
+_NESTED_ARCHIVE_SUFFIXES = {".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz"}
+_PRIVATE_KEY_MARKERS = (
+    b"-----BEGIN PRIVATE KEY-----",
+    b"-----BEGIN RSA PRIVATE KEY-----",
+    b"-----BEGIN EC PRIVATE KEY-----",
+    b"-----BEGIN OPENSSH PRIVATE KEY-----",
+    b"-----BEGIN PGP PRIVATE KEY BLOCK-----",
+)
+_PROVIDER_TOKEN_RE = re.compile(
+    r"(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|"
+    r"AIza[0-9A-Za-z_-]{30,}|AKIA[0-9A-Z]{16}|xai-[A-Za-z0-9_-]{16,})"
+)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?im)[\"']?\b(?:[A-Z0-9_]*(?:API_KEY|ACCESS_TOKEN|AUTH_TOKEN|SECRET|PASSWORD|PRIVATE_KEY))"
+    r"\b[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9_./+=:-]{8,})"
+)
+_PLACEHOLDER_MARKERS = (
+    "example", "placeholder", "replace", "your-", "your_", "changeme", "dummy",
+    "<secret", "${", "process.env", "os.getenv", "%",
+)
+
+
+def _placeholder_secret(value: str) -> bool:
+    folded = value.casefold()
+    return not value or any(marker in folded for marker in _PLACEHOLDER_MARKERS)
+
+
+def _json_contains_secret(value: object) -> bool:
+    if isinstance(value, dict):
+        for raw_key, item in value.items():
+            key = re.sub(r"[^a-z0-9]+", "_", str(raw_key).casefold()).strip("_")
+            compact = key.replace("_", "")
+            sensitive = (compact in {"password", "secret", "token", "apikey", "accesstoken",
+                                     "authtoken", "privatekey", "clientsecret"}
+                         or compact.endswith(("password", "secret", "token", "apikey")))
+            if sensitive and isinstance(item, str) and not _placeholder_secret(item):
+                return True
+            if _json_contains_secret(item):
+                return True
+    elif isinstance(value, list):
+        return any(_json_contains_secret(item) for item in value)
+    return False
+
+
+class SkillPackageError(ValueError):
+    """可直接轉成給新手看的技能包錯誤。"""
+
+    def __init__(self, code: str, message: str, status: int = 400,
+                 help_text: str = "請重新選擇完整的技能資料夾或 ZIP。",
+                 details: dict | None = None):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.help = help_text
+        self.details = details or {}
+
+
+def _skill_roots(home: Path | None = None) -> dict[str, Path]:
+    base = home or Path.home()
+    return {key: base.joinpath(*meta["parts"])
+            for key, meta in SKILL_TARGETS.items()}
+
+
+def _skill_link_like(path: Path) -> bool:
+    """Windows junctions escape roots just like symlinks and must fail closed."""
+    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+
+
+def _relative_skill_root(target: str) -> str:
+    return "/".join(SKILL_TARGETS[target]["parts"])
+
+
+def _sensitive_skill_component(component: str) -> bool:
+    low = component.casefold().rstrip(". ")
+    if low in _SENSITIVE_SKILL_NAMES or low.startswith(".env."):
+        return True
+    stem = Path(low).stem
+    if stem in {"auth", "account", "accounts", "cookie", "cookies", "credential",
+                "credentials", "secret", "secrets", "token", "tokens",
+                "private_key", "private-key"}:
+        return True
+    return Path(low).suffix in {".pfx", ".p12", ".key"}
+
+
+def _safe_package_path(raw: object) -> str:
+    """把來自 JSON/ZIP 的檔名收斂成單一、跨平台的相對路徑。"""
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        raise SkillPackageError("INVALID_PATH", "技能包裡有空白或無效檔名。")
+    if "\\" in raw or raw.startswith(("/", "~")) or re.match(r"^[A-Za-z]:", raw):
+        raise SkillPackageError("PATH_TRAVERSAL", "技能包只能使用資料夾內的相對路徑。")
+    if len(raw) > MAX_SKILL_PATH_CHARS:
+        raise SkillPackageError("PATH_TOO_LONG", "技能包裡有過長的檔名。")
+    raw_parts = raw.split("/")
+    if any(p in ("", ".", "..") for p in raw_parts):
+        raise SkillPackageError("PATH_TRAVERSAL", "技能包包含 ../ 或其他不安全路徑。")
+    path = PurePosixPath(raw)
+    parts = path.parts
+    if len(parts) > MAX_SKILL_PATH_DEPTH:
+        raise SkillPackageError("PATH_TOO_DEEP", "技能包的資料夾層級過深。")
+    for part in parts:
+        if ":" in part or part.endswith((".", " ")):
+            raise SkillPackageError("INVALID_PATH", f"不支援的檔名：{part}")
+        if part.split(".", 1)[0].casefold() in _WINDOWS_RESERVED_NAMES:
+            raise SkillPackageError("INVALID_PATH", f"不支援的檔名：{part}")
+        if _sensitive_skill_component(part):
+            raise SkillPackageError(
+                "SENSITIVE_FILENAME", f"技能包不可包含憑證或私鑰檔名：{part}",
+                help_text="請移除憑證、token、.env 與私鑰；技能只能引用安全的憑證位置。")
+        if Path(part.casefold()).suffix in _NESTED_ARCHIVE_SUFFIXES:
+            raise SkillPackageError("NESTED_ARCHIVE", f"技能包裡不可再嵌套壓縮檔：{part}")
+    return path.as_posix()
+
+
+def _decode_skill_bytes(value: object, *, field: str, allow_empty: bool = False) -> bytes:
+    if not isinstance(value, str) or (not value and not allow_empty):
+        raise SkillPackageError("INVALID_BASE64", f"{field} 沒有可讀取的 base64 內容。")
+    if value.startswith("data:"):
+        marker = ";base64,"
+        if marker not in value:
+            raise SkillPackageError("INVALID_BASE64", f"{field} 不是 base64 資料。")
+        value = value.split(marker, 1)[1]
+    # 先用 base64 長度估算原始大小，避免先配置一個過大 bytes
+    # 才說它超限。ZIP 與目錄檔案都不可能合法地超過 1 MiB。
+    if len(value) > ((MAX_SKILL_UNPACKED_BYTES + 2) // 3 * 4 + 8):
+        raise SkillPackageError("PACKAGE_TOO_LARGE", f"{field} 超過技能包上限。", 413)
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        raise SkillPackageError("INVALID_BASE64", f"{field} 的 base64 內容已損壞。")
+
+
+def _add_skill_file(files: dict[str, bytes], raw_path: object, data: bytes) -> None:
+    path = _safe_package_path(raw_path)
+    folded = path.casefold()
+    if any(existing.casefold() == folded for existing in files):
+        raise SkillPackageError("DUPLICATE_PATH", f"技能包有重複檔案：{path}")
+    if len(files) >= MAX_SKILL_FILES:
+        raise SkillPackageError("TOO_MANY_FILES", f"技能包最多 {MAX_SKILL_FILES} 個檔案。", 413)
+    if len(data) > MAX_SKILL_FILE_BYTES:
+        raise SkillPackageError("FILE_TOO_LARGE", f"檔案 {path} 超過單檔上限。", 413)
+    if sum(len(v) for v in files.values()) + len(data) > MAX_SKILL_UNPACKED_BYTES:
+        raise SkillPackageError("PACKAGE_TOO_LARGE", "技能包解壓後超過 1 MiB 上限。", 413)
+    upper = data.upper()
+    if any(marker in upper for marker in _PRIVATE_KEY_MARKERS):
+        raise SkillPackageError(
+            "PRIVATE_KEY_CONTENT", f"檔案 {path} 含私鑰內容，已停止匯入。",
+            help_text="請移除私鑰與憑證內容；技能只能引用安全的憑證位置。",
+        )
+    text = data.decode("utf-8", errors="ignore")
+    assignments = (match.group(1) for match in _SECRET_ASSIGNMENT_RE.finditer(text))
+    json_secret = False
+    if Path(path).suffix.casefold() == ".json":
+        try:
+            json_secret = _json_contains_secret(json.loads(text))
+        except (json.JSONDecodeError, UnicodeError):
+            pass
+    if (_PROVIDER_TOKEN_RE.search(text) or json_secret
+            or any(not _placeholder_secret(value) for value in assignments)):
+        raise SkillPackageError(
+            "SECRET_CONTENT", f"檔案 {path} 疑似包含明文金鑰、token 或密碼，已停止匯入。",
+            help_text="請移除明文憑證，改成只引用環境變數或安全的憑證位置。",
+        )
+    files[path] = data
+
+
+def _files_from_zip(encoded: object) -> dict[str, bytes]:
+    raw = _decode_skill_bytes(encoded, field="ZIP")
+    if len(raw) > MAX_SKILL_ARCHIVE_BYTES:
+        raise SkillPackageError("ARCHIVE_TOO_LARGE", "ZIP 壓縮檔超過 768 KiB 上限。", 413)
+    files: dict[str, bytes] = {}
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            infos = archive.infolist()
+            if len(infos) > MAX_SKILL_FILES * 2:
+                raise SkillPackageError("TOO_MANY_FILES", f"技能包最多 {MAX_SKILL_FILES} 個檔案。", 413)
+            for info in infos:
+                path = _safe_package_path(info.filename.rstrip("/"))
+                mode = (info.external_attr >> 16) & 0xFFFF
+                if stat.S_ISLNK(mode):
+                    raise SkillPackageError("SYMLINK_REJECTED", f"技能包不可包含符號連結：{path}")
+                if info.is_dir():
+                    continue
+                # Windows/Python 產生的 ZIP 常只寫 0600 權限，沒有檔案類型位元。
+                # 只有類型位元真的存在時才能拿它擋特殊檔；symlink 已在上面先擋。
+                file_type = stat.S_IFMT(mode)
+                if file_type and file_type != stat.S_IFREG:
+                    raise SkillPackageError("SPECIAL_FILE_REJECTED", f"技能包不可包含特殊檔案：{path}")
+                if info.flag_bits & 0x1:
+                    raise SkillPackageError("ENCRYPTED_ZIP", "不支援加密 ZIP。")
+                if info.file_size > MAX_SKILL_FILE_BYTES:
+                    raise SkillPackageError("FILE_TOO_LARGE", f"檔案 {path} 超過單檔上限。", 413)
+                if info.file_size > max(1, info.compress_size) * MAX_SKILL_ZIP_RATIO:
+                    raise SkillPackageError("ZIP_BOMB", f"檔案 {path} 的壓縮比異常，已停止匯入。", 413)
+                _add_skill_file(files, path, archive.read(info))
+    except SkillPackageError:
+        raise
+    except (zipfile.BadZipFile, RuntimeError, OSError) as exc:
+        raise SkillPackageError("INVALID_ZIP", f"ZIP 無法讀取：{exc}")
+    return files
+
+
+def _files_from_json(entries: object) -> dict[str, bytes]:
+    if not isinstance(entries, list) or not entries:
+        raise SkillPackageError("EMPTY_PACKAGE", "資料夾裡沒有可匯入的檔案。")
+    files: dict[str, bytes] = {}
+    for index, item in enumerate(entries):
+        if not isinstance(item, dict) or item.get("type") in {"symlink", "link"} \
+                or item.get("symlink") or item.get("link"):
+            raise SkillPackageError("SYMLINK_REJECTED", "技能包不可包含符號連結。")
+        raw_path = item.get("path")
+        _safe_package_path(raw_path)  # 先驗檔名，敏感檔連 base64 都不解碼
+        encoded = item.get("data", item.get("contentBase64", item.get("base64")))
+        _add_skill_file(files, raw_path,
+                        _decode_skill_bytes(encoded, field=f"第 {index + 1} 個檔案",
+                                            allow_empty=True))
+    return files
+
+
+def _read_installed_skill_dir(root: Path) -> dict[str, bytes]:
+    if not root.is_dir() or _skill_link_like(root):
+        raise SkillPackageError("SOURCE_NOT_FOUND", "找不到可安全讀取的已安裝技能。", 404)
+    files: dict[str, bytes] = {}
+    try:
+        for item in sorted(root.rglob("*"), key=lambda p: str(p).casefold()):
+            if _skill_link_like(item):
+                raise SkillPackageError("SYMLINK_REJECTED", f"已安裝技能包含符號連結：{item.name}")
+            if item.is_dir():
+                continue
+            if not item.is_file():
+                raise SkillPackageError("SPECIAL_FILE_REJECTED", f"已安裝技能包含特殊檔案：{item.name}")
+            rel = item.relative_to(root).as_posix()
+            _safe_package_path(rel)  # 敏感檔名在讀內容前就擋下
+            if item.stat().st_size > MAX_SKILL_FILE_BYTES:
+                raise SkillPackageError("FILE_TOO_LARGE", f"檔案 {rel} 超過單檔上限。", 413)
+            _add_skill_file(files, rel, item.read_bytes())
+    except SkillPackageError:
+        raise
+    except OSError as exc:
+        raise SkillPackageError("SOURCE_READ_FAILED", f"無法讀取已安裝技能：{exc}", 500)
+    return files
+
+
+def _find_installed_skill(source: object, wanted: object,
+                          home: Path | None = None) -> dict[str, bytes]:
+    if source not in SKILL_TARGETS or not isinstance(wanted, str) or not wanted.strip():
+        raise SkillPackageError("INVALID_SOURCE", "請從技能清單選擇有效的來源。")
+    root = _skill_roots(home)[str(source)]
+    home_path = home or Path.home()
+    _assert_safe_skill_target(root, home_path)
+    if not root.is_dir() or _skill_link_like(root):
+        raise SkillPackageError("SOURCE_NOT_FOUND", "這個工具目前沒有可匯出的技能。", 404)
+    for child in sorted(root.iterdir(), key=lambda p: p.name.casefold()):
+        if not child.is_dir() or _skill_link_like(child):
+            continue
+        skill_file = child / "SKILL.md"
+        try:
+            if not skill_file.is_file() or _skill_link_like(skill_file) \
+                    or skill_file.stat().st_size > MAX_SKILL_FILE_BYTES:
+                continue
+            head = skill_file.read_bytes()[:65536].decode("utf-8-sig", errors="strict")
+        except (OSError, UnicodeError):
+            continue
+        name = rules._frontmatter(head).get("name") or child.name
+        if name.casefold() == wanted.strip().casefold():
+            return _read_installed_skill_dir(child)
+    raise SkillPackageError("SOURCE_NOT_FOUND", f"找不到已安裝技能：{wanted}", 404)
+
+
+def _strip_skill_wrapper(files: dict[str, bytes]) -> dict[str, bytes]:
+    all_skill_paths = [PurePosixPath(p) for p in files
+                       if PurePosixPath(p).name.casefold() == "skill.md"]
+    if "SKILL.md" in files and len(all_skill_paths) == 1:
+        return files
+    skill_paths = [p for p in all_skill_paths if len(p.parts) > 1]
+    if len(skill_paths) != 1 or len(skill_paths[0].parts) != 2:
+        raise SkillPackageError("SKILL_MD_REQUIRED", "技能包根目錄必須有一份 SKILL.md。")
+    wrapper = skill_paths[0].parts[0]
+    if any(PurePosixPath(p).parts[0].casefold() != wrapper.casefold() for p in files):
+        raise SkillPackageError("MULTIPLE_ROOTS", "ZIP 裡只能放一個技能資料夾。")
+    stripped = {PurePosixPath(p).relative_to(PurePosixPath(p).parts[0]).as_posix(): data
+                for p, data in files.items()}
+    if "SKILL.md" not in stripped:
+        raise SkillPackageError("SKILL_MD_CASE", "主說明檔必須正確命名為 SKILL.md。")
+    return stripped
+
+
+def _safe_skill_folder(name: str) -> str:
+    folder = re.sub(r"\s+", "-", unicodedata.normalize("NFKC", name.strip()))
+    if not folder or len(folder) > 80 or folder.startswith(".") or folder.endswith(".") \
+            or any(not (ch.isalnum() or ch in "-_.") for ch in folder):
+        raise SkillPackageError(
+            "INVALID_SKILL_NAME", "SKILL.md 的 name 只能包含文字、數字、- _ .，且不能以點開頭。")
+    if folder.split(".", 1)[0].casefold() in _WINDOWS_RESERVED_NAMES:
+        raise SkillPackageError("INVALID_SKILL_NAME", "SKILL.md 的 name 是 Windows 保留名稱。")
+    return folder
+
+
+def _skill_package(body: object, *, home: Path | None = None) -> dict:
+    if not isinstance(body, dict):
+        raise SkillPackageError("INVALID_REQUEST", "匯入資料必須是 JSON 物件。")
+    kind = body.get("kind")
+    if kind == "zip":
+        files = _files_from_zip(body.get("data", body.get("zipBase64")))
+    elif kind in {"files", "directory"}:
+        files = _files_from_json(body.get("files"))
+    elif kind == "installed":
+        files = _find_installed_skill(body.get("source"), body.get("name"), home)
+    else:
+        raise SkillPackageError("INVALID_KIND", "請選擇 ZIP、資料夾，或已安裝技能。")
+    files = _strip_skill_wrapper(files)
+    try:
+        text = files["SKILL.md"].decode("utf-8-sig", errors="strict").replace("\r\n", "\n")
+    except (KeyError, UnicodeError):
+        raise SkillPackageError("INVALID_SKILL_MD", "SKILL.md 必須是 UTF-8 純文字。")
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---" \
+            or not any(line.strip() == "---" for line in lines[1:]):
+        raise SkillPackageError("INVALID_FRONTMATTER", "SKILL.md 開頭必須有完整的 YAML frontmatter。")
+    fm = rules._frontmatter(text)
+    name = fm.get("name", "").strip()
+    description = fm.get("description", "").strip()
+    if not name or not description or description in {">", "|", ">-", "|-", ">+", "|+"}:
+        raise SkillPackageError("INVALID_FRONTMATTER", "SKILL.md frontmatter 必須同時有 name 與 description。")
+    if len(description) > 2000:
+        raise SkillPackageError("DESCRIPTION_TOO_LONG", "技能 description 過長，請收斂到 2,000 字以內。")
+    folder = _safe_skill_folder(name)
+    return {"name": name, "description": description, "folder": folder,
+            "files": files, "fileCount": len(files),
+            "totalBytes": sum(len(v) for v in files.values()),
+            "digest": _skill_digest(files)}
+
+
+def _skill_digest(files: dict[str, bytes]) -> str:
+    """技能版本包含所有檔案；不能只看 SKILL.md 而漏掉被換掉的 script。"""
+    digest = hashlib.sha256()
+    for path in sorted(files, key=str.casefold):
+        digest.update(path.casefold().encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update(files[path])
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def _skill_summary(package: dict) -> dict:
+    return {key: package[key] for key in
+            ("name", "description", "folder", "fileCount", "totalBytes", "digest")} | {
+                "files": sorted(package["files"], key=str.casefold),
+            }
+
+
+def _existing_skill_dir(root: Path, folder: str) -> Path | None:
+    if not root.is_dir() or _skill_link_like(root):
+        return None
+    try:
+        return next((p for p in root.iterdir()
+                     if p.is_dir() and not _skill_link_like(p)
+                     and p.name.casefold() == folder.casefold()), None)
+    except OSError:
+        return None
+
+
+def _governance_name_state(package: dict, home: Path) -> dict | None:
+    """治理技能名稱跨所有 AI 保留，避免工具根以同名內容冒充治理規則。"""
+    root = _skill_roots(home)["governance"]
+    _assert_safe_skill_target(root, home)
+    if not root.exists():
+        return None
+    if not root.is_dir() or _skill_link_like(root):
+        raise SkillPackageError("UNSAFE_TARGET", "全域治理技能目錄不安全，無法確認保留名稱。", 409)
+    wanted = {package["name"].casefold(), package["folder"].casefold()}
+    try:
+        children = sorted(root.iterdir(), key=lambda item: item.name.casefold())
+    except OSError:
+        raise SkillPackageError("UNSAFE_TARGET", "全域治理技能目錄無法讀取，無法確認保留名稱。", 409)
+    for child in children:
+        if not child.is_dir():
+            continue
+        if _skill_link_like(child):
+            if child.name.casefold() in wanted:
+                return {"status": "conflict", "reason": "名稱已由連結形式的全域治理技能保留"}
+            continue
+        skill_file = child / "SKILL.md"
+        try:
+            if not skill_file.is_file():
+                continue
+            if _skill_link_like(skill_file):
+                if child.name.casefold() in wanted:
+                    return {"status": "conflict", "reason": "名稱已由全域治理技能保留"}
+                continue
+            head = skill_file.read_bytes()[:65536].decode("utf-8-sig", errors="strict")
+        except (OSError, UnicodeError):
+            continue
+        installed_name = (rules._frontmatter(head).get("name") or child.name).strip()
+        if child.name.casefold() not in wanted and installed_name.casefold() not in wanted:
+            continue
+        try:
+            digest = _skill_digest(_read_installed_skill_dir(child))
+        except SkillPackageError:
+            digest = ""
+        same = bool(digest) and digest == package["digest"]
+        return {
+            "status": "installed" if same else "conflict",
+            "reason": ("全域治理已提供相同技能，所有 AI 都會共用"
+                       if same else "名稱與全域治理技能衝突，禁止在單一 AI 目錄冒名"),
+        }
+    return None
+
+
+def _skill_target_states(package: dict, home: Path | None = None) -> list[dict]:
+    states = []
+    home_path = home or Path.home()
+    roots = _skill_roots(home_path)
+    try:
+        governance_state = _governance_name_state(package, home_path)
+    except SkillPackageError as exc:
+        governance_state = {"status": "unavailable", "reason": str(exc)}
+    for target in SKILL_IMPORT_TARGETS:
+        root = roots[target]
+        existing = _existing_skill_dir(root, package["folder"])
+        state = {"id": target, "label": SKILL_TARGETS[target]["label"],
+                 "location": f"{_relative_skill_root(target)}/{package['folder']}"}
+        try:
+            _assert_safe_skill_target(root, home_path)
+            target_safe = not root.exists() or (root.is_dir() and not _skill_link_like(root))
+        except SkillPackageError:
+            target_safe = False
+        if governance_state:
+            state.update(governance_state)
+        elif not target_safe:
+            state["status"] = "unavailable"
+            state["reason"] = "技能目錄不安全或無法使用"
+        elif not existing:
+            state["status"] = "available"
+        else:
+            try:
+                same = _skill_package({"kind": "installed", "source": target,
+                                       "name": package["name"]}, home=home)["digest"] == package["digest"]
+            except SkillPackageError:
+                same = False
+            state["status"] = "installed" if same else "conflict"
+            state["reason"] = ("相同版本已安裝" if same
+                               else "同名技能已存在，內容不同")
+        states.append(state)
+    return states
+
+
+def _skill_choices() -> list[dict]:
+    return [
+        {"id": "select-available-target", "label": "改選尚未安裝的 AI"},
+        {"id": "cancel", "label": "取消，保留現有技能"},
+    ]
+
+
+def _write_skill_stage(stage: Path, package: dict) -> None:
+    for rel, data in package["files"].items():
+        dest = stage.joinpath(*PurePosixPath(rel).parts)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+
+
+def _atomic_skill_rename(stage: Path, destination: Path) -> None:
+    """單一目標的最後一步；獨立函式也讓回滾情境可被測試。"""
+    os.rename(stage, destination)
+
+
+def _assert_safe_skill_target(root: Path, home: Path) -> None:
+    """目標必須真的在 HOME 內，不可透過 symlink/junction 跳到別處。"""
+    try:
+        home_resolved = home.resolve(strict=False)
+        root_resolved = root.resolve(strict=False)
+        root_resolved.relative_to(home_resolved)
+    except (OSError, ValueError):
+        raise SkillPackageError("UNSAFE_TARGET", "技能目錄不在允許的使用者資料夾內。", 409)
+    current = home
+    for part in root.relative_to(home).parts:
+        current = current / part
+        is_junction = getattr(current, "is_junction", lambda: False)
+        if current.exists() and (current.is_symlink() or is_junction()):
+            raise SkillPackageError("UNSAFE_TARGET", "技能目錄不可經過符號連結或 junction。", 409)
+
+
+def _install_skill(package: dict, selected: object,
+                   home: Path | None = None) -> list[dict]:
+    if not isinstance(selected, list) or not selected:
+        raise SkillPackageError("TARGET_REQUIRED", "請至少選擇一個要匯入的 AI。")
+    if any(not isinstance(target, str) for target in selected) \
+            or len(selected) != 1 or len(set(selected)) != len(selected) \
+            or any(target not in SKILL_IMPORT_TARGETS for target in selected):
+        raise SkillPackageError("INVALID_TARGET", "每次只能選擇一個允許的 AI 匯入技能。")
+    home_path = home or Path.home()
+    roots = _skill_roots(home_path)
+    for target in selected:
+        _assert_safe_skill_target(roots[target], home_path)
+    states = {s["id"]: s for s in _skill_target_states(package, home)}
+    conflicts = [{"target": target, "status": states[target]["status"],
+                  "reason": states[target].get("reason", "同名技能已存在")}
+                 for target in selected if states[target]["status"] != "available"]
+    if conflicts:
+        raise SkillPackageError(
+            "SKILL_CONFLICT", "選取的 AI 已有同名技能，本次沒有寫入任何檔案。", 409,
+            help_text="請改選顯示「可匯入」的 AI，或取消以保留原版。",
+            details={"results": conflicts, "choices": _skill_choices()})
+
+    staged: list[tuple[str, Path, Path]] = []
+    committed: list[tuple[str, Path]] = []
+    created_roots: list[Path] = []
+    with _SKILL_IMPORT_LOCK:
+        try:
+            if _governance_name_state(package, home_path):
+                raise SkillPackageError(
+                    "GOVERNANCE_NAME_RESERVED",
+                    "此名稱已由全域治理技能保留，本次沒有寫入任何檔案。", 409,
+                    details={"results": [{"target": selected[0], "status": "conflict",
+                                            "reason": "名稱與全域治理技能衝突"}]},
+                )
+            # 進入鎖後再查一次，避免兩個匯入同時通過預覽。
+            for target in selected:
+                if _existing_skill_dir(roots[target], package["folder"]):
+                    raise SkillPackageError("SKILL_CONFLICT", "同名技能剛剛已被安裝，本次已取消。", 409,
+                                            details={"results": [{"target": target, "status": "conflict"}],
+                                                     "choices": _skill_choices()})
+            for target in selected:
+                root = roots[target]
+                if root.exists() and (not root.is_dir() or _skill_link_like(root)):
+                    raise SkillPackageError("UNSAFE_TARGET", f"{SKILL_TARGETS[target]['label']} 技能目錄不安全。", 409)
+                if not root.exists():
+                    root.mkdir(parents=True, exist_ok=True)
+                    created_roots.append(root)
+                stage = Path(tempfile.mkdtemp(prefix=".skill-import-", dir=root))
+                destination = root / package["folder"]
+                staged.append((target, stage, destination))
+                _write_skill_stage(stage, package)
+            # 逐個 stage 讀回比對。這裡不可走 source/name 索引，
+            # 因為它尚未更名。整個過程只讀檔，不執行其中任何 script。
+            for _, stage, _ in staged:
+                staged_files = _read_installed_skill_dir(stage)
+                checked = _skill_package({"kind": "files", "files": [
+                    {"path": p, "data": base64.b64encode(data).decode("ascii")}
+                    for p, data in staged_files.items()
+                ]})
+                if checked["digest"] != package["digest"]:
+                    raise SkillPackageError("STAGE_VERIFY_FAILED", "技能暫存檔驗證失敗，本次已取消。", 500)
+            for target, stage, destination in staged:
+                if destination.exists():
+                    raise SkillPackageError("SKILL_CONFLICT", "同名技能剛剛已被安裝，本次已取消。", 409)
+                _atomic_skill_rename(stage, destination)
+                committed.append((target, destination))
+        except Exception as exc:
+            rollback_failed = []
+            for _, destination in reversed(committed):
+                try:
+                    shutil.rmtree(destination)
+                except OSError:
+                    rollback_failed.append(str(destination))
+            for _, stage, _ in staged:
+                if stage.exists():
+                    shutil.rmtree(stage, ignore_errors=True)
+            for root in reversed(created_roots):
+                with contextlib.suppress(OSError):
+                    root.rmdir()
+            if rollback_failed:
+                raise SkillPackageError("ROLLBACK_FAILED", "匯入失敗，且有暫存檔無法自動清理。", 500,
+                                        details={"paths": rollback_failed})
+            if isinstance(exc, SkillPackageError):
+                raise
+            raise SkillPackageError("IMPORT_ROLLED_BACK", "匯入失敗；已回復原狀，沒有留下半套技能。", 500)
+    return [{"target": target, "status": "installed",
+             "location": f"{_relative_skill_root(target)}/{package['folder']}"}
+            for target in selected]
+
+
+def _installed_skill_inventory(home: Path | None = None) -> dict:
+    home_path = home or Path.home()
+    roots = _skill_roots(home_path)
+    grouped: dict[str, dict] = {}
+    target_counts = {target: 0 for target in SKILL_TARGETS}
+    for target, root in roots.items():
+        try:
+            _assert_safe_skill_target(root, home_path)
+        except SkillPackageError:
+            continue
+        if not root.is_dir() or _skill_link_like(root):
+            continue
+        try:
+            children = sorted(root.iterdir(), key=lambda p: p.name.casefold())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir():
+                continue
+            skill_file = child / "SKILL.md"
+            linked = _skill_link_like(child) or _skill_link_like(skill_file)
+            if not skill_file.is_file():
+                continue
+            text = ""
+            raw = b""
+            if not linked:
+                try:
+                    with skill_file.open("rb") as stream:
+                        raw = stream.read(65536)
+                    text = raw.decode("utf-8-sig", errors="strict")
+                except (OSError, UnicodeError):
+                    text = ""
+            fm = rules._frontmatter(text) if text else {}
+            name = (fm.get("name") or child.name).strip()
+            description = fm.get("description", "").strip()[:600]
+            key = name.casefold()
+            try:
+                digest = None if linked else _skill_digest(_read_installed_skill_dir(child))
+            except SkillPackageError:
+                digest = None
+            rec = grouped.setdefault(key, {"name": name, "description": description,
+                                            "source": target, "installedTargets": [],
+                                            "digests": {}, "folders": {},
+                                            "digestUnavailable": []})
+            rec["installedTargets"].append(target)
+            rec["digests"][target] = digest
+            rec["folders"][target] = child.name
+            if digest is None:
+                rec["digestUnavailable"].append(target)
+            if not rec["description"] and description:
+                rec["description"] = description
+            target_counts[target] += 1
+    compatible = list(SKILL_IMPORT_TARGETS)
+    skills = []
+    for rec in grouped.values():
+        digests = rec.pop("digests")
+        rec.pop("folders")
+        first_digest = next((digest for digest in digests.values() if digest is not None), None)
+        rec["targets"] = compatible
+        rec["conflicts"] = [
+            {"target": target, "reason": "技能完整內容與主要來源不同"}
+            for target, digest in digests.items()
+            if first_digest is not None and digest is not None and digest != first_digest
+        ]
+        skills.append(rec)
+    target_info = []
+    for target, meta in SKILL_TARGETS.items():
+        root = roots[target]
+        read_only = target == "governance"
+        try:
+            _assert_safe_skill_target(root, home_path)
+            available = (not read_only) and (
+                (not root.exists()) or (root.is_dir() and not _skill_link_like(root)))
+        except SkillPackageError:
+            available = False
+        target_info.append({
+            "id": target,
+            "label": meta["label"],
+            "root": _relative_skill_root(target),
+            "installedCount": target_counts[target],
+            "ready": root.is_dir() and available,
+            "readOnly": read_only,
+            # 目錄尚未建立時匯入會建立它；若路徑經過 symlink/junction
+            # 或被非目錄佔用，則一律回報不可用。
+            "available": available,
+        })
+    return {"skills": sorted(skills, key=lambda s: s["name"].casefold()),
+            "targets": target_info}
 
 # 模型路由表：strengths = 適任任務；min_gb = 磁碟完整門檻（低於視為下載中）；ram_gb ≈ 載入需求
 MODEL_TABLE = [
@@ -824,12 +1544,12 @@ _SEARCH_LOCK = threading.Lock()
 
 
 def _conv_text(f: Path):
-    """讀出一份對話的訊息。回傳 [(role, text)]，讀不動就回空。"""
+    """讀出一份對話的訊息。回傳 [(role, text)]；讀壞時回 None。"""
     try:
         st = f.stat()
     except OSError:
-        return []
-    key = (str(f), int(st.st_mtime), st.st_size)
+        return None
+    key = (str(f), st.st_mtime_ns, st.st_size)
     with _SEARCH_LOCK:
         hit = _SEARCH_CACHE.get(key)
         if hit is not None:
@@ -837,7 +1557,7 @@ def _conv_text(f: Path):
     try:
         d = json.loads(f.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
-        return []
+        return None
     msgs = d.get("messages")
     out = [(str(m.get("role") or ""), str(m.get("text") or ""))
            for m in msgs if isinstance(m, dict)] if isinstance(msgs, list) else []
@@ -872,12 +1592,14 @@ def _search_conversations(q: str) -> dict:
 
     conv_dir = DATA_DIR / "conv"
     if not conv_dir.is_dir():
-        return {"ok": True, "q": q, "hits": [], "scanned": 0, "truncated": False}
+        return {"ok": False, "code": "SEARCH_INDEX_UNAVAILABLE",
+                "error": "對話內容索引尚未建立。", "q": q, "hits": [],
+                "scanned": 0, "truncated": False}
 
     pat = re.compile(re.escape(q), re.I)
     needle = q.encode("utf-8")
     needle_lower = q.lower().encode("utf-8")
-    hits, scanned, truncated = [], 0, False
+    hits, scanned, truncated, errors = [], 0, False, 0
     # 先看新的：找東西的人通常在找最近做過的事
     files = sorted(conv_dir.glob("*.json"),
                    key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
@@ -886,12 +1608,19 @@ def _search_conversations(q: str) -> dict:
         try:
             raw = f.read_bytes()
         except OSError:
+            errors += 1
             continue
         # bytes 粗篩：大部分檔案在這裡就被刷掉，不必解碼也不必跑正規表示式
         if needle not in raw and needle_lower not in raw.lower():
             continue
+        messages = _conv_text(f)
+        if messages is None:
+            errors += 1
+            continue
         snippets = []
-        for role, text in _conv_text(f):
+        for role, text in messages:
+            if role not in {"user", "assistant"}:
+                continue
             m = pat.search(text)
             if not m:
                 continue
@@ -904,8 +1633,74 @@ def _search_conversations(q: str) -> dict:
         if len(hits) >= _SEARCH_MAX_HITS:
             truncated = True
             break
+    if scanned and errors >= scanned:
+        return {"ok": False, "code": "SEARCH_CONTENT_UNREADABLE",
+                "error": "對話內容目前無法讀取。", "q": q, "hits": [],
+                "scanned": scanned, "truncated": False, "errorCount": errors}
     return {"ok": True, "q": q, "hits": hits, "scanned": scanned,
-            "truncated": truncated}
+            "truncated": truncated, "partial": errors > 0, "errorCount": errors}
+
+
+def _conversation_source_health(index_data: dict, home: Path | None = None) -> list[dict]:
+    """回報四個同步來源的可讀狀態；不把讀取失敗偽裝成 0 份。"""
+    home_path = home or Path.home()
+    conversations = index_data.get("conversations")
+    if not isinstance(conversations, list):
+        conversations = []
+    rows = []
+    for source, parts_list in CONVERSATION_SOURCE_ROOTS.items():
+        count = sum(
+            1 for item in conversations
+            if isinstance(item, dict) and item.get("tool") == source
+            and item.get("inApp") and not item.get("subagent") and not item.get("dup")
+        )
+        metadata_errors = sum(
+            1 for item in conversations
+            if isinstance(item, dict) and item.get("tool") == source
+            and item.get("metadataErrors") and not item.get("trashed")
+            and not item.get("archived") and not item.get("subagent") and not item.get("dup")
+        )
+        found = False
+        probe_errors = []
+        for parts in parts_list:
+            root = home_path.joinpath(*parts)
+            try:
+                mode = root.stat().st_mode
+                if stat.S_ISDIR(mode):
+                    next(root.iterdir(), None)
+                elif stat.S_ISREG(mode):
+                    with root.open("rb") as stream:
+                        head = stream.read(16)
+                    if root.suffix.casefold() in {".sqlite", ".db"} \
+                            and head != b"SQLite format 3\x00":
+                        raise OSError("invalid sqlite header")
+                else:
+                    raise OSError("unsupported source node")
+                found = True
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                probe_errors.append(type(exc).__name__)
+
+        if probe_errors:
+            status = "error"
+            reason = "對話來源無法讀取；原對話沒有被修改。"
+        elif not found:
+            status = "missing"
+            reason = "找不到這個 AI 的對話資料夾。"
+        elif metadata_errors:
+            status = "warning" if count else "error"
+            reason = "部分側欄資料無法確認。"
+        elif count:
+            status = "ok"
+            reason = ""
+        else:
+            status = "empty"
+            reason = "來源可讀，但尚未找到可在原 AI 開啟的主對話。"
+        rows.append({"id": source, "label": CONVERSATION_SOURCE_LABELS[source],
+                     "status": status, "count": count, "reason": reason,
+                     "errorCount": len(probe_errors) or metadata_errors})
+    return rows
 
 
 def _has_git(cwd: str) -> bool:
@@ -1058,6 +1853,18 @@ def _find_bin(tool: str) -> str:
 
 
 BIN = {t: _find_bin(t) for t in _BIN_CANDIDATES}
+
+
+def _bin_available(tool: str) -> bool:
+    """BIN 的 fallback 工具名字串不等於已安裝；必須有真實檔案或 PATH 命中。"""
+    import shutil
+    value = BIN.get(tool, "")
+    if not value:
+        return False
+    path = Path(value)
+    if path.is_absolute() or path.parent != Path("."):
+        return path.is_file()
+    return shutil.which(value) is not None
 
 
 def sanitize_cwd(cwd: str) -> str:
@@ -2232,7 +3039,7 @@ def enrich_installed(data: dict) -> None:
         if not isinstance(v, dict) or v.get("status") != "unknown":
             continue
         exe = BIN.get(key)
-        if exe and exe != key and Path(exe).exists():
+        if exe and _bin_available(key):
             v["status"] = "idle"
             v["evidence"] = f"已安裝但尚無使用紀錄（{Path(exe).name}）"
 
@@ -2396,9 +3203,11 @@ class Handler(BaseHTTPRequestHandler):
     MAX_BODY = 2 * 1024 * 1024
 
     def _body(self):
+        self._body_error = None
         try:
             n = int(self.headers.get("Content-Length", 0) or 0)
         except ValueError:
+            self._body_error = ("INVALID_CONTENT_LENGTH", "Content-Length 無效。", 400)
             return {}
         if n <= 0:
             return {}
@@ -2410,10 +3219,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not chunk:
                     break
                 remain -= len(chunk)
+            self._body_error = ("REQUEST_TOO_LARGE", "JSON 請求超過 2 MiB 上限。", 413)
             return {}
         try:
             return json.loads(self.rfile.read(n).decode("utf-8"))
         except Exception:
+            self._body_error = ("INVALID_JSON", "無法讀取 JSON，請重新選擇檔案。", 400)
             return {}
 
     def log_message(self, *a):
@@ -2437,7 +3248,7 @@ class Handler(BaseHTTPRequestHandler):
                 if name in ("local", "auto"):
                     continue
                 path = BIN.get(name) or ""
-                if not path or not Path(path).exists():
+                if not path or not _bin_available(name):
                     continue
                 out[name] = path if same else True
             return self._json({"ok": True, "bins": out, "paths": same})
@@ -2506,6 +3317,24 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/api/map":
             return self.do_map()
+        if self.path == "/api/skills":
+            inventory = _installed_skill_inventory()
+            return self._json({
+                "ok": True,
+                "status": "ready",
+                **inventory,
+                "limits": {
+                    "archiveBytes": MAX_SKILL_ARCHIVE_BYTES,
+                    "unpackedBytes": MAX_SKILL_UNPACKED_BYTES,
+                    "fileBytes": MAX_SKILL_FILE_BYTES,
+                    "files": MAX_SKILL_FILES,
+                    "maxArchiveBytes": MAX_SKILL_ARCHIVE_BYTES,
+                    "maxTotalBytes": MAX_SKILL_UNPACKED_BYTES,
+                    "maxFileBytes": MAX_SKILL_FILE_BYTES,
+                    "maxFiles": MAX_SKILL_FILES,
+                },
+                "privacy": "只掃描 SKILL.md 與技能資料夾；不讀取帳號、憑證或 token。",
+            })
         if self.path == "/api/dispatch/batch":
             return self._json({"ok": True, **type(self).BATCH})
         if self.path == "/api/schedules":
@@ -2516,8 +3345,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/dispatch/tools":
             return self.do_dispatch_tools()
         if self.path.split("?", 1)[0] == "/api/search":
+            if not self._same_origin():
+                return self._json({"ok": False, "error": "跨來源請求已拒絕"}, 403)
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            return self._json(_search_conversations((q.get("q") or [""])[0]))
+            result = _search_conversations((q.get("q") or [""])[0])
+            return self._json(result, 200 if result.get("ok") else 503)
         if self.path.split("?", 1)[0] == "/api/dispatch/diff":
             return self.do_dispatch_diff()
         if self.path == "/api/audit":
@@ -2673,7 +3505,16 @@ class Handler(BaseHTTPRequestHandler):
                 with _INDEX_LOCK:
                     r = _run([sys.executable, str(INDEXER)], capture_output=True,
                              text=True, timeout=300, cwd=str(APP_ROOT))
-                return self._json({"ok": r.returncode == 0, "out": (r.stdout or r.stderr)[-500:]})
+                if r.returncode != 0:
+                    return self._json({"ok": False, "error": "對話同步失敗。",
+                                       "out": (r.stdout or r.stderr)[-500:]}, 500)
+                try:
+                    index_data = json.loads(INDEX_JSON.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    return self._json({"ok": False,
+                                       "error": f"同步完成，但新索引無法讀取：{exc}"}, 500)
+                return self._json({"ok": True, "out": (r.stdout or r.stderr)[-500:],
+                                   "sources": _conversation_source_health(index_data)})
             except Exception as e:
                 return self._json({"ok": False, "error": str(e)}, 500)
 
@@ -2759,6 +3600,11 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json({"ok": False, "error": f"地端模型呼叫失敗：{e}"}, 502)
 
+        if self.path == "/api/skills/preview":
+            return self.do_skills_preview()
+        if self.path == "/api/skills/import":
+            return self.do_skills_import()
+
         if self.path == "/api/conv/delete":
             return self.do_conv_delete()
         if self.path == "/api/conv/archive":
@@ -2784,113 +3630,113 @@ class Handler(BaseHTTPRequestHandler):
 
         return self._json({"ok": False, "error": "not found"}, 404)
 
-    # ── 中控台對接總覽：帳號 / 瀏覽器 / 技能 / 全域設定 ──
+    def _skill_error(self, exc: SkillPackageError):
+        payload = {"ok": False,
+                   "status": "conflict" if exc.status == 409 else "invalid",
+                   "code": exc.code, "error": str(exc), "help": exc.help}
+        payload.update(exc.details)
+        return self._json(payload, exc.status)
+
+    def do_skills_preview(self):
+        try:
+            body = self._body()
+            if getattr(self, "_body_error", None):
+                code, message, status = self._body_error
+                raise SkillPackageError(code, message, status)
+            package = _skill_package(body)
+            targets = _skill_target_states(package)
+            has_existing = any(t["status"] != "available" for t in targets)
+            return self._json({
+                "ok": True,
+                "status": "conflict" if has_existing else "ready",
+                "skill": _skill_summary(package),
+                "targets": targets,
+                "choices": _skill_choices() if has_existing else [],
+                "notice": "預覽不會寫入檔案，也不會執行技能裡的程式。",
+            })
+        except SkillPackageError as exc:
+            return self._skill_error(exc)
+
+    def do_skills_import(self):
+        body = self._body()
+        try:
+            if getattr(self, "_body_error", None):
+                code, message, status = self._body_error
+                raise SkillPackageError(code, message, status)
+            package = _skill_package(body)
+            results = _install_skill(package, body.get("targets"))
+            return self._json({"ok": True, "status": "installed",
+                               "skill": _skill_summary(package),
+                               "results": results,
+                               "notice": "技能已安全匯入；未執行其中任何程式。"}, 201)
+        except SkillPackageError as exc:
+            return self._skill_error(exc)
+
+    # ── 中控台對接總覽：工具 / 瀏覽器能力 / 技能 / 設定是否存在 ──
     def do_map(self):
-        import base64
         H = Path.home()
 
-        def jwt_payload(token: str) -> dict:
+        def names(root: Path) -> list[str]:
             try:
-                seg = token.split(".")[1]
-                seg += "=" * (-len(seg) % 4)
-                return json.loads(base64.urlsafe_b64decode(seg))
-            except Exception:
-                return {}
+                _assert_safe_skill_target(root, H)
+            except SkillPackageError:
+                return []
+            if not root.is_dir() or _skill_link_like(root):
+                return []
+            try:
+                return sorted((p.name for p in root.iterdir()
+                               if p.is_dir() and not _skill_link_like(p)), key=str.casefold)
+            except OSError:
+                return []
 
+        def settings(*items: tuple[str, str]) -> list[dict]:
+            return [{"label": label, "exists": (H / rel).is_file()}
+                    for label, rel in items]
+
+        roots = _skill_roots(H)
+        specs = {
+            "claude": {"browser": "未連接瀏覽器", "settings":
+                       settings(("settings.json", ".claude/settings.json"),
+                                ("CLAUDE.md", ".claude/CLAUDE.md"))},
+            "codex": {"browser": "內建瀏覽器能力", "settings":
+                      settings(("config.toml", ".codex/config.toml"),
+                               ("AGENTS.md", ".codex/AGENTS.md"))},
+            "grok": {"browser": "未連接瀏覽器", "settings":
+                     settings(("autonomy.json", ".grok/autonomy.json"))},
+            "gemini": {"browser": "未連接瀏覽器", "settings":
+                       settings(("settings.json", ".gemini/settings.json"))},
+            "qwen": {"browser": "未連接瀏覽器", "settings":
+                     settings(("QWEN.md", ".qwen/QWEN.md"),
+                              ("output-language.md", ".qwen/output-language.md"))},
+            "kimi": {"browser": "可由桌面應用連接瀏覽器", "settings":
+                     settings(("config.toml", ".kimi-code/config.toml"))},
+            "cursor": {"browser": "未連接瀏覽器", "settings": []},
+        }
+        root_for_tool = {"claude": roots["claude"], "codex": roots["codex"],
+                         "grok": roots["grok"], "qwen": roots["qwen"],
+                         "kimi": roots["kimi"]}
         out = {}
-
-        # Claude
-        acc = {}
-        try:
-            d = json.loads((H / ".claude.json").read_text(encoding="utf-8", errors="ignore"))
-            oa = d.get("oauthAccount", {})
-            acc = {"account": oa.get("emailAddress", ""), "plan": oa.get("organizationType", ""),
-                   "name": oa.get("displayName", "")}
-        except Exception:
-            pass
-        out["claude"] = {"account": acc, "browser": "無",
-                         "skills": sorted(p.name for p in (H / ".claude" / "skills").iterdir() if p.is_dir()) if (H / ".claude" / "skills").exists() else [],
-                         "settings": [f for f in (".claude/settings.json", ".claude/CLAUDE.md") if (H / f).exists()]}
-
-        # Codex（JWT 只取安全欄位）
-        acc = {}
-        try:
-            d = json.loads((H / ".codex" / "auth.json").read_text(encoding="utf-8", errors="ignore"))
-            pl = jwt_payload(d.get("tokens", {}).get("id_token", ""))
-            auth = pl.get("https://api.openai.com/auth", {})
-            acc = {"account": pl.get("email", ""), "plan": f'ChatGPT {auth.get("chatgpt_plan_type", "")}'.strip(),
-                   "until": auth.get("chatgpt_subscription_active_until", "")[:10], "name": pl.get("name", "")}
-        except Exception:
-            pass
-        out["codex"] = {"account": acc, "browser": "內建 CDP 瀏覽器（.codex/browser）",
-                        "skills": sorted(p.name for p in (H / ".codex" / "skills").iterdir() if p.is_dir()) if (H / ".codex" / "skills").exists() else [],
-                        "settings": [f for f in (".codex/config.toml", ".codex/AGENTS.md") if (H / f).exists()]}
-
-        # Grok
-        acc = {}
-        try:
-            d = json.loads((H / ".grok" / "auth.json").read_text(encoding="utf-8", errors="ignore"))
-            inner = next(iter(d.values()), {})
-            acc = {"account": inner.get("email", ""), "plan": inner.get("auth_mode", ""),
-                   "name": f'{inner.get("first_name", "")} {inner.get("last_name", "")}'.strip()}
-        except Exception:
-            pass
-        out["grok"] = {"account": acc, "browser": "無",
-                       "skills": sorted(p.name for p in (H / ".grok" / "skills").iterdir() if p.is_dir()) if (H / ".grok" / "skills").exists() else [],
-                       "settings": [f for f in (".grok/autonomy.json",) if (H / f).exists()]}
-
-        # Gemini
-        acc = {}
-        try:
-            d = json.loads((H / ".gemini" / "google_accounts.json").read_text(encoding="utf-8", errors="ignore"))
-            acc = {"account": d.get("active", "")}
-        except Exception:
-            pass
-        out["gemini"] = {"account": acc, "browser": "無",
-                         "skills": [],
-                         "settings": [f for f in (".gemini/settings.json",) if (H / f).exists()]}
-
-        # Qwen（地端）
-        out["qwen"] = {"account": {"account": "地端鏈（無雲端帳號）", "plan": "免費"},
-                       "browser": "無",
-                       "skills": sorted(p.name for p in (H / ".qwen" / "skills").iterdir() if p.is_dir()) if (H / ".qwen" / "skills").exists() else [],
-                       "settings": [f for f in (".qwen/QWEN.md", ".qwen/output-language.md") if (H / f).exists()]}
-
-        # Kimi
-        kimi_acc = {"account": "Kimi 桌面版（本機登入）", "plan": ""}
-        try:
-            kimi_acc["name"] = (H / ".kimi-code" / "device_id").read_text().strip()[:8] + "…"
-        except Exception:
-            pass
-        out["kimi"] = {"account": kimi_acc,
-                       "browser": "kimi-webbridge → 使用者真實瀏覽器（Chrome/Edge 登入態）",
-                       "skills": sorted(p.name for p in (H / ".kimi-code" / "skills").iterdir() if p.is_dir()) if (H / ".kimi-code" / "skills").exists() else [],
-                       "settings": [f for f in (".kimi-code/config.toml",) if (H / f).exists()]}
-
-        # Cursor
-        out["cursor"] = {"account": {"account": "Cursor（本機）"}, "browser": "無",
-                         "skills": [], "settings": []}
-
-        # 全域治理（.agents）
-        gov = (H / ".agents" / "skills")
-        out["_governance"] = {"skills": sorted(p.name for p in gov.iterdir() if p.is_dir()) if gov.exists() else []}
-        return self._json({"ok": True, "map": out})
+        for tool, spec in specs.items():
+            out[tool] = {
+                "installed": _bin_available(tool),
+                "browser": spec["browser"],
+                "skills": names(root_for_tool[tool]) if tool in root_for_tool else [],
+                "settings": spec["settings"],
+            }
+        out["_governance"] = {"installed": roots["governance"].is_dir(),
+                              "skills": names(roots["governance"]), "settings": []}
+        return self._json({
+            "ok": True,
+            "status": "ready",
+            "privacy": "只檢查工具、技能目錄與設定檔是否存在；未讀取帳號、auth、token 或憑證內容。",
+            "map": out,
+        })
     DISPATCH_TOOLS = {  # tool → argv 模板；直接執行（.cmd 經 cmd /c）
         "claude": lambda task: [BIN["claude"], "-p", task],
         "codex": lambda task: [BIN["codex"], "exec", "--skip-git-repo-check", task],
         "qwen": lambda task: ["cmd", "/c", BIN["qwen"], "-p", task],
-        # ANTIGRAVITY（agy）：--print 是單次非互動，跟 claude -p 同形狀。
-        # 它走的是獨立額度池，所以雲端鏈上多這一條很有價值。
-        #
-        # 兩個旗標都是必要的，實測踩過：
-        #   --dangerously-skip-permissions：非互動模式沒有人可以按同意，
-        #     連「讀工單檔」都會被拒（實測錯誤：user denied permission for read_file）。
-        #     其他無人值守工具本來就是同樣的姿態（qwen 走 --yolo、codex 是 approval never）。
-        #   --print-timeout：預設只有 5 分鐘，真實工單常常不夠。
-        "gemini": lambda task: [BIN["gemini"], "--dangerously-skip-permissions",
-                                "--print-timeout", "30m", "-p", task],
     }
-    # 續談：對同一段對話再補一句。四個無人值守的工具都有這個能力，
+    # 續談：對同一段對話再補一句。三個無人值守的工具都有這個能力，
     # 所以「工作中介入告知」不用改成互動模式也做得到。
     FOLLOWUP_TOOLS = {
         "claude": lambda p: [BIN["claude"], "--continue", "-p", p],
@@ -2903,15 +3749,13 @@ class Handler(BaseHTTPRequestHandler):
         #   · 含換行就整個不執行 —— 貼一段錯誤訊息會靜默失敗
         # 直接給 argv，跟無頭派工那條走一樣的路。
         "qwen": lambda p: [BIN["qwen"], "-c", "-p", p],
-        "gemini": lambda p: [BIN["gemini"], "--dangerously-skip-permissions",
-                             "--print-timeout", "30m", "-c", "-p", p],
     }
-    # 可以被指定的工具名。任何不在這裡面的一律拒絕 —— 見 do_dispatch 的說明。
-    KNOWN_TOOLS = set(BIN) | {"local", "auto"}
     # 只會開一個可見終端、把指令帶進去、然後等人按 Enter 的工具。
     # 它們不是壞掉，是本來就沒有無頭模式 —— 但對「派工」來說差別是致命的：
     # 派出去之後沒有人按，那件事就永遠停在原地，而畫面上它看起來已經派出去了。
     TERMINAL_TOOLS = {"grok", "kimi", "cursor"}
+    # agy/Gemini 只准用在無檔案的一次性推理路由，不得從工作派工 UI 繞過治理。
+    KNOWN_TOOLS = set(DISPATCH_TOOLS) | TERMINAL_TOOLS | {"local", "auto"}
     # 自動路由順序。**只放會自己跑完的工具**（地端由 LM Studio 兜底）。
     #
     # 原本這裡是 [claude, codex, gemini, grok, qwen] —— grok 排在 qwen 前面，
@@ -2922,7 +3766,7 @@ class Handler(BaseHTTPRequestHandler):
     #
     # 要人手動按的工具仍然可以「指名」派工（那是使用者自己的選擇），
     # 但不該由自動路由替他做這個選擇。
-    CLOUD_CHAIN = ["claude", "codex", "gemini", "qwen"]
+    CLOUD_CHAIN = ["claude", "codex", "qwen"]
     DISPATCHES = []  # 派工登錄：{id, tool, task, started, pid, log, mode, reply}
     # 請求執行緒、批次工作執行緒、排程執行緒都會動這份清單再整份寫檔。
     # 沒有鎖的話兩邊同時寫會互相蓋掉 —— 這個專案已經因為登錄被覆蓋而丟過一次歷史。
@@ -3278,7 +4122,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             limited = set()
         usable = [t for t in list(self.DISPATCH_TOOLS) + ["grok", "local"]
-                  if t not in limited and (t in ("local",) or BIN.get(t))]
+                  if t not in limited and (t == "local" or _bin_available(t))]
         if not usable:
             usable = ["local"]
 
@@ -3341,11 +4185,12 @@ class Handler(BaseHTTPRequestHandler):
         limited = self._limited_tools()
         rerouted = None
         if tool == "auto":
-            tool = next((t for t in self.CLOUD_CHAIN if t not in limited), "local")
+            tool = next((t for t in self.CLOUD_CHAIN
+                         if t not in limited and _bin_available(t)), "local")
         elif tool in limited:
             alt = next((t for t in self.CLOUD_CHAIN
                         if t != tool and t not in limited
-                        and t in self.DISPATCH_TOOLS and BIN.get(t)), None)
+                        and t in self.DISPATCH_TOOLS and _bin_available(t)), None)
             if alt:
                 rerouted = {"from": tool, "to": alt, "why": f"{tool} 的額度已經用完"}
                 tool = alt
@@ -3353,6 +4198,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "error":
                                    f"{tool} 的額度已經用完，而其他工具現在也都不能用"
                                    "（限流或沒安裝）。等額度恢復，或改用地端"}, 503)
+
+        if tool != "local" and not _bin_available(tool):
+            return self._json({"ok": False, "error": f"{tool} 尚未安裝或執行檔不可用"}, 503)
 
         # 掛上規範與技能。派出去的 agent 不會自己知道這台機器的不可違反條款，
         # 也不會知道有現成技能可用 —— 工單裸奔的代價太高，所以一律加。
@@ -3887,8 +4735,8 @@ class Handler(BaseHTTPRequestHandler):
         """
         limited = self._limited_tools()
         out = []
-        for tool in ["claude", "codex", "gemini", "qwen", "grok", "kimi", "cursor"]:
-            if not BIN.get(tool):
+        for tool in ["claude", "codex", "qwen", "grok", "kimi", "cursor"]:
+            if not _bin_available(tool):
                 continue          # 這台機器上沒裝，不要列出來給人選
             out.append({
                 "id": tool,
@@ -3900,7 +4748,7 @@ class Handler(BaseHTTPRequestHandler):
                     "mode": "local", "limited": False})
         # auto 現在會挑到誰。畫面上直接寫出來，不要讓人猜。
         pick = next((t for t in self.CLOUD_CHAIN
-                     if t not in limited and BIN.get(t)), "local")
+                     if t not in limited and _bin_available(t)), "local")
         return self._json({"ok": True, "tools": out, "auto": pick,
                            "limited": sorted(limited)})
 
@@ -3994,7 +4842,7 @@ class Handler(BaseHTTPRequestHandler):
             # 挑一個「能無頭跑、有執行檔、而且沒限流」的工具
             pick = next((t for t in self.CLOUD_CHAIN
                          if t != prev_tool and t in self.DISPATCH_TOOLS
-                         and BIN.get(t) and t not in limited), None)
+                         and _bin_available(t) and t not in limited), None)
             if not pick:
                 return self._json({"ok": False, "error":
                                    f"{why}，而其他工具現在也都不能用（限流或沒安裝）。"

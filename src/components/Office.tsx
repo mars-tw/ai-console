@@ -58,22 +58,18 @@ interface Props {
   busyId: string
 }
 
-/**
- * /api/map 與 /api/audit 的回應形狀。
- *
- * 只宣告畫面真的會讀的欄位 —— 後端多回什麼不影響，但少回或改名時
- * 編譯會當場抱怨。原本這兩個都是 any，欄位改名不會有任何警告，
- * 要等使用者看到欄位變成「—」才會發現。
- */
-interface ToolMapEntry {
-  account?: { account?: string; plan?: string; until?: string }
-  browser?: string
-  skills?: string[]
-  settings?: string[]
+interface OfficeSkillTarget {
+  id: string
+  label: string
+  available: boolean
+  installedCount?: number
+  readOnly?: boolean
 }
-type ToolMap = Record<string, ToolMapEntry | undefined> & {
-  /** 跨工具共享的治理技能（.agents） */
-  _governance?: { skills: string[] }
+
+interface OfficeSkillsResponse {
+  ok: boolean
+  skills?: { name: string; targets?: string[]; installedTargets?: string[] }[]
+  targets?: OfficeSkillTarget[]
 }
 
 interface AuditReport {
@@ -125,8 +121,10 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   const [cmdSec, setCmdSec] = useState(0)
   const cmdAbort = useRef<AbortController | null>(null)
   const [cmdLog, setCmdLog] = useState<string[]>([])
-  const [toolMap, setToolMap] = useState<ToolMap | null>(null)
-  const [showMap, setShowMap] = useState(false)
+  const [skillStatus, setSkillStatus] = useState<OfficeSkillsResponse | null>(null)
+  const [showSkills, setShowSkills] = useState(false)
+  const [skillBusy, setSkillBusy] = useState(false)
+  const [skillError, setSkillError] = useState('')
   const [dispatches, setDispatches] = useState<DispatchRecord[]>([])
   const [audit, setAudit] = useState<AuditReport | null>(null)
   const [auditBusy, setAuditBusy] = useState(false)
@@ -151,6 +149,26 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
     fetch('/api/dispatches').then((r) => r.ok ? r.json() : null)
       .then((d) => d?.ok && setDispatches(d.dispatches)).catch(() => {})
   }
+  const loadSkillStatus = async () => {
+    if (skillBusy) return
+    setSkillBusy(true)
+    setSkillError('')
+    try {
+      const response = await fetch('/api/skills')
+      const data = await response.json().catch(() => null) as OfficeSkillsResponse | null
+      if (!response.ok || !data?.ok) throw new Error('目前無法讀取技能狀態')
+      setSkillStatus(data)
+    } catch (error) {
+      setSkillError(error instanceof Error ? error.message : '目前無法讀取技能狀態')
+    } finally {
+      setSkillBusy(false)
+    }
+  }
+  const toggleSkillStatus = () => {
+    const opening = !showSkills
+    setShowSkills(opening)
+    if (opening && !skillStatus) void loadSkillStatus()
+  }
   const runAudit = async () => {
     if (auditBusy) return
     setAuditBusy(true)
@@ -174,8 +192,6 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   }
 
   useEffect(() => {
-    fetch('/api/map').then((r) => r.ok ? r.json() : null)
-      .then((d) => d?.ok && setToolMap(d.map)).catch(() => {})
     refreshDispatches()
     const timer = setInterval(refreshDispatches, 15000)
     return () => clearInterval(timer)
@@ -380,12 +396,10 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
               value={cmdTool}
               onChange={(e) => setCmdTool(e.target.value)}
             >
-              {/* 這份清單要跟辦公室畫面上的龍一致。原本漏了 gemini／kimi／cursor ——
-                  使用者看得到那三隻在走動，想指名交給它們卻在選單裡找不到。 */}
+              {/* agy/Gemini 只供無檔案的一次性推理，不從工作派工 UI 送出。 */}
               <option value="auto">{t('🤖 自動路由')}</option>
               <option value="claude">{t('Claude（無頭）')}</option>
               <option value="codex">{t('Codex（無頭）')}</option>
-              <option value="gemini">{t('ANTIGRAVITY（無頭）')}</option>
               <option value="qwen">{t('Qwen（無頭）')}</option>
               <option value="kimi">{t('Kimi（終端預填）')}</option>
               <option value="grok">{t('Grok（終端預填）')}</option>
@@ -506,46 +520,48 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
         </div>
       </div>
 
-      {/* ── 對接總覽（帳號/瀏覽器/技能/全域設定） ── */}
+      {/* 技能狀態只在使用者明確要求後讀取。這裡不讀帳號、登入或 auth 檔。 */}
       <div className="flex-none border-t border-line bg-panel px-4 py-3">
-        <button className="mb-2 flex items-center gap-2 rounded py-1 text-xs font-medium tracking-widest text-mute hover:text-ink2" onClick={() => setShowMap((v) => !v)}>
-          {showMap ? '▾' : '▸'} {t('🗺️ 對接總覽（哪個工具用哪個帳號、哪個瀏覽器、哪些技能）')}
+        <button
+          className="flex items-center gap-2 rounded py-1 text-xs font-medium tracking-widest text-mute hover:text-ink2"
+          aria-expanded={showSkills}
+          onClick={toggleSkillStatus}
+        >
+          {showSkills ? '▾' : '▸'} {t('🧩 查看 AI 技能狀態')}
         </button>
-        {showMap && toolMap && (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-left text-mute2">
-                  <th className="pb-1 pr-3">工具</th>
-                  <th className="pb-1 pr-3">帳號</th>
-                  <th className="pb-1 pr-3">方案</th>
-                  <th className="pb-1 pr-3">瀏覽器</th>
-                  <th className="pb-1 pr-3">技能</th>
-                  <th className="pb-1">全域設定</th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(CHARS).map(([key, ch]) => {
-                  const m = toolMap[key]
-                  if (!m) return null
+        {showSkills && (
+          <div className="mt-2 rounded-md border border-line bg-elev/40 p-3 text-xs">
+            {skillBusy ? (
+              <p role="status" aria-live="polite" className="text-mute2">{t('正在讀取技能狀態…')}</p>
+            ) : skillError ? (
+              <div role="alert" className="flex flex-wrap items-center gap-2 text-red-600 dark:text-red-400">
+                <span>{skillError}</span>
+                <button className="rounded border border-line px-2 py-1 text-ink2 hover:bg-elev" onClick={() => { setSkillStatus(null); void loadSkillStatus() }}>
+                  {t('重試')}
+                </button>
+              </div>
+            ) : (
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {(skillStatus?.targets || []).map((target) => {
+                  const installed = target.installedCount
+                    ?? (skillStatus?.skills || []).filter((skill) => skill.installedTargets?.includes(target.id)).length
+                  const compatible = (skillStatus?.skills || []).filter((skill) => skill.targets?.includes(target.id)).length
                   return (
-                    <tr key={key} className="border-t border-line text-ink3">
-                      <td className="py-1.5 pr-3 font-medium" style={{ color: tone(ch.color) }}>{ch.name}</td>
-                      <td className="py-1.5 pr-3">{m.account?.account || '—'}</td>
-                      <td className="py-1.5 pr-3">{[m.account?.plan, m.account?.until ? `至 ${m.account.until}` : ''].filter(Boolean).join(' ') || '—'}</td>
-                      <td className="py-1.5 pr-3">{m.browser || '—'}</td>
-                      <td className="py-1.5 pr-3" title={(m.skills || []).join('、')}>{m.skills?.length ?? 0} 個</td>
-                      <td className="py-1.5 text-mute2">{(m.settings || []).join('、') || '—'}</td>
-                    </tr>
+                    <div key={target.id} className="rounded border border-line2 bg-panel px-3 py-2">
+                      <div className="font-medium text-ink2">{t(target.label)}</div>
+                      <div className="mt-0.5 text-mute2">
+                        {target.readOnly
+                          ? t('唯讀來源：已安裝 {installed} 個', { installed })
+                          : target.available
+                            ? t('已安裝 {installed} 個，可相容 {compatible} 個', { installed, compatible })
+                            : t('尚未安裝這個 AI 工具')}
+                      </div>
+                    </div>
                   )
                 })}
-              </tbody>
-            </table>
-            {toolMap._governance && (
-              <div className="mt-2 text-xs text-mute2">
-                全域治理技能（.agents，跨工具共享）：{toolMap._governance.skills.join('、') || '無'}
               </div>
             )}
+            <p className="mt-2 text-mute3">{t('這裡只顯示 AI 工作技能，不包含冒險遊戲的角色技能。匯入新技能請到「AI 技能」頁。')}</p>
           </div>
         )}
       </div>

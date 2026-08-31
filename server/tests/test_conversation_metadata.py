@@ -410,6 +410,8 @@ class TestConversationMetadata(unittest.TestCase):
         self.assertEqual([c["id"] for c in self.read_index()["conversations"]], ["keep"])
 
     def test_refresh持process_lock等metadata交易但父程序不拿shared_lock(self):
+        # fake indexer 回成功時也要像真 indexer 一樣留下可讀的新索引。
+        self.write_index([])
         handler = self.handler({})
         handler.path = "/api/refresh"
         handler._same_origin = lambda: True

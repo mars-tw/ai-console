@@ -210,12 +210,8 @@ function PatchLines({ patch }: { patch: string }) {
   )
 }
 
-/**
- * 可以派工的執行者。
- * 之前這份清單寫死在下拉選單裡，而且漏了 gemini（ANTIGRAVITY）——
- * 後端明明支援，拆解器也會派給它，選單卻選不到，顯示會變空白。
- */
-const TOOLS = ['auto', 'claude', 'codex', 'gemini', 'qwen', 'grok', 'kimi', 'cursor', 'local'] as const
+/** 斷線時的保守 fallback；連上後以 /api/dispatch/tools 的真實可用清單為準。 */
+const TOOLS = ['auto', 'claude', 'codex', 'qwen', 'grok', 'kimi', 'cursor', 'local'] as const
 
 interface SchedJob {
   id: string
@@ -261,6 +257,19 @@ export default function Console() {
   // （辦公室早就這樣做了，這裡一直漏掉：codex 在白底只有 3.20:1）
   const tone = useReadable()
   const [input, setInput] = useState('')
+  const [toolOptions, setToolOptions] = useState<string[]>([...TOOLS])
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch('/api/dispatch/tools', { signal: controller.signal })
+      .then((response) => response.ok ? response.json() : null)
+      .then((data) => {
+        if (!Array.isArray(data?.tools)) return
+        setToolOptions(['auto', ...data.tools.map((item: { id?: unknown }) => String(item.id || ''))
+          .filter((id: string) => id && id !== 'auto')])
+      })
+      .catch(() => {})
+    return () => controller.abort()
+  }, [])
   // 計畫存在 localStorage：切分頁時這個元件會 unmount，
   // 但 runAll 的迴圈還在背景把後續工單派出去。使用者回來看到空白，
   // 會以為沒派成功而重新拆解再派一次 —— 派出去的是會改檔案的 agent，
@@ -503,6 +512,7 @@ export default function Console() {
     const inBatch = new Set(stepIdsForDispatch(list, mode))
     const selected = list.filter((step) => inBatch.has(step.id))
     if (!selected.length) return
+    if (!window.confirm(t('這會真的交給 AI 執行工作，可能讀寫專案檔案。確定要開始嗎？'))) return
     const only = (fn: (x: Step) => Step) =>
       setSteps((s) => mapStepsById(s, inBatch, fn))
 
@@ -884,7 +894,7 @@ export default function Console() {
                     disabled={s.state !== 'idle'}
                     onChange={(e) => editStep(s.id, { tool: e.target.value })}
                   >
-                    {TOOLS.map((tl) => (
+                    {[...new Set([...toolOptions, s.tool])].map((tl) => (
                       <option key={tl} value={tl}>{tl}</option>
                     ))}
                   </select>
@@ -1024,7 +1034,7 @@ export default function Console() {
                 value={draft.tool}
                 onChange={(e) => setDraft({ ...draft, tool: e.target.value })}
               >
-                {TOOLS.map((tl) => <option key={tl} value={tl}>{tl}</option>)}
+                {[...new Set([...toolOptions, draft.tool])].map((tl) => <option key={tl} value={tl}>{tl}</option>)}
               </select>
               <select
                 className="rounded border border-line2 bg-panel px-1 py-0.5"

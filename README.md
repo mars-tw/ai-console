@@ -4,17 +4,25 @@
 
 # AI 控制台 · AI Console
 
-跨 AI 工具的本地對話中樞：統一檢視、去重、搜尋、派工，並用地端模型直接續聊任何一段對話。
+給一般使用者與第一次接觸 AI 的人使用的本地控制台：用白話入口找舊對話、同步四個 AI、直接問地端模型、管理技能，或把工作明確派給 AI 執行。
 附一間會動的像素辦公室，和一套可以邊工作邊玩的小型 MMORPG。
 
-**100% 本地運行，資料不出本機。** 介面支援繁體中文與 English。
+**索引、搜尋、技能預覽與控制介面都在本機執行。**「直接問 AI」只連本機 LM Studio；只有使用者明確派工給雲端 AI CLI 時，內容才會依該工具的服務方式送出。介面支援繁體中文與 English。
 
 > A local hub for every AI CLI on your machine — one searchable inbox for all your
 > conversations, one-click resume in the original working directory, and a local-model
 > chat that continues any thread without burning cloud quota. Ships with a pixel office
 > that visualises each tool as a dragon, and a small single-player MMORPG to idle in.
-> Everything runs on `127.0.0.1`; nothing leaves your machine.
+> The index, search, skill preview, and control UI run on `127.0.0.1`. “Ask AI” uses
+> local LM Studio only; content reaches a cloud provider only when you explicitly dispatch
+> work to that provider's CLI.
 > The UI is available in Traditional Chinese and English.
+
+![新手首頁：四個白話入口](docs/screenshot-home.png)
+
+![四個 AI 的對話同步結果](docs/screenshot-sync.png)
+
+![技能狀態與三步驟安全匯入](docs/screenshot-skills.png)
 
 ![像素辦公室](docs/screenshot-office.png)
 
@@ -24,6 +32,10 @@
 
 ## 功能
 
+- **新手首頁**：第一畫面只問「你現在想做什麼？」並提供「找回舊對話／直接問 AI／交給 AI 執行／管理 AI 技能」四個入口；同步按鈕就在搜尋旁，不要求先懂模型名、CLI 或資料夾路徑
+- **問問題與執行工作完全分開**：「💬 問 AI」只回答、不動檔案、不呼叫工具；「🎙️ 派工主控台」才會真的開始工作，送出前還會再次明說可能讀寫專案檔案
+- **四工具對話同步**：Codex、Claude、Qwen、Kimi 一次掃描，每個來源分別顯示找到幾份、失敗原因與可行修復；停止按鈕會誠實說明只是停止畫面等待，後端可能仍在完成
+- **AI 技能中心**：列出每個 AI 已安裝與相容技能，透過 ZIP、資料夾或既有技能進行三步驟匯入。匯入包一律視為不受信任資料，只檢查與複製，不執行腳本或 hook，不覆寫同名技能；全域治理技能只能作為唯讀來源，不能由新手精靈寫入
 - **統一對話索引**：**掃描全機找出所有 AI 工具的對話紀錄**。判斷依據是檔案內容
   （JSONL 每行是不是帶 role 的訊息、SQLite 有沒有 thread/session/message 表），
   不是寫死的工具名單 —— 所以你裝的工具沒被寫進程式，一樣掃得到
@@ -33,8 +45,8 @@
   側欄搜尋同時比對標題與**全部訊息內容**，命中的片段直接列出來（含前後文與說話者），
   點一下就打開那份對話。實測搜「CP950」標題 0 筆、內容 3 份。
   純掃描不建索引：646 份 12 MB 掃一次約 55 ms，建索引省下的時間還不夠付它會過期的代價
-- **鍵盤操作**：`/` 跳到搜尋、`Esc` 清掉、`Ctrl+1~4` 切分頁、`Ctrl+B` 收合側欄。
-  刻意只做四個 —— 記不住的快捷鍵等於不存在。在輸入框裡打字時完全不攔截
+- **鍵盤操作**：`/` 跳到搜尋、`Esc` 清掉、`Ctrl+1~6` 切分頁、`Ctrl+B` 收合側欄。
+  在輸入框裡打字時不會搶走按鍵
 - **專案資料夾分組**：保留各工具原本的工作目錄結構，ChatGPT 式側欄
 - **去重**：同一 session UUID 出現多份（跨工具副本 / resume 鏈）自動收攏，保留最新正本
 - **時間收納**：一週未用的對話預設收起，保持清單清爽
@@ -44,8 +56,8 @@
 - **主控台派工**：一個輸入框說一句話，系統自動拆成多張工單、決定每張交給哪個 AI CLI，
   再一次派出去。每張工單都會自動掛上這台機器的規範檔路徑與技能目錄，
   要求執行者先讀規範、自己比對 frontmatter 啟用該用的技能，不會裸奔執行。
-  - **你指名誰就是誰**：句子裡寫「用 codex…」「叫 qwen…」「交給 ANTIGRAVITY…」會直接照做，
-    優先於任何自動判斷（中文別名也認得：千問、反重力、agy）
+  - **你指名誰就是誰**：句子裡寫「用 codex…」「叫 qwen…」會直接照做，優先於自動判斷；
+    agy／Gemini 只保留給無檔案的一次性推理，不會從工作派工 UI 繞過治理
   - **一件一件跑**：佇列在伺服器端，前一件的行程真的結束才派下一件 ——
     多個 agent 同時改同一批檔案會互相蓋掉。切到別的分頁或關掉畫面都不影響
   - **看得出有沒有在動**：每一件顯示最後一行輸出與已跑多久，不是只有一個「執行中」
@@ -75,7 +87,7 @@
 - **黑色 / 亮色 / 跟隨系統**：三種主題，選擇會記住
 - **垃圾桶**：不是目前在用的工具、太久沒動、或在原本工具裡已封存的對話，
   預設收進垃圾桶。**檔案完全沒有動**，隨時看得回來，也可以單筆「留著」放回主清單
-- **地端續聊**：選任何對話 → 用 LM Studio 地端模型（如 Qwen3.8-27B）帶著近期上下文直接繼續聊，不依賴雲端額度
+- **地端續聊**：選任何對話 → 用 LM Studio 地端模型（如 Qwen3.8-27B）帶著近期上下文直接繼續聊，不依賴雲端額度。若尚未連上模型，畫面會直接提示「開啟 LM Studio → 載入完整模型 → 啟動 Local Server」，並提供重新檢查按鈕
 - **像素辦公室**：把每個 AI 工具具象化成一隻龍，在俯視像素辦公室裡走動、工作、開會，狀態一眼看得出來
 - **冒險模式**：內建一套小型 MMORPG，可以邊工作邊掛機練功；純單機，clone 下來就能玩
 - **ai-hub 整合**（選配）：讀取 `~/ai-hub/status.json` 顯示各工具即時限流/活動狀態與專案接力標記
@@ -124,11 +136,12 @@ python server/api.py       # 啟動整合伺服器 → http://127.0.0.1:5177/
 
 ```bash
 npm run verify             # 型別 + 靜態檢查 + 前後端測試，一次跑完
-npm test                   # 前後端測試一起跑（381 個）
-npm run test:web           # 只跑前端（vitest，210 個）
-npm run test:py            # 只跑後端（unittest，171 個，純標準庫）
+npm test                   # 前後端測試一起跑（581 個）
+npm run test:web           # 只跑前端（vitest，248 個）
+npm run test:py            # 只跑後端（unittest，333 個，純標準庫）
 npm run typecheck          # 型別檢查（等同 tsc -b）
 npm run lint               # 靜態檢查（零警告）
+npm run pack               # 產生 Windows x64 可攜版到 release/
 ```
 
 > **不要用 `npx tsc --noEmit`。** 根 `tsconfig.json` 是 `"files": []` 的
@@ -161,7 +174,7 @@ pip 依賴，測試不該是第一個引進的。覆蓋的重點是「看程式�
 
 ## ⚔️ 冒險（小型 MMORPG）
 
-第四個分頁，設計成「邊工作邊玩又不無聊」。**純單機**，不需要任何雲端服務或帳號。
+「⚔️ 冒險」分頁設計成「邊工作邊玩又不無聊」。**純單機**，不需要任何雲端服務或帳號。
 
 戰鬥是**回合制**（吞食天地／軒轅劍天之痕那種）：一回合裡你先下令要打誰、用哪招，
 全場再依速度依序出手。不想動手時切成「沉浸自動」，它會自己打 ——
@@ -260,6 +273,9 @@ server/planner.py          # 一句話 → 派工計畫（指名優先、地端�
 server/rules.py            # 工單前置：掛規範與技能目錄，中和偽裝成系統指示的內容
 server/schedule.py         # 定時工作：JSON 存檔 + 一條背景執行緒，30 秒一個 tick
 server/tests/              # 後端測試（unittest，無 pip 依賴）
+src/components/AskAI.tsx   # 只回答問題的地端模型入口，不派工、不動檔案
+src/components/ConversationSync.tsx # 四工具對話同步與逐來源真實狀態
+src/components/SkillCenter.tsx      # 技能盤點、安全預覽、衝突處理與原子匯入
 src/pixel/                 # 像素辦公室引擎：房間、精靈、尋路、狀態機、渲染
 src/rpg/                   # 冒險模式：資料模型、內容表、戰鬥引擎、存檔
 src/                       # React + TypeScript + Tailwind 前端
@@ -290,6 +306,7 @@ src/                       # React + TypeScript + Tailwind 前端
   沒有上限的話一次幾千件會在幾秒內開出幾千個 CLI 行程
 - **對話 id 白名單**：`--resume <id>` 的 id 收斂成 `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`
 - **金鑰只在記憶體裡**傳給 SDK，不印出、不寫進 log
+- **技能包不受信任**：限制檔案數、單檔／總大小、路徑深度與 ZIP 壓縮比；拒絕路徑穿越、symlink/junction、巢狀壓縮檔、敏感憑證檔名、明文金鑰／token／密碼與同名覆寫。預覽與安裝都不執行技能內容；每次只安裝到一個 AI，先寫暫存再原子換入，失敗會清理暫存
 - **宣傳截圖有防洩漏閘門**：`scripts/shot.cjs` 拍之前會把畫面上的絕對路徑
   換成中性佔位字串，然後再掃一次；還找得到路徑就整個中止不拍。
   這種洩漏用肉眼檢查會漏 —— 上一版就漏過一次
