@@ -38,10 +38,17 @@ class TestConversationMetadata(unittest.TestCase):
         self._roots_patch = mock.patch.object(
             api, "_claude_desktop_session_roots", return_value=[self.win32, self.store],
         )
+        # 刪除交易只肯搬「家目錄內」的檔案。測試卡片建在 %TEMP%，而 TEMP
+        # 不一定在家目錄下（這台機器就改到了 E:）—— 不把家目錄跟著指到
+        # 測試根目錄的話，交易會以 400「路徑不在家目錄內」拒收假卡片。
+        self._home_patch = mock.patch.object(
+            api.Path, "home", staticmethod(lambda: self.root))
         self._index_patch.start()
         self._roots_patch.start()
+        self._home_patch.start()
 
     def tearDown(self):
+        self._home_patch.stop()
         self._roots_patch.stop()
         self._index_patch.stop()
         self._tmp.cleanup()

@@ -1,12 +1,18 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from server import api
+# 跟其他測試檔一致：把 server/ 放進 sys.path 直接 import api。
+# 原本的 `from server import api` 只有從專案根執行才 import 得到，
+# 而且會產生第二份 api 模組物件，讓 mock.patch 打不到別的測試用的那份。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import api  # noqa: E402
 
 
 class ConversationSourceHealthTest(unittest.TestCase):
