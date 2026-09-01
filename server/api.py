@@ -802,7 +802,7 @@ _BIN_CANDIDATES = {
     "claude": ["~/.local/bin/claude.exe", "~/.local/bin/claude"],
     "codex": ["~/.codex/plugins/.plugin-appserver/codex.exe", "~/.codex/bin/codex",
               "%LOCALAPPDATA%/Programs/OpenAI/Codex/bin/codex.exe"],
-    "kimi": ["%LOCALAPPDATA%/Programs/kimi/kimi.exe", "~/.local/bin/kimi"],
+    "kimi": ["~/.kimi-code/bin/kimi.exe", "%LOCALAPPDATA%/Programs/kimi/kimi.exe", "~/.local/bin/kimi"],
     "grok": ["~/.grok/bin/grok.exe", "~/.grok/bin/grok"],
     "qwen": ["%APPDATA%/npm/qwen.cmd", "~/.local/bin/qwen"],
     "cursor": ["%LOCALAPPDATA%/Programs/cursor/cursor.exe",
@@ -3735,8 +3735,14 @@ class Handler(BaseHTTPRequestHandler):
         "claude": lambda task: [BIN["claude"], "-p", task],
         "codex": lambda task: [BIN["codex"], "exec", "--skip-git-repo-check", task],
         "qwen": lambda task: ["cmd", "/c", BIN["qwen"], "-p", task],
+        # kimi 的 -p 不能與 --yolo/--auto 併用（會直接 error 退出）；
+        # -p 模式本身就無人值守執行工具（實測含寫檔），也不需要 console。
+        "kimi": lambda task: [BIN["kimi"], "-p", task],
+        # grok 的 -p 是單回合無頭模式；沒有 --always-approve 的話，
+        # 工具呼叫會停在等核准 —— 而無頭模式裡沒有人可以按。
+        "grok": lambda task: [BIN["grok"], "--always-approve", "-p", task],
     }
-    # 續談：對同一段對話再補一句。三個無人值守的工具都有這個能力，
+    # 續談：對同一段對話再補一句。無人值守的工具都有這個能力，
     # 所以「工作中介入告知」不用改成互動模式也做得到。
     FOLLOWUP_TOOLS = {
         "claude": lambda p: [BIN["claude"], "--continue", "-p", p],
@@ -3749,11 +3755,17 @@ class Handler(BaseHTTPRequestHandler):
         #   · 含換行就整個不執行 —— 貼一段錯誤訊息會靜默失敗
         # 直接給 argv，跟無頭派工那條走一樣的路。
         "qwen": lambda p: [BIN["qwen"], "-c", "-p", p],
+        # kimi/grok 的 -c 都是「這個工作目錄的上一段對話」——
+        # 續談必須回到原派工的 cwd（_send_followup 會帶），不然接錯段。
+        "kimi": lambda p: [BIN["kimi"], "-c", "-p", p],
+        "grok": lambda p: [BIN["grok"], "--always-approve", "-c", "-p", p],
     }
     # 只會開一個可見終端、把指令帶進去、然後等人按 Enter 的工具。
-    # 它們不是壞掉，是本來就沒有無頭模式 —— 但對「派工」來說差別是致命的：
-    # 派出去之後沒有人按，那件事就永遠停在原地，而畫面上它看起來已經派出去了。
-    TERMINAL_TOOLS = {"grok", "kimi", "cursor"}
+    # 對「派工」來說這個差別是致命的：派出去之後沒有人按，
+    # 那件事就永遠停在原地，而畫面上它看起來已經派出去了。
+    # kimi（0.36 起 -p）與 grok（--always-approve -p）已實測可無頭執行工具，
+    # 移進 DISPATCH_TOOLS；cursor 的 agent 子命令尚未驗證無頭旗標，先留在這裡。
+    TERMINAL_TOOLS = {"cursor"}
     # agy/Gemini 只准用在無檔案的一次性推理路由，不得從工作派工 UI 繞過治理。
     KNOWN_TOOLS = set(DISPATCH_TOOLS) | TERMINAL_TOOLS | {"local", "auto"}
     # 自動路由順序。**只放會自己跑完的工具**（地端由 LM Studio 兜底）。
@@ -3766,7 +3778,11 @@ class Handler(BaseHTTPRequestHandler):
     #
     # 要人手動按的工具仍然可以「指名」派工（那是使用者自己的選擇），
     # 但不該由自動路由替他做這個選擇。
-    CLOUD_CHAIN = ["claude", "codex", "qwen"]
+    #
+    # kimi／grok 轉無頭之後補進鏈尾：兩者額度都寬（ai-hub/ROUTER.md），
+    # 正好接住「前面的都限流」的那天；grok 排最後，把它的額度留給
+    # 圖片影片主力的角色，不要被文字工單先吃掉。
+    CLOUD_CHAIN = ["claude", "codex", "qwen", "kimi", "grok"]
     DISPATCHES = []  # 派工登錄：{id, tool, task, started, pid, log, mode, reply}
     # 請求執行緒、批次工作執行緒、排程執行緒都會動這份清單再整份寫檔。
     # 沒有鎖的話兩邊同時寫會互相蓋掉 —— 這個專案已經因為登錄被覆蓋而丟過一次歷史。
@@ -4443,8 +4459,11 @@ class Handler(BaseHTTPRequestHandler):
                          "creationflags": subprocess.CREATE_NEW_CONSOLE}
             else:
                 extra = {"creationflags": subprocess.CREATE_NO_WINDOW}
+            # claude/qwen/kimi/grok 的續談旗標都以工作目錄為界（--continue/-c
+            # 是「這個目錄的上一段對話」）。派工時帶了 cwd 的，續談要回到
+            # 同一個目錄，不然接上的是家目錄那段不相干的對話。
             proc = subprocess.Popen(
-                make(prompt), cwd=str(Path.home()), stdout=lf,
+                make(prompt), cwd=d.get("cwd") or str(Path.home()), stdout=lf,
                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **extra)
             lf.close()
         except Exception as e:
@@ -4757,7 +4776,7 @@ class Handler(BaseHTTPRequestHandler):
 
         為什麼需要：「💬 補一句」是用各家的續談旗標（--continue / -c /
         resume --last）再派一次 —— **一定是原本那個 AI 執行**。
-        它撞到額度上限的時候，這條路就斷了；而 kimi 這種只能開終端的工具
+        它撞到額度上限的時候，這條路就斷了；而 cursor 這種只能開終端的工具
         從一開始就沒有這條路。
 
         那正是這個程式該解決的事：對話的脈絡活在原工具裡帶不走，
@@ -4773,9 +4792,9 @@ class Handler(BaseHTTPRequestHandler):
         log = Path(target.get("log", ""))
         tail = _ANSI_RE.sub("", _tail_text(log, 24 * 1024))[-6000:] if log.is_file() else ""
         prev = target.get("tool", "?")
-        # 只開終端的工具（kimi／grok／cursor）不會把產出寫進 log，
-        # 檔案裡只有「啟動時回顯的那份工單」。判準用 rules 的控制標記，
-        # 那是回顯才會有的東西，不是猜的。
+        # 只開終端的工具（cursor，以及舊紀錄裡還是終端模式的 kimi／grok）
+        # 不會把產出寫進 log，檔案裡只有「啟動時回顯的那份工單」。
+        # 判準用 rules 的控制標記，那是回顯才會有的東西，不是猜的。
         echoed = "【執行前置" in tail or "【工單】" in tail
         has_progress = bool(tail) and not echoed
         parts = [
@@ -4824,7 +4843,7 @@ class Handler(BaseHTTPRequestHandler):
         #
         # 「補一句」是用各家的續談旗標再派一次，所以**一定是原本那個 AI 執行**。
         # 兩種情況它接不下去：
-        #   · 沒有續談模式（kimi 只能開終端，沒有無頭續談）
+        #   · 沒有續談模式（cursor 只能開終端，沒有無頭續談）
         #   · 額度用完了 —— 而這正是使用者問的：「額度就用完了怎麼執行」
         # 以前這兩種都只回一句「只能重新派一件」，把問題丟回給使用者，
         # 而他要做的事是把整份工單重打一遍。

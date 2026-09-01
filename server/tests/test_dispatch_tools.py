@@ -70,6 +70,13 @@ class TestCloudChain(unittest.TestCase):
         self.assertNotIn("gemini", api.Handler.FOLLOWUP_TOOLS)
         self.assertNotIn("gemini", api.Handler.KNOWN_TOOLS)
 
+    def test_無頭工具的續談旗標都在(self):
+        # 無頭派工卻沒有續談模式的話，「補一句」會被迫走接力換人 ——
+        # 對話脈絡就丟了。新增無頭工具時兩張表要一起加。
+        for tool in api.Handler.DISPATCH_TOOLS:
+            self.assertIn(tool, api.Handler.FOLLOWUP_TOOLS,
+                          f"{tool} 能無頭派工，卻補不了話")
+
 
 class TestBinAvailability(unittest.TestCase):
     def test_fallback_tool_name_does_not_claim_installed(self):
@@ -117,9 +124,13 @@ class TestDispatchTools(unittest.TestCase):
 
     def test_終端工具要標成終端(self):
         self._status_file()
-        self.available = {"kimi"}
+        self.available = {"cursor", "kimi", "grok"}
         got = {x["id"]: x["mode"] for x in self._call()["tools"]}
-        self.assertEqual(got.get("kimi"), "terminal")
+        self.assertEqual(got.get("cursor"), "terminal")
+        # kimi 0.36 起有 -p、grok 有 --always-approve -p（皆已實測無頭）——
+        # 再標成 terminal 的話，auto 路由會繞過兩個明明能自己跑完的工具
+        self.assertEqual(got.get("kimi"), "headless")
+        self.assertEqual(got.get("grok"), "headless")
         self.assertNotIn("gemini", got, "agy/Gemini 不可從工作派工 UI 繞過治理")
 
     def test_沒裝的工具不列出來(self):
