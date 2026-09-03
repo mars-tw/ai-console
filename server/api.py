@@ -1000,6 +1000,41 @@ def _recycled(pid: int, started: str, now: float = None) -> bool:
     return False
 
 
+# ── 撞額度自動換人 ──────────────────────────────────────
+#
+# 使用者的原話（2026-08-24）：「派工要求程式自動化，我不想每次都消耗 token
+# 在重複的指令上要求我持續派工」。而 2026-09-03 一天之內：codex 撞週額度、
+# qwen 做到第四張撞週額度、cursor 開了終端沒人按 —— 三次都要人手動改派，
+# 每一次都是把同一份工單再送一次。這件事程式自己做得到。
+#
+# 只在「原因是額度」時才自動換人：真正的程式錯誤換一個 AI 再跑一次多半一樣壞，
+# 而且會白花另一份額度；BLOCKED 是規範擋的，換誰都該擋。
+_QUOTA_ISSUE_RE = re.compile(
+    r"quota|usage\s*limit|rate[\s_-]?limit|insufficient_quota|\b429\b|credits?\s+exhaust"
+    r"|額度|限流", re.IGNORECASE)
+# 最多接力兩次：三個工具都撞牆的話，問題不在工具，繼續換只是把額度燒光
+_HANDOFF_MAX_HOPS = 2
+# 終端工具（cursor）派出去多久沒人按 Enter 就算沒人接
+_TERMINAL_STALL_SEC = 10 * 60
+
+
+def _is_quota_issue(issue: str) -> bool:
+    return bool(issue) and bool(_QUOTA_ISSUE_RE.search(issue))
+
+
+def _pick_handoff_tool(prev: str, chain: list, dispatch_tools, limited: set,
+                       available=None) -> str | None:
+    """沿接力鏈挑下一個：不是原工具、能無頭跑、有執行檔、沒限流。"""
+    ok = available or _bin_available
+    for t in chain:
+        if t == prev or t not in dispatch_tools or t in limited:
+            continue
+        if not ok(t):
+            continue
+        return t
+    return None
+
+
 _STAMP_LOCK = threading.Lock()
 
 
@@ -3867,6 +3902,13 @@ class Handler(BaseHTTPRequestHandler):
         })
     DISPATCH_TOOLS = {  # tool → argv 模板；直接執行（.cmd 經 cmd /c）
         "claude": lambda task: [BIN["claude"], "-p", task],
+        # ANTIGRAVITY（agy）：--print 單次非互動。實測（2026-09-03）三種旗標：
+        #   不帶旗標 / --mode accept-edits → status SUCCESS 但一個檔都不寫
+        #   --dangerously-skip-permissions   → 真的建了檔（53 秒、9 萬 input token）
+        # 所以只有最後那種才算「派工」。b98f6cb 曾把它拿掉（怕繞過治理），
+        # 但治理前置是 rules.wrap 寫進每一張工單的，跟工具無關；
+        # 使用者明說「AGY 這種傻的可以先用」——它走獨立額度池，放在接力鏈最前面。
+        "gemini": lambda task: [BIN["gemini"], "--dangerously-skip-permissions", "-p", task],
         "codex": lambda task: [BIN["codex"], "exec", "--skip-git-repo-check", task],
         "qwen": lambda task: ["cmd", "/c", BIN["qwen"], "-p", task],
         # kimi 的 -p 不能與 --yolo/--auto 併用（會直接 error 退出）；
@@ -3880,6 +3922,8 @@ class Handler(BaseHTTPRequestHandler):
     # 所以「工作中介入告知」不用改成互動模式也做得到。
     FOLLOWUP_TOOLS = {
         "claude": lambda p: [BIN["claude"], "--continue", "-p", p],
+        # agy 的 -c 是「接續最近一段對話」；跟 kimi/grok 一樣要回到原 cwd 才接得對
+        "gemini": lambda p: [BIN["gemini"], "--dangerously-skip-permissions", "-c", "-p", p],
         "codex": lambda p: [BIN["codex"], "exec", "resume", "--last",
                             "--skip-git-repo-check", p],
         # 不要用 cmd /c。qwen 是 npm 的 .CMD 包裝殼，經過 cmd.exe 的話
@@ -3900,7 +3944,7 @@ class Handler(BaseHTTPRequestHandler):
     # kimi（0.36 起 -p）與 grok（--always-approve -p）已實測可無頭執行工具，
     # 移進 DISPATCH_TOOLS；cursor 的 agent 子命令尚未驗證無頭旗標，先留在這裡。
     TERMINAL_TOOLS = {"cursor"}
-    # agy/Gemini 只准用在無檔案的一次性推理路由，不得從工作派工 UI 繞過治理。
+    # agy/Gemini：2026-09-03 起可無頭派工（見 DISPATCH_TOOLS 的說明），接力鏈排第一。
     KNOWN_TOOLS = set(DISPATCH_TOOLS) | TERMINAL_TOOLS | {"local", "auto"}
     # 自動路由順序。**只放會自己跑完的工具**（地端由 LM Studio 兜底）。
     #
@@ -3916,7 +3960,13 @@ class Handler(BaseHTTPRequestHandler):
     # kimi／grok 轉無頭之後補進鏈尾：兩者額度都寬（ai-hub/ROUTER.md），
     # 正好接住「前面的都限流」的那天；grok 排最後，把它的額度留給
     # 圖片影片主力的角色，不要被文字工單先吃掉。
-    CLOUD_CHAIN = ["claude", "codex", "qwen", "kimi", "grok"]
+    # 接力順序＝省錢順序。使用者定的規則（2026-09-03）：
+    #   「Claude／Codex 是主要派工平台，優先使用其他 AI 工作，AGY 這種傻的可以先用」
+    # 跟 ROUTER.md 的分級一致：T1 agy／qwen（獨立額度池、免費兜底）、
+    # T2 kimi／grok（額度寬）、T3 codex／claude（週額度，多次撞線）。
+    # 原本 claude 排第一 —— 自動接力會先燒最稀缺的那份額度，正好相反。
+    # grok 排在 kimi 後面：它的額度留給圖片影片主力的角色，不要被文字工單先吃掉。
+    CLOUD_CHAIN = ["gemini", "qwen", "kimi", "grok", "codex", "claude"]
     DISPATCHES = []  # 派工登錄：{id, tool, task, started, pid, log, mode, reply}
     # 請求執行緒、批次工作執行緒、排程執行緒都會動這份清單再整份寫檔。
     # 沒有鎖的話兩邊同時寫會互相蓋掉 —— 這個專案已經因為登錄被覆蓋而丟過一次歷史。
@@ -5059,6 +5109,81 @@ class Handler(BaseHTTPRequestHandler):
         self._save_registry()
         return self._json({"ok": True, "queued": False, "note": f"已送出給 {target['tool']}"})
 
+    def _auto_handoff(self, rows: list) -> None:
+        """撞額度或終端沒人按的派工，自動用同一份工單換下一個工具。
+
+        跟 _flush_pending 同一個樣板：先在鎖裡「認領」（寫上 handedOffTo 佔位），
+        放開鎖再送。不認領的話，主控台與辦公室兩個分頁每 8 秒各打一次
+        /api/dispatches，同一件會被接力兩次 —— 兩個 agent 改同一批檔案。
+
+        接力工單由 _handoff_order 組：帶原始工單、前一個做到哪裡、為什麼換人。
+        新的一筆是獨立紀錄（不覆蓋），原紀錄標 handedOffTo 指過去 ——
+        「這件換了幾手、每手為什麼」本身是要看得到的資訊。
+        """
+        limited = None
+        claimed = []
+        with self._REG_LOCK:
+            for d in rows:
+                if d.get("alive") or d.get("handedOffTo"):
+                    continue
+                why = ""
+                if d.get("outcome") == "error" and _is_quota_issue(d.get("issue") or ""):
+                    why = f"{d.get('tool')} 的額度已經用完（{(d.get('issue') or '')[:60]}）"
+                elif d.get("mode") == "terminal" and d.get("state") == "waiting" \
+                        and not d.get("pid"):
+                    t0 = _stamp_epoch(d.get("started", ""))
+                    if t0 is not None and time.time() - t0 > _TERMINAL_STALL_SEC:
+                        why = f"{d.get('tool')} 開了終端等人按 Enter，{_TERMINAL_STALL_SEC // 60} 分鐘沒有人按"
+                if not why:
+                    continue
+                src = next((x for x in self.DISPATCHES if x.get("id") == d.get("id")), None)
+                if not src or src.get("handedOffTo"):
+                    continue
+                if int(src.get("handoffHops") or 0) >= _HANDOFF_MAX_HOPS:
+                    continue
+                if limited is None:
+                    limited = self._limited_tools()
+                pick = _pick_handoff_tool(src.get("tool", ""), self.CLOUD_CHAIN,
+                                          self.DISPATCH_TOOLS, limited)
+                if not pick:
+                    # 全部都不能用 —— 標起來，畫面會講「等額度恢復」，不要每 8 秒重算一次
+                    src["handedOffTo"] = "none"
+                    src["handoffWhy"] = why + "；其他工具也都限流或沒安裝"
+                    continue
+                src["handedOffTo"] = "…"          # 佔位：認領
+                claimed.append((src, pick, why))
+            if claimed:
+                self._save_registry()
+        for src, pick, why in claimed:
+            payload = {"tool": pick,
+                       "task": self._handoff_order(src, "", why)}
+            if src.get("cwd"):
+                payload["cwd"] = src["cwd"]
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{PORT}/api/dispatch",
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={"Content-Type": "application/json; charset=utf-8",
+                         "Origin": f"http://127.0.0.1:{PORT}"})
+            new_id = ""
+            try:
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    out = json.loads(r.read())
+                new_id = str(out.get("id") or "") if out.get("ok") else ""
+            except Exception:
+                new_id = ""
+            with self._REG_LOCK:
+                if new_id:
+                    src["handedOffTo"] = new_id
+                    src["handoffWhy"] = why
+                    src["handoffHops"] = int(src.get("handoffHops") or 0) + 1
+                    nxt = next((x for x in self.DISPATCHES if x.get("id") == new_id), None)
+                    if nxt is not None:
+                        nxt["handoffHops"] = src["handoffHops"]
+                        nxt["handoffFrom"] = src.get("id")
+                else:
+                    src.pop("handedOffTo", None)     # 送不出去，下一輪再試
+                self._save_registry()
+
     def _flush_pending(self, rows: list) -> None:
         """跑完的那些，把排隊中的續談送出去
 
@@ -5189,6 +5314,8 @@ class Handler(BaseHTTPRequestHandler):
         # 到這個 GET，所以只在同源時才送；跨來源就純粹回報狀態。
         if self._same_origin():
             self._flush_pending(out)
+            # 撞額度／終端沒人按的，自動換下一個工具。也是副作用，同樣只在同源時做。
+            self._auto_handoff(out)
         return self._json({"ok": True, "dispatches": out})
 
 

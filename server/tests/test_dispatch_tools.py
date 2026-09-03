@@ -64,11 +64,16 @@ class TestCloudChain(unittest.TestCase):
         for tool in api.Handler.CLOUD_CHAIN:
             self.assertIn(tool, api.Handler.DISPATCH_TOOLS)
 
-    def test_agy_gemini不在工作派工或接力路由(self):
-        self.assertNotIn("gemini", api.Handler.CLOUD_CHAIN)
-        self.assertNotIn("gemini", api.Handler.DISPATCH_TOOLS)
-        self.assertNotIn("gemini", api.Handler.FOLLOWUP_TOOLS)
-        self.assertNotIn("gemini", api.Handler.KNOWN_TOOLS)
+    def test_agy_gemini在無頭派工裡而且排在接力鏈最前面(self):
+        """政策在 2026-09-03 由使用者反轉：
+        「CLAUDE CODEX 是主要派工平台，優先使用其他 AI 工作，AGY 這種傻的可以先用」。
+        之前這裡釘的是「agy 不進工作派工與接力鏈」（怕繞過治理）——
+        但治理前置是 rules.wrap 寫進每一張工單的，跟工具無關；
+        agy 走獨立額度池，正是接力鏈第一個該試的。
+        實測 agy 只有帶 --dangerously-skip-permissions 的 -p 才會真的寫檔。"""
+        self.assertIn("gemini", api.Handler.DISPATCH_TOOLS)
+        self.assertEqual(api.Handler.CLOUD_CHAIN[0], "gemini")
+        self.assertIn("--dangerously-skip-permissions", api.Handler.DISPATCH_TOOLS["gemini"]("x"))
 
     def test_無頭工具的續談旗標都在(self):
         # 無頭派工卻沒有續談模式的話，「補一句」會被迫走接力換人 ——

@@ -685,6 +685,10 @@ export const EN: Record<string, string> = {
   '🤖 自動（現在會給 {who}）': '🤖 Auto (would use {who})',
   '（額度用完）': ' (out of quota)',
   '（額度用完：{reason}）': ' (out of quota: {reason})',
+  '↪ 沒有工具能接手（都限流或沒安裝），等額度恢復': '↪ No tool can take over (all rate-limited or not installed); waiting for quota',
+  '↪ 正在自動換人…': '↪ Handing off automatically…',
+  '↪ 已自動接力給 {id}': '↪ Handed off automatically to {id}',
+  '↩ 從 {id} 接力而來': '↩ Handed off from {id}',
   '額度狀態無法確認，先當不可用': 'quota status unconfirmed, treated as unavailable for now',
   '標為「額度用完」的工具，確認恢復後會自動解鎖。': 'Tools marked "out of quota" unlock automatically once recovery is confirmed.',
   // 派工完成吐司（App.tsx）：本來就缺翻，這次修吐司一併補上

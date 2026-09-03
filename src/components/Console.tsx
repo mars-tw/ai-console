@@ -79,6 +79,11 @@ type ConsoleDispatch = DispatchRecord & {
   issue?: string
   /** 這一筆的工作目錄在不在 git 裡。不在的話「看改了什麼」按了也沒東西 */
   canDiff?: boolean
+  /** 撞額度／終端沒人按之後，後端自動把同一份工單換給誰做了（"none" = 沒人能接） */
+  handedOffTo?: string
+  handoffWhy?: string
+  /** 這一筆是從哪一筆接力來的 */
+  handoffFrom?: string
 }
 
 interface DiffFile {
@@ -1260,7 +1265,25 @@ export default function Console() {
               {/* 只在「重跑一次有意義」的結果上給重派鈕。
                   已完成的不給 —— 那會變成一顆很容易誤按、而且會真的
                   再花一次錢的按鈕。 */}
-              {!isLive(d) && (d.outcome === 'error' || d.outcome === 'no_changes') && (
+              {/* 後端已經自動換人的，講清楚換給誰、為什麼 —— 不然使用者看到一筆
+                  紅色的失敗，會自己再派一次，跟自動接力的那一筆撞在一起。 */}
+              {d.handedOffTo && (
+                <div className={`ml-6 mt-0.5 text-[10px] ${d.handedOffTo === 'none'
+                  ? 'text-amber-700 dark:text-amber-300' : 'text-sky-700 dark:text-sky-300'}`}
+                  title={d.handoffWhy || ''}>
+                  {d.handedOffTo === 'none'
+                    ? t('↪ 沒有工具能接手（都限流或沒安裝），等額度恢復')
+                    : d.handedOffTo === '…'
+                      ? t('↪ 正在自動換人…')
+                      : t('↪ 已自動接力給 {id}', { id: d.handedOffTo })}
+                </div>
+              )}
+              {d.handoffFrom && (
+                <div className="ml-6 mt-0.5 text-[10px] text-mute3">
+                  {t('↩ 從 {id} 接力而來', { id: d.handoffFrom })}
+                </div>
+              )}
+              {!isLive(d) && !d.handedOffTo && (d.outcome === 'error' || d.outcome === 'no_changes') && (
                 <button
                   className="ml-6 rounded px-1 py-1.5 text-[10px] text-mute2 hover:bg-elev hover:text-ink3 disabled:opacity-50"
                   disabled={!!retryBusy}
