@@ -38,6 +38,8 @@ export type DispatchTool = {
   label: string
   mode: 'headless' | 'terminal' | 'local'
   limited: boolean
+  /** 後端如果給了限流原因就直接顯示；目前 /api/dispatch/tools 沒有這個欄位，會退回通用說明 */
+  reason?: string
 }
 
 /** 下拉裡每個工具後面那句話。差別在「派出去之後還需不需要你」 */
@@ -237,7 +239,12 @@ export default function QuickDispatch({
               </option>
               {tools.map((x) => (
                 <option key={x.id} value={x.id} disabled={x.limited}>
-                  {x.label}{x.limited ? t('（額度用完）') : ` — ${modeNote(x.mode)}`}
+                  {/* 頁尾狀態刻意把限流顯示成「閒置（可用）」（畫面寧可說能用、路由寧可當不能用，
+                      見 api.py `_limited_tools`），不寫原因的話同一畫面兩種說法，
+                      使用者無從判斷到底能不能派 */}
+                  {x.label}{x.limited
+                    ? t('（額度用完：{reason}）', { reason: x.reason || t('額度狀態無法確認，先當不可用') })
+                    : ` — ${modeNote(x.mode)}`}
                 </option>
               ))}
             </select>
@@ -263,6 +270,13 @@ export default function QuickDispatch({
               {sending ? t('正在交付…') : t('開始執行')}
             </button>
           </div>
+          {tools.some((x) => x.limited) && (
+            // 有限流工具時才出現這行：解釋「為什麼不能選」之外，
+            // 也要讓人知道它不是壞掉、不用做任何事就會回來
+            <p className="mt-1.5 text-xs text-mute3">
+              {t('標為「額度用完」的工具，確認恢復後會自動解鎖。')}
+            </p>
+          )}
         </div>
       )}
       {result && (

@@ -12,13 +12,32 @@ type WatchedDispatch = DispatchRecord & {
   issue?: string
 }
 
+/**
+ * 吐司摘要的前處理。工單與錯誤訊息都是原始文字：帶 markdown
+ * （**粗體**、行首 #／-／>、反引號）、還常常是好幾行的長文，
+ * 直接塞進吐司會看到星號原樣顯示、整段擠成一行橫溢出畫面。
+ * 所以在這裡剝掉 markdown 符號、壓成一行、截到 60 字 ——
+ * 吐司只要讓人認出是哪一件派工，完整內容本來就該回主控台看。
+ */
+function cleanSummary(text: string, max = 60): string {
+  const flat = text
+    .split('\n')
+    .map((line) => line.replace(/^[\s#>*-]+/, ''))
+    .join(' ')
+    .replace(/\*\*|__/g, '')
+    .replace(/`/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat
+}
+
 function completionMessage(record: WatchedDispatch): { ok: boolean; summary: string; announcement: string } {
   const failed = record.outcome === 'error' || (record.outcome == null && stateOf(record) === 'failed')
   const summary = failed
-    ? (record.issue?.trim() || t('執行失敗'))
+    ? (cleanSummary(record.issue ?? '') || t('執行失敗'))
     : record.outcome === 'no_changes'
       ? t('跑完了但沒有改到任何檔案')
-      : (record.task || t('任務已完成')).slice(0, 80)
+      : (cleanSummary(record.task ?? '') || t('任務已完成'))
   return {
     ok: !failed,
     summary,

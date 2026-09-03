@@ -8,6 +8,28 @@ import { BASE_H, BASE_W } from '@/pixel/theme'
 import { World, type AgentInput } from '@/pixel/world'
 import type { DispatchRecord, ToolStatus } from '@/types/data'
 
+// pickAt 的命中半徑只有 26px，而龍會到處走、兩隻疊在一起（ANTIGRAVITY
+// 與 QWEN）時等於叫使用者追著移動靶點；點偏一點又什麼都不發生。
+// world.ts 是別的工單的範圍不能動，所以判定在本層放寬：
+//   · 直接命中：半徑放到約一個角色寬（sprite 格 48px），疊在一起取最近的
+//   · 點到空地：兩個角色寬以內改開離點擊點最近的那隻；再遠就不動作 ——
+//     點房間另一頭也跳對話出來，會比沒反應更讓人困惑
+const HIT_RADIUS = 48
+const NEAR_RADIUS = 96
+
+/** 點擊命中：可見角色裡離 (px, py) 最近、且在可接受範圍內的那隻 */
+function pickAgent(world: World, px: number, py: number, radius: number): string | null {
+  let best: string | null = null
+  let bestD = radius
+  for (const a of world.agents) {
+    if (a.hidden) continue
+    // 跟 world.pickAt 同一個基準：角色中心在腳底上方 14px
+    const d = Math.hypot(a.x - px, a.y - py - 14)
+    if (d < bestD) { bestD = d; best = a.key }
+  }
+  return best
+}
+
 interface Props {
   tools: Record<string, ToolStatus>
   dispatches: DispatchRecord[]
@@ -121,14 +143,18 @@ export default function PixelOffice({ tools, dispatches, onPick }: Props) {
         style={{ imageRendering: 'pixelated', cursor: hoverName ? 'pointer' : 'default' }}
         onMouseMove={(e) => {
           const p = toBase(e)
-          const hit = worldRef.current?.pickAt(p.x, p.y) ?? null
+          // hover 用較小的半徑就好 —— 游標提示只要在「點下去會中」的範圍內一致即可，
+          // 用 NEAR_RADIUS 會讓大半個房間都變成 pointer，反而看不出誰才是目標
+          const world = worldRef.current
+          const hit = world ? pickAgent(world, p.x, p.y, HIT_RADIUS) : null
           hoverRef.current = hit
           if (hit !== hoverName) setHoverName(hit)
         }}
         onMouseLeave={() => { hoverRef.current = null; setHoverName(null) }}
         onClick={(e) => {
           const p = toBase(e)
-          const hit = worldRef.current?.pickAt(p.x, p.y)
+          const world = worldRef.current
+          const hit = world ? pickAgent(world, p.x, p.y, NEAR_RADIUS) : null
           if (hit) onPick(hit)
         }}
       />

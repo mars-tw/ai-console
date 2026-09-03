@@ -684,6 +684,13 @@ export const EN: Record<string, string> = {
   '🤖 自動': '🤖 Auto',
   '🤖 自動（現在會給 {who}）': '🤖 Auto (would use {who})',
   '（額度用完）': ' (out of quota)',
+  '（額度用完：{reason}）': ' (out of quota: {reason})',
+  '額度狀態無法確認，先當不可用': 'quota status unconfirmed, treated as unavailable for now',
+  '標為「額度用完」的工具，確認恢復後會自動解鎖。': 'Tools marked "out of quota" unlock automatically once recovery is confirmed.',
+  // 派工完成吐司（App.tsx）：本來就缺翻，這次修吐司一併補上
+  '執行失敗': 'Execution failed',
+  '任務已完成': 'Task finished',
+  '跑完了但沒有改到任何檔案': 'Finished, but no files were changed',
   '會自己跑完': 'runs on its own',
   '要你到終端按一下': 'needs you to press it in a terminal',
   '不燒雲端額度': 'no cloud quota',
