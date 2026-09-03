@@ -168,6 +168,20 @@ function readChatCache(id?: string): ChatMsg[] {
   } catch { return [] }
 }
 
+/**
+ * Kimi CLI 這類工具會把 <system-reminder> 區塊注入對話紀錄：
+ * 那是工具自己的狀態提示，不是對話內容。原文照顯示的話，
+ * 整份對話看起來像「只有人在講話、AI 都沒回」，使用者分不清
+ * 哪些是注入的系統文字。只在顯示層拿掉 —— 送給模型的與存檔的
+ * 仍是原文，顯示層動手腳等於對資料說謊。
+ */
+const SYSTEM_REMINDER_BLOCK = /<system-reminder>[\s\S]*?<\/system-reminder>/g
+
+/** 一則訊息要顯示的文字。拿掉注入區塊後整則變空的，由呼叫端收合成一行小字 */
+function displayMessageText(text: string): string {
+  return text.replace(SYSTEM_REMINDER_BLOCK, '').trim()
+}
+
 /** 標題裡有沒有中文 */
 const HAS_CJK = /[\u4e00-\u9fff]/
 
@@ -959,6 +973,19 @@ export default function Home() {
   }
 
   /**
+   * 這份對話有沒有能帶進續聊的內容。
+   *
+   * 大對話（hasMessages 為 false）控制台本來就沒有複製訊息；
+   * 此時若輸入框還承諾「自動帶入近期訊息當上下文」，送出去的
+   * history 其實是空的，地端模型什麼都沒拿到 —— 不說實話，
+   * 使用者會把答非所問當成模型笨。
+   * detailLoading 期間當作「可能有」：不然載入的瞬間會閃一下
+   * 「沒有可帶入的內容」，訊息載進來又消失，白嚇一跳。
+   */
+  const noContextToImport = !!selected
+    && (!selected.hasMessages || (!detailLoading && !detail?.messages?.length))
+
+  /**
    * 分頁列。抽出來是因為「沒有索引」的畫面也要有它。
    *
    * 原本這裡是 `if (error) return <一行紅字>` 直接把整頁換掉，
@@ -1285,7 +1312,7 @@ export default function Home() {
                           {index.projectTitles[line] || line}
                         </span>
                       )}
-                      {badge && <span className={`min-w-0 shrink truncate rounded-full px-2 py-0.5 text-xs ${badge.cls}`} title={badge.label}>{badge.label}</span>}
+                      {badge && <span className={`min-w-0 shrink truncate rounded-full px-2 py-0.5 text-xs ${badge.cls}`} title={t(badge.label)}>{t(badge.label)}</span>}
                       {hub?.needs_handoff && <span className="min-w-0 shrink truncate rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-950 dark:text-amber-300" title={t('待接力')}>{t('待接力')}</span>}
                       <span className="flex-none text-xs text-mute3">{convs.length}</span>
                     </button>
@@ -1535,12 +1562,24 @@ export default function Home() {
                         {t('已顯示真正最新的 {n} 則訊息；更早內容仍可回原工具查看。', { n: detail.messages.length })}
                       </p>
                     )}
-                    {detail.messages.map((m, i) => (
-                      <div key={i} className={`rounded-lg px-4 py-3 text-sm leading-6 ${m.role === 'user' ? 'ml-12 bg-elev' : 'mr-12 border border-line'}`}>
-                        <div className="mb-1 text-xs text-mute3">{m.role === 'user' ? '你' : selected.toolLabel}{m.ts ? ` · ${new Date(m.ts).toLocaleString('zh-TW')}` : ''}</div>
-                        <div className="whitespace-pre-wrap break-words">{m.text}</div>
-                      </div>
-                    ))}
+                    {detail.messages.map((m, i) => {
+                      const clean = displayMessageText(m.text)
+                      // 整則都是注入區塊時收合成一行小字而不是消失：
+                      // 訊息數對不上，使用者會以為自己漏看了內容。
+                      if (!clean) {
+                        return (
+                          <div key={i} className="px-4 py-1 text-center text-xs text-mute3">
+                            {t('（系統提示，已略過）')}
+                          </div>
+                        )
+                      }
+                      return (
+                        <div key={i} className={`rounded-lg px-4 py-3 text-sm leading-6 ${m.role === 'user' ? 'ml-12 bg-elev' : 'mr-12 border border-line'}`}>
+                          <div className="mb-1 text-xs text-mute3">{m.role === 'user' ? t('你') : selected.toolLabel}{m.ts ? ` · ${new Date(m.ts).toLocaleString('zh-TW')}` : ''}</div>
+                          <div className="whitespace-pre-wrap break-words">{clean}</div>
+                        </div>
+                      )
+                    })}
                     {detailTailState === 'latest' ? (
                       <p role="status" className="text-center text-xs text-mute3">
                         {t('已顯示真正最新的 {n} 則訊息；更早內容仍可回原工具查看。', { n: detail.messages.length })}
@@ -1558,7 +1597,7 @@ export default function Home() {
                     ) : null}
                   </div>
                 ) : (
-                  <p className="text-mute3">找不到匯出的訊息檔。</p>
+                  <p className="text-mute3">{t('找不到匯出的訊息檔。')}</p>
                 )}
 
               </div>
@@ -1582,25 +1621,25 @@ export default function Home() {
                 {apiOk && (
                   <div className="mx-auto w-full max-w-3xl px-5 pb-4 pt-3">
                     <div className="mb-2 flex items-center gap-2">
-                      <span className="text-sm font-medium">💬 用地端模型接續</span>
+                      <span className="text-sm font-medium">{t('💬 用地端模型接續')}</span>
                       <select
                         className="rounded-md border border-line2 bg-panel px-2 py-1 text-xs text-ink2 [&>option]:bg-panel [&>option]:text-ink2"
                         value={chatModel}
                         onChange={(e) => setChatModel(e.target.value)}
                       >
-                        <option value="auto">🤖 自動（依狀態路由）</option>
+                        <option value="auto">{t('🤖 自動（依狀態路由）')}</option>
                         {models.map((m) => <option key={m} value={m}>{m}</option>)}
                       </select>
                       {chatMsgs.length === 0 && detail?.messages?.length ? (
                         <button className="rounded-md border border-line px-2 py-1 text-xs hover:bg-elev" onClick={seedChat}>
-                          載入近期訊息當上下文
+                          {t('載入近期訊息當上下文')}
                         </button>
                       ) : chatMsgs.length > 0 && (
-                        <span className="text-xs text-mute3">上下文 {chatMsgs.length} 則</span>
+                        <span className="text-xs text-mute3">{t('上下文 {n} 則', { n: chatMsgs.length })}</span>
                       )}
                       {chatMsgs.length > 0 && (
                         <button className="rounded px-2 py-1 text-xs text-mute3 hover:text-ink3" onClick={() => { setChatMsgs([]); if (selected) localStorage.removeItem('ac_chat_' + selected.id) }}>
-                          清空
+                          {t('清空')}
                         </button>
                       )}
                     </div>
@@ -1614,18 +1653,28 @@ export default function Home() {
                         aria-label={t('地端續聊訊息')}
                         className="mb-2 flex max-h-64 flex-col gap-2 overflow-y-auto rounded-md bg-elev p-3"
                       >
-                        {chatMsgs.map((m, i) => (
-                          <div key={i} className={`rounded-lg px-3 py-2 text-sm ${m.role === 'user' ? 'ml-10 bg-white' : 'mr-10 border border-line bg-white'}`}>
-                            {/* 帶入的舊訊息（有 who）顯示原來說話的工具與原時間戳；
-                                只有地端真的回覆的那幾則才標目前模型 ——
-                                全部標成目前模型，舊的雲端長文看起來就像地端模型說的 */}
-                            <div className="mb-0.5 text-xs text-mute3">
-                              {m.role === 'user' ? '你' : (m.who || (chatModel === 'auto' ? (routedModel || '自動') : chatModel))}
-                              {m.ts ? ` · ${new Date(m.ts).toLocaleString('zh-TW')}` : ''}
+                        {chatMsgs.map((m, i) => {
+                          const clean = displayMessageText(m.text)
+                          if (!clean) {
+                            return (
+                              <div key={i} className="px-3 py-1 text-center text-xs text-mute3">
+                                {t('（系統提示，已略過）')}
+                              </div>
+                            )
+                          }
+                          return (
+                            <div key={i} className={`rounded-lg px-3 py-2 text-sm ${m.role === 'user' ? 'ml-10 bg-white' : 'mr-10 border border-line bg-white'}`}>
+                              {/* 帶入的舊訊息（有 who）顯示原來說話的工具與原時間戳；
+                                  只有地端真的回覆的那幾則才標目前模型 ——
+                                  全部標成目前模型，舊的雲端長文看起來就像地端模型說的 */}
+                              <div className="mb-0.5 text-xs text-mute3">
+                                {m.role === 'user' ? t('你') : (m.who || (chatModel === 'auto' ? (routedModel || t('自動')) : chatModel))}
+                                {m.ts ? ` · ${new Date(m.ts).toLocaleString('zh-TW')}` : ''}
+                              </div>
+                              <div className="whitespace-pre-wrap break-words">{clean}</div>
                             </div>
-                            <div className="whitespace-pre-wrap break-words">{m.text}</div>
-                          </div>
-                        ))}
+                          )
+                        })}
                         {chatBusy && (
                           <div className="flex items-center gap-2 text-xs text-mute3">
                             {/* role=log 會在這一列加入時宣告一次；每秒變動的視覺計時
@@ -1646,10 +1695,21 @@ export default function Home() {
                         )}
                       </div>
                     )}
+                    {/* 沒有能帶入的內容時，在輸入框上方再講一次同一件事實：
+                        只改 placeholder，使用者的眼睛不一定停在輸入框裡 */}
+                    {noContextToImport && (
+                      <p className="mb-2 text-xs text-mute3">
+                        {t('這份對話沒有可帶入的內容，地端模型看不到它')}
+                      </p>
+                    )}
                     <div className="flex gap-2">
                       <textarea
                         className="min-h-10 flex-1 rounded-md border border-line bg-transparent px-3 py-2 text-sm outline-none focus:border-line3"
-                        placeholder={chatMsgs.length ? '繼續這段對話…' : '直接輸入會自動帶入近期訊息當上下文'}
+                        placeholder={chatMsgs.length
+                          ? t('繼續這段對話…')
+                          : noContextToImport
+                            ? t('這份對話沒有可帶入的內容，地端模型看不到它')
+                            : t('直接輸入會自動帶入近期訊息當上下文')}
                         value={chatInput}
                         onChange={(e) => setChatInput(e.target.value)}
                         onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat() } }}
@@ -1659,7 +1719,7 @@ export default function Home() {
                         disabled={chatBusy || !chatModel}
                         onClick={sendChat}
                       >
-                        {chatBusy ? '…' : '送出'}
+                        {chatBusy ? '…' : t('送出')}
                       </button>
                     </div>
                     {/* 問問題與交工作是兩個不同意圖。QuickDispatch 有自己的工作草稿，
