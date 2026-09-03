@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -410,6 +411,85 @@ class TestFullLogScan(unittest.TestCase):
         self.assertEqual(api._scan_log(log, log.stat().st_size, "")["outcome"], "error")
         log.write_text("乾淨的新紀錄\n", encoding="utf-8")
         self.assertEqual(api._scan_log(log, log.stat().st_size, "")["outcome"], "ok")
+
+
+class TestQuotaExhausted(unittest.TestCase):
+    """qwen（Token Plan）撞週額度時的那一行，一字不改（2026-09-03 實錄）。
+
+    當時判定器回 ok、狀態偵測也沒把 qwen 標成限流：失敗樣式要求片語後
+    最多 60 字就換行，這一行有一百多字。後果是派工路由繼續把工單送給 qwen，
+    每一張都「成功」地什麼都沒做 —— 這正是判定器存在的理由，
+    而它在一個真實的額度訊息上是壞的。
+    """
+
+    QWEN_QUOTA = (
+        "Quota exhausted: Your token-plan 1-week quota has been exhausted. "
+        "The quota will reset at 09-07 02:01:00 UTC.\n"
+        "Please retry after the reset time, or switch to another API key / auth method. "
+        "(cause: insufficient_quota: 429 Your token-plan 1-week quota has been exhausted. "
+        "The quota will reset at 09-07 02:01:00 UTC.)\n"
+    )
+
+    def test_整行照抄要判成失敗(self):
+        got = api._parse_outcome_text(self.QWEN_QUOTA)
+        self.assertEqual(got["outcome"], "error")
+        self.assertIn("uota", got["issue"])
+
+    def test_只有機器代碼也要認得(self):
+        got = api._parse_outcome_text("(cause: insufficient_quota: 429)\n")
+        self.assertEqual(got["outcome"], "error")
+
+    def test_中間隔字的說法也要認得(self):
+        for line in ("the weekly quota has been exhausted",
+                     "quota is exhausted for this key"):
+            with self.subTest(line=line):
+                self.assertEqual(api._parse_outcome_text(line)["outcome"], "error")
+
+    def test_工單裡提到當成範例不算(self):
+        """工單本文會進 log 開頭；講到「quota exhausted 是範例」不能變成失敗"""
+        benign = "說明文件：Quota exhausted 這句是歷史範例，並非本次執行。\n"
+        self.assertEqual(api._parse_outcome_text(benign)["outcome"], "ok")
+
+    # ── 恢復時間：判成失敗只是一半，狀態偵測還要拿得到恢復時間才會標限流 ──
+    #
+    # detect_rate_limits 刻意「沒有恢復時間就不標」（沒證據證明現在還在限流，
+    # 寧可讓它再被派一次工）。所以 qwen 的「reset at 09-07 02:01:00 UTC」
+    # 抓不到的話，判定器即使回 error，路由還是會繼續把工單送給它。
+
+    def test_qwen的恢復時間抓得到並轉成本地時間(self):
+        m = api.RESET_RE.search(self.QWEN_QUOTA)
+        self.assertIsNotNone(m, "RESET_RE 沒抓到 09-07 02:01:00 UTC")
+        got = api._fmt_reset(m.group(1))
+        import datetime as dt
+        expect = (dt.datetime(dt.datetime.now().year, 9, 7, 2, 1, tzinfo=dt.timezone.utc)
+                  .astimezone().replace(tzinfo=None).strftime("%m/%d %H:%M"))
+        self.assertEqual(got, expect)      # 這台機器是 UTC+8，會是 09/07 10:01
+
+    def test_狀態偵測會把qwen標成限流(self):
+        """端到端：拿這份 log，detect_rate_limits 必須把 qwen 標起來。
+        不標的話 _limited_tools 不會排除它，派工路由繼續送，每張都白跑。"""
+        import datetime as dt
+        tmp = Path(tempfile.mkdtemp(prefix="acquota_"))
+        try:
+            log = tmp / "20260903-163114_qwen.log"
+            log.write_text(self.QWEN_QUOTA, encoding="utf-8")
+            data = {"tools": {"qwen": {"status": "active", "rate_limited": False}}}
+            # 恢復時間 09-07 相對於「今年 9/3」是未來；用假的 now 釘住，
+            # 不然這個測試明年九月會開始失敗
+            fake_now = dt.datetime(dt.datetime.now().year, 9, 3, 16, 0)
+            class FakeDT(dt.datetime):
+                @classmethod
+                def now(cls, tz=None): return fake_now
+            with mock.patch.object(api, "_latest_log_per_tool", return_value={"qwen": log}), \
+                 mock.patch.object(api._dt, "datetime", FakeDT):
+                api.detect_rate_limits(data)
+            q = data["tools"]["qwen"]
+            self.assertTrue(q.get("rate_limited"))
+            self.assertEqual(q.get("status"), "rate_limited")
+            self.assertTrue(q.get("reset_at"))
+            self.assertIn("uota", q.get("evidence", ""))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestBlockedIsNotFailure(unittest.TestCase):

@@ -1091,6 +1091,17 @@ _FAIL_PATTERNS = [
     re.compile(r'(?im)^[ \t]*429\s+Too\s+Many\s+Requests\b[^\r\n]*[ \t\r]*$'),
     re.compile(r'(?im)^[ \t]*(?:quota|credits?)\s+exhaust\w*'
                r'[^"\r\n]{0,60}[ \t\r]*$'),
+    # qwen（Token Plan）撞週額度時吐的那一行，實際長這樣（2026-09-03）：
+    #   Quota exhausted: Your token-plan 1-week quota has been exhausted.
+    #   The quota will reset at 09-07 02:01:00 UTC. … (cause: insufficient_quota: 429 …
+    # 上面那條要求片語後最多 60 字就換行，這一行有一百多字，被尾巴上限擋掉；
+    # 而「quota has been exhausted」中間隔了兩個字，`quota\s+exhaust` 也對不上。
+    # 後果不只是畫面：狀態偵測共用這組樣式，qwen 沒被標成限流，
+    # 派工路由繼續把工單送給它，每一張都「成功」地什麼都沒做。
+    re.compile(r'(?im)^[ \t]*quota\s+exhausted\b[^\r\n]*$'),
+    re.compile(r'(?i)\bquota\s+(?:has\s+been\s+|is\s+|was\s+)?exhausted\b[^"\r\n]{0,80}'),
+    # 供應商的機器可讀代碼。不會出現在正常的人話裡，不必限制行首。
+    re.compile(r'(?i)\binsufficient_quota\b[^"\r\n]{0,80}'),
     # 帶嚴重性前綴、而且後面接一整句話的那種。
     #
     # 上面那幾條都要求片語從行首開始、後面最多再 60 個字 —— 那個限制是為了
@@ -3103,6 +3114,11 @@ RESET_RE = re.compile(
     r"(?:try again (?:at|after)|resets? (?:at|on)|available again at)\s+"
     r"([A-Za-z]{3,9}\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4},?\s+\d{1,2}:\d{2}\s*(?:AM|PM)?"
     r"|\d{4}-\d{2}-\d{2}[T ]\d{1,2}:\d{2}"
+    # qwen（Token Plan）的寫法：「The quota will reset at 09-07 02:01:00 UTC.」
+    # 沒有年份、帶秒、標 UTC。抓不到這個的後果：detect_rate_limits 找不到恢復時間
+    # 就不標限流（它刻意這樣設計），於是 qwen 撞了週額度還是一直被派工，
+    # 每一張都「成功」地什麼都沒做 —— 2026-09-03 實際發生。
+    r"|\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:UTC|GMT|Z)?"
     r"|\d{1,2}:\d{2}\s*(?:AM|PM))",
     re.IGNORECASE)
 
@@ -3113,6 +3129,21 @@ _RESET_FORMATS = ("%b %d, %Y %I:%M %p", "%B %d, %Y %I:%M %p",
 
 def _fmt_reset(raw: str) -> str:
     """把工具吐出的時間字串正規化成 MM/DD HH:MM；解析不了就原樣回傳"""
+    # 「09-07 02:01:00 UTC」：沒年份、帶秒、UTC。年份補現在的（跨年由 _parse_reset 處理），
+    # 時區要換成本地 —— 直接拿 02:01 當本地時間會早八小時解鎖，工單又會送進牆裡。
+    # 這段要放在底下 replace("T", " ") 之前：那一行是為了拆 ISO 的 2026-09-07T02:01，
+    # 但它會把 "UTC" 打成 "U C"，這裡就對不上了（第一版就是這樣失敗的）。
+    m = re.fullmatch(r"(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})(?::\d{2})?\s*(UTC|GMT|Z)?",
+                     raw.strip().rstrip("."), re.IGNORECASE)
+    if m:
+        try:
+            when = _dt.datetime(_dt.datetime.now().year, int(m.group(1)), int(m.group(2)),
+                                int(m.group(3)), int(m.group(4)))
+            if m.group(5):
+                when = when.replace(tzinfo=_dt.timezone.utc).astimezone().replace(tzinfo=None)
+            return when.strftime("%m/%d %H:%M")
+        except ValueError:
+            pass
     txt = re.sub(r"(?<=\d)(st|nd|rd|th)", "", raw.strip().rstrip("."))
     txt = txt.replace(",", " ").replace("T", " ")
     txt = re.sub(r"\s+", " ", txt)
