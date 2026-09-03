@@ -995,10 +995,12 @@ def _stamp_epoch(stamp: str):
 _RECYCLED_PIDS: dict = {}       # (pid, started) → True；回收是不可逆的，正向結論可以久留
 
 
-def _recycled(pid: int, started: str, now: float = None) -> bool:
+def _recycled(pid: int, started: str, now: float = None, force: bool = False) -> bool:
     """這個 pid 是不是已經被發給別的行程了。
 
-    只有在派工開始超過 _RECYCLE_AFTER_SEC 之後才會真的去查；
+    只有在派工開始超過 _RECYCLE_AFTER_SEC 之後才會真的去查（force=True 例外：
+    已經按過停止的那件，行程是我們自己殺的，pid 幾分鐘內就可能被發給別人 ——
+    實測被殺掉的 agy 十五分鐘後那個號碼變成 tail.exe，畫面又寫回「執行中」）；
     查不到建立時間一律當作沒被回收 —— 寧可多顯示一會兒「執行中」，
     也不要把還在跑的工作判成結束（那是序列派工壞掉的直接原因）。
 
@@ -1009,7 +1011,7 @@ def _recycled(pid: int, started: str, now: float = None) -> bool:
     if t0 is None:
         return False
     t = now if now is not None else time.time()
-    if t - t0 < _RECYCLE_AFTER_SEC:
+    if not force and t - t0 < _RECYCLE_AFTER_SEC:
         return False
     key = (int(pid), started)
     if _RECYCLED_PIDS.get(key):
@@ -5397,7 +5399,8 @@ class Handler(BaseHTTPRequestHandler):
             # pid 還在 ≠ 我們派的那個還在跑：號碼可能已經被回收給別的程式。
             # 見 _recycled 的說明（八天前的派工顯示執行中，pid 其實是 tailscale）。
             d["alive"] = (bool(d.get("pid")) and int(d["pid"]) in alive_pids
-                          and not _recycled(int(d["pid"]), d.get("started", "")))
+                          and not _recycled(int(d["pid"]), d.get("started", ""),
+                                            force=bool(d.get("stopped"))))
             d["state"] = self._dispatch_state(d, d["alive"])
             log = Path(d.get("log", ""))
             if log.exists():

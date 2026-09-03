@@ -196,5 +196,23 @@ class TestKillTree(unittest.TestCase):
         self.assertNotIn(4242, api._ALIVE_CACHE["pids"])
 
 
+class TestStoppedPidRecycled(unittest.TestCase):
+    """停掉的那件，pid 幾分鐘內就可能被發給別的程式；不能等六小時才肯查。"""
+
+    def _run(self, force):
+        t0 = api.time.time() - 15 * 60
+        started = api.time.strftime("%Y%m%d-%H%M%S", api.time.localtime(t0))
+        api._RECYCLED_PIDS.clear()
+        with mock.patch.object(api, "_proc_created_at", lambda pid, now=None: t0 + 600):
+            return api._recycled(2760, started, force=force)
+
+    def test_停掉的十五分鐘就查_號碼已是別人(self):
+        self.assertTrue(self._run(force=True))
+
+    def test_沒停的維持六小時門(self):
+        """還在跑的工作不能被誤判成結束 —— 那是序列派工壞掉的直接原因"""
+        self.assertFalse(self._run(force=False))
+
+
 if __name__ == "__main__":
     unittest.main()
