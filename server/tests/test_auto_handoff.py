@@ -10,6 +10,9 @@ codex 撞週額度、qwen 做到第四張撞週額度、cursor 開了終端沒�
   1. 接力順序：Claude／Codex 是派工平台不是工人，要排最後（使用者定的規則）
   2. 只在「額度」原因時換人：程式錯誤換誰都一樣壞，BLOCKED 是規範擋的
   3. 認領與上限：同一件不能被接力兩次，換到第三手就停
+  4. 時間門（2026-09-03 17:22 的教訓）：只接「這個伺服器起來之後才派出、六小時內」的；
+     第一版沒有這道門，上線第一次輪詢就把最近 30 筆裡八天前、昨天、今早已人工改派
+     過的舊失敗全部接力出去，六個 agy 同時跑六份舊工單。一輪也只准接一手。
 """
 from __future__ import annotations
 
@@ -95,6 +98,9 @@ class TestAutoHandoff(unittest.TestCase):
         # 換掉的類別屬性要在 tearDown 還原：同一個行程裡後面還有別的測試會起真的 server
         self._orig = {k: api.Handler.__dict__[k] for k in
                       ("DISPATCHES", "_save_registry", "_limited_tools", "_handoff_order")}
+        # 時間門：測試裡的紀錄都當成「這個伺服器起來之後才派出的」
+        self._started_at = api._SERVER_STARTED_AT
+        api._SERVER_STARTED_AT = 0
         api.Handler.DISPATCHES = []
         self.saved = 0
         self.sent = []
@@ -103,11 +109,17 @@ class TestAutoHandoff(unittest.TestCase):
         api.Handler._handoff_order = lambda _self, target, text, why: f"接力：{target['id']}｜{why}"
 
     def tearDown(self):
+        api._SERVER_STARTED_AT = self._started_at
         for k, v in self._orig.items():
             setattr(api.Handler, k, v)
 
+    @staticmethod
+    def _stamp(ago_sec):
+        return time.strftime("%Y%m%d-%H%M%S", time.localtime(time.time() - ago_sec))
+
     def _rec(self, **kw):
-        base = {"id": "20260903-100000", "tool": "codex", "started": "20260903-100000",
+        # 預設五分鐘前派出：夠新、過得了六小時的門
+        base = {"id": "20260903-100000", "tool": "codex", "started": self._stamp(5 * 60),
                 "alive": False, "state": "failed", "outcome": "error",
                 "issue": "ERROR: You've hit your usage limit", "mode": "headless", "pid": 1}
         base.update(kw)
@@ -183,6 +195,39 @@ class TestAutoHandoff(unittest.TestCase):
         rec = self._rec()
         self._run([dict(rec)], new_id="")
         self.assertNotIn("handedOffTo", api.Handler.DISPATCHES[0])
+
+    # ── 時間門：不接歷史 ─────────────────────────────────────────────
+
+    def test_伺服器起來之前派出的不接(self):
+        """上線第一次輪詢把八天前的舊失敗全接出去 —— 只有它親眼看著失敗的才算在飛行中"""
+        api._SERVER_STARTED_AT = time.time() - 60          # 伺服器一分鐘前才起來
+        rec = self._rec(started=self._stamp(5 * 60))       # 這筆五分鐘前就派出了
+        self._run([dict(rec)])
+        self.assertEqual(self.sent, [])
+        self.assertNotIn("handedOffTo", api.Handler.DISPATCHES[0])
+
+    def test_超過六小時的不接(self):
+        rec = self._rec(started=self._stamp(7 * 3600))
+        self._run([dict(rec)])
+        self.assertEqual(self.sent, [])
+
+    def test_沒有時間戳的不接(self):
+        rec = self._rec(started="")
+        self._run([dict(rec)])
+        self.assertEqual(self.sent, [])
+
+    def test_一輪只接一手_下一輪再接第二件(self):
+        """同時撞牆的兩件要一件一件來：一輪爆出五六個行程沒有人看得住"""
+        a = self._rec(id="a")
+        b = self._rec(id="b")
+        self._run([dict(a), dict(b)])
+        self.assertEqual(len(self.sent), 1)
+        done = [x for x in api.Handler.DISPATCHES if x.get("handedOffTo")]
+        self.assertEqual(len(done), 1)
+        # 下一輪：已接的那件被跳過，另一件才接
+        self._run([dict(x) for x in api.Handler.DISPATCHES])
+        self.assertEqual(len(self.sent), 2)
+        self.assertEqual({x["id"] for x in api.Handler.DISPATCHES if x.get("handedOffTo")}, {"a", "b"})
 
 
 if __name__ == "__main__":

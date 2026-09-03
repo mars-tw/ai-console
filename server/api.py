@@ -1016,6 +1016,17 @@ _QUOTA_ISSUE_RE = re.compile(
 _HANDOFF_MAX_HOPS = 2
 # 終端工具（cursor）派出去多久沒人按 Enter 就算沒人接
 _TERMINAL_STALL_SEC = 10 * 60
+# 只接力「這個伺服器起來之後才派出」而且「六小時內」的紀錄。
+#
+# 第一版沒有這兩道門，上線第一次輪詢就把最近 30 筆裡所有「撞過額度」的舊紀錄
+# 全部接力出去 —— 八天前的、昨天的、今天早上已經人工改派過的，一口氣六個 agy
+# 同時跑六份舊工單。那不是接力，是重播歷史。
+# 「伺服器啟動之後」這道門是精確的：只有它親眼看著失敗的才算在飛行中。
+_HANDOFF_MAX_AGE_SEC = 6 * 3600
+_SERVER_STARTED_AT = time.time()
+# 一輪輪詢最多接力一件：同時撞牆的多件本來就該一件一件來（序列派工的理由相同），
+# 而且一輪爆出去五六個行程沒有人看得住
+_HANDOFF_PER_PASS = 1
 
 
 def _is_quota_issue(issue: str) -> bool:
@@ -5136,6 +5147,14 @@ class Handler(BaseHTTPRequestHandler):
                         why = f"{d.get('tool')} 開了終端等人按 Enter，{_TERMINAL_STALL_SEC // 60} 分鐘沒有人按"
                 if not why:
                     continue
+                # 兩道時間門，見 _HANDOFF_MAX_AGE_SEC 的說明：只接這個伺服器親眼看著失敗、
+                # 而且還算在飛行中的；歷史紀錄一律不碰
+                t0 = _stamp_epoch(d.get("started", ""))
+                if t0 is None or t0 < _SERVER_STARTED_AT \
+                        or time.time() - t0 > _HANDOFF_MAX_AGE_SEC:
+                    continue
+                if len(claimed) >= _HANDOFF_PER_PASS:
+                    break
                 src = next((x for x in self.DISPATCHES if x.get("id") == d.get("id")), None)
                 if not src or src.get("handedOffTo"):
                     continue
