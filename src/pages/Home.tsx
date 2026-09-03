@@ -143,8 +143,24 @@ function folderName(dir: string): string {
   return parts[parts.length - 1] || dir
 }
 
+/**
+ * 地端續聊的一則訊息。
+ *
+ * who／ts 只有「從原對話帶入」的訊息會有：原始說話者（來源工具標籤）
+ * 與原始時間戳。地端即時產生的回覆沒有這兩個欄位，渲染時才標目前模型。
+ * 舊版 localStorage 快取沒有這兩個欄位，讀回來就是 undefined，
+ * 等同舊版行為 —— 不能因為升級就讓使用者的聊天紀錄壞掉。
+ */
+interface ChatMsg {
+  role: string
+  text: string
+  who?: string
+  /** 與 detail 的 Message.ts 同格式（字串，來源決定）；刻意不轉格式，轉換只會多出 Invalid Date 的機會 */
+  ts?: string
+}
+
 /** 讀某個對話的本機聊天暫存。壞掉就當成空的，不要讓整頁炸掉 */
-function readChatCache(id?: string): { role: string; text: string }[] {
+function readChatCache(id?: string): ChatMsg[] {
   if (!id) return []
   try {
     const saved = localStorage.getItem('ac_chat_' + id)
@@ -244,7 +260,7 @@ export default function Home() {
   const [chatModel, setChatModel] = useState('auto')
   const [routeInfo, setRouteInfo] = useState('')
   const [routedModel, setRoutedModel] = useState('')
-  const [chatMsgs, setChatMsgs] = useState<{ role: string; text: string }[]>([])
+  const [chatMsgs, setChatMsgs] = useState<ChatMsg[]>([])
   const [chatInput, setChatInput] = useState('')
   const [chatBusy, setChatBusy] = useState(false)
   /** 地端推論已經等了幾秒。沒有這個數字，畫面只有一行不會動的「思考中…」 */
@@ -571,12 +587,32 @@ export default function Home() {
     setDetailTailError('')
   }
 
+  /**
+   * 從原對話取最近 8 則作為續聊上下文。
+   *
+   * 帶入的舊訊息連同原始說話者（來源工具標籤）與時間戳一起帶入：
+   * 不帶的話，續聊區會把整串舊訊息改標成「目前選擇的地端模型」、
+   * 時間戳全部消失 —— 舊的雲端長文看起來像這顆地端模型說的，
+   * 模型選「自動」時標籤還會隨路由結果換人。
+   * 「載入近期訊息」按鈕與直接送出時的自動帶入共用這一條，
+   * 兩條路帶入的格式必須一致，不然直接送出的舊訊息還是會丟說話者。
+   */
+  const recentContextMsgs = (): ChatMsg[] => {
+    if (!detail?.messages?.length || !selected) return []
+    return detail.messages.slice(-8).map((m): ChatMsg => {
+      const msg: ChatMsg = {
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        text: m.text.slice(0, 1200),
+      }
+      if (m.role === 'assistant') msg.who = selected.toolLabel
+      if (m.ts) msg.ts = m.ts
+      return msg
+    })
+  }
+
   const seedChat = () => {
-    if (!detail?.messages?.length) return
-    const seeded = detail.messages.slice(-8).map((m) => ({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      text: m.text.slice(0, 1200),
-    }))
+    const seeded = recentContextMsgs()
+    if (!seeded.length) return
     setChatMsgs(seeded)
     showToast(t('已載入近期 {n} 則訊息作為上下文', { n: seeded.length }))
   }
@@ -628,9 +664,7 @@ export default function Home() {
     )
     const ac = new AbortController()
     chatAbort.current = ac
-    const history = chatMsgs.length ? chatMsgs : (detail?.messages?.slice(-8).map((m) => ({
-      role: m.role === 'assistant' ? 'assistant' : 'user', text: m.text.slice(0, 1200),
-    })) || [])
+    const history = chatMsgs.length ? chatMsgs : recentContextMsgs()
     const next = [...history, { role: 'user', text }]
     setChatMsgs(next)
     setChatInput('')
@@ -1488,6 +1522,19 @@ export default function Home() {
                   <p role="status" aria-live="polite" className="text-mute3">{t('載入訊息中…')}</p>
                 ) : detail ? (
                   <div className="mx-auto flex max-w-3xl flex-col gap-3">
+                    {/* 顯示的是對話尾端時，往上捲到頂就是一面沉默的牆：
+                        最上面那則不是真正的開頭，卻沒有任何說明，
+                        使用者分不清「上面本來就沒有」還是「壞了沒載出來」。
+                        把底部同一句說明（同一個 t() 字串）也放到頂端。
+                        只在 'latest' 時放 —— 只有這時上面確實還有沒載入的舊訊息；
+                        降級顯示索引前段（fallback）時，頂端就是真正的開頭，
+                        這句「已顯示真正最新的…」反而是假的。
+                        不加 role="status"：底部同一句已有，讀屏器不必播兩遍。 */}
+                    {detailTailState === 'latest' && (
+                      <p className="text-center text-xs text-mute3">
+                        {t('已顯示真正最新的 {n} 則訊息；更早內容仍可回原工具查看。', { n: detail.messages.length })}
+                      </p>
+                    )}
                     {detail.messages.map((m, i) => (
                       <div key={i} className={`rounded-lg px-4 py-3 text-sm leading-6 ${m.role === 'user' ? 'ml-12 bg-elev' : 'mr-12 border border-line'}`}>
                         <div className="mb-1 text-xs text-mute3">{m.role === 'user' ? '你' : selected.toolLabel}{m.ts ? ` · ${new Date(m.ts).toLocaleString('zh-TW')}` : ''}</div>
@@ -1569,7 +1616,13 @@ export default function Home() {
                       >
                         {chatMsgs.map((m, i) => (
                           <div key={i} className={`rounded-lg px-3 py-2 text-sm ${m.role === 'user' ? 'ml-10 bg-white' : 'mr-10 border border-line bg-white'}`}>
-                            <div className="mb-0.5 text-xs text-mute3">{m.role === 'user' ? '你' : (chatModel === 'auto' ? (routedModel || '自動') : chatModel)}</div>
+                            {/* 帶入的舊訊息（有 who）顯示原來說話的工具與原時間戳；
+                                只有地端真的回覆的那幾則才標目前模型 ——
+                                全部標成目前模型，舊的雲端長文看起來就像地端模型說的 */}
+                            <div className="mb-0.5 text-xs text-mute3">
+                              {m.role === 'user' ? '你' : (m.who || (chatModel === 'auto' ? (routedModel || '自動') : chatModel))}
+                              {m.ts ? ` · ${new Date(m.ts).toLocaleString('zh-TW')}` : ''}
+                            </div>
                             <div className="whitespace-pre-wrap break-words">{m.text}</div>
                           </div>
                         ))}
