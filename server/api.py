@@ -897,6 +897,79 @@ def _alive_pids(pids: set) -> set:
     _ALIVE_CACHE["pids"] = alive
     return {p for p in pids if p in alive}
 
+# ── PID 被回收的假存活 ─────────────────────────────────
+#
+# 實際案例（2026-09-03）：08-26 派出的一筆 claude 派工，八天後畫面還顯示
+# 「執行中」。查下去 pid 4588 現在是 tailscale-ipn.exe —— 原本的行程早就
+# 結束，Windows 把同一個號碼發給了別人，而 _alive_pids 只問「這個 pid
+# 存不存在」。序列派工的 worker 也會被它卡住：它等的那個 pid 永遠不會消失。
+#
+# 判斷依據是行程的建立時間：晚於派工開始時間的，就不是我們派的那個。
+# 只對「開始超過 6 小時還宣稱活著」的紀錄查，不在每 8 秒的輪詢裡對每筆
+# 開 PowerShell —— 那比假訊號本身更貴。答案依 pid 快取：
+# 被回收的判定不會變回來；真的還活著的，tasklist 那一層本來就會處理它結束。
+_RECYCLE_AFTER_SEC = 6 * 3600
+_CREATED_CACHE: dict = {}
+_CREATED_LOCK = threading.Lock()
+
+
+def _proc_created_at(pid: int):
+    """行程的建立時間（epoch 秒）。查不到回 None —— 查不到不等於死了。"""
+    if os.name != "nt":
+        return None
+    with _CREATED_LOCK:
+        if pid in _CREATED_CACHE:
+            return _CREATED_CACHE[pid]
+    got = None
+    try:
+        r = _run(["powershell", "-NoProfile", "-Command",
+                  f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}')"
+                  ".CreationDate.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')"],
+                 capture_output=True, text=True, encoding="utf-8",
+                 errors="replace", timeout=20)
+        s = (r.stdout or "").strip()
+        if s:
+            got = _dt.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ") \
+                .replace(tzinfo=_dt.timezone.utc).timestamp()
+    except Exception:
+        got = None
+    with _CREATED_LOCK:
+        if len(_CREATED_CACHE) > 500:
+            _CREATED_CACHE.clear()
+        _CREATED_CACHE[pid] = got
+    return got
+
+
+def _stamp_epoch(stamp: str):
+    """派工編號 YYYYMMDD-HHMMSS（本機時間）→ epoch 秒；認不出來回 None"""
+    m = re.match(r"^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})", stamp or "")
+    if not m:
+        return None
+    try:
+        return _dt.datetime(*map(int, m.groups())).timestamp()
+    except ValueError:
+        return None
+
+
+def _recycled(pid: int, started: str, now: float = None) -> bool:
+    """這個 pid 是不是已經被發給別的行程了。
+
+    只有在派工開始超過 _RECYCLE_AFTER_SEC 之後才會真的去查；
+    查不到建立時間一律當作沒被回收 —— 寧可多顯示一會兒「執行中」，
+    也不要把還在跑的工作判成結束（那是序列派工壞掉的直接原因）。
+    """
+    t0 = _stamp_epoch(started)
+    if t0 is None:
+        return False
+    if (now if now is not None else time.time()) - t0 < _RECYCLE_AFTER_SEC:
+        return False
+    created = _proc_created_at(pid)
+    if created is None:
+        return False
+    # 派工開始之後 5 分鐘內建立的都算同一件（Popen 到行程真的跑起來有延遲）
+    return created > t0 + 300
+
+
 _STAMP_LOCK = threading.Lock()
 
 
@@ -4974,7 +5047,10 @@ class Handler(BaseHTTPRequestHandler):
         # 在 Windows 上等於持續閃視窗、持續搶焦點。
         alive_pids = _alive_pids({int(d["pid"]) for d in recent if d.get("pid")})
         for d in recent:
-            d["alive"] = bool(d.get("pid")) and int(d["pid"]) in alive_pids
+            # pid 還在 ≠ 我們派的那個還在跑：號碼可能已經被回收給別的程式。
+            # 見 _recycled 的說明（八天前的派工顯示執行中，pid 其實是 tailscale）。
+            d["alive"] = (bool(d.get("pid")) and int(d["pid"]) in alive_pids
+                          and not _recycled(int(d["pid"]), d.get("started", "")))
             d["state"] = self._dispatch_state(d, d["alive"])
             log = Path(d.get("log", ""))
             if log.exists():

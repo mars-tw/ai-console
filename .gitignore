@@ -29,3 +29,6 @@ graphify-out/
 # 照著做會查無此檔。兩個都是本機工具設定，不該進公開版。
 .gemini/
 GEMINI.md
+
+# playwright-cli 的工作暫存（稽核者開瀏覽器時寫的快照，含頁面文字）
+.playwright-cli/
