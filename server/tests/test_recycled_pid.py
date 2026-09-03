@@ -49,6 +49,7 @@ class TestRecycled(unittest.TestCase):
 
     def setUp(self):
         api._CREATED_CACHE.clear()
+        api._RECYCLED_PIDS.clear()   # 正向結論會跨測試留下來，不清的話「同一件」那些會誤判
 
     def test_行程比派工晚建立就是被回收了(self):
         """這就是 tailscale 那個案例：派工 08-26，行程 09-03 才誕生。"""
@@ -82,18 +83,65 @@ class TestRecycled(unittest.TestCase):
             self.assertFalse(api._recycled(4588, "garbage", now=time.time()))
             probe.assert_not_called()
 
-    def test_建立時間依pid快取(self):
-        """被回收的判定不會變回來，沒必要每次輪詢都再開一次 PowerShell"""
+    # ── 快取的語意：只有「已被回收」可以久留 ──
+    #
+    # 第一版把建立時間永久快取（連 None 也存），而且把這個行為釘進了測試。
+    # 稽核者（qwen，第三輪）指出那正好讓防線失效：只要第一次查詢發生在
+    # 原行程還活著時，或落在號碼還沒被認領的空窗，之後被誰拿走都永遠判「沒回收」。
+    # 下面四個測試釘的是修正後的語意。
+
+    def _runner(self, answers: list):
+        """依序回傳 answers 的假 PowerShell；記錄被叫了幾次"""
         calls = []
         def fake_run(argv, **kw):
             calls.append(argv)
-            class R: stdout = "2026-09-03T06:00:00Z"
+            class R: stdout = answers[min(len(calls) - 1, len(answers) - 1)]
             return R()
-        with mock.patch.object(api, "_run", side_effect=fake_run), \
+        return fake_run, calls
+
+    def test_十分鐘內同一個pid不重查(self):
+        fake, calls = self._runner(["2026-08-26T04:02:05Z"])
+        with mock.patch.object(api, "_run", side_effect=fake), \
              mock.patch.object(api.os, "name", "nt"):
-            api._proc_created_at(4588)
-            api._proc_created_at(4588)
+            api._proc_created_at(4588, now=1000.0)
+            api._proc_created_at(4588, now=1000.0 + 60)
         self.assertEqual(len(calls), 1)
+
+    def test_過了TTL要重查(self):
+        fake, calls = self._runner(["2026-08-26T04:02:05Z"])
+        with mock.patch.object(api, "_run", side_effect=fake), \
+             mock.patch.object(api.os, "name", "nt"):
+            api._proc_created_at(4588, now=1000.0)
+            api._proc_created_at(4588, now=1000.0 + api._CREATED_TTL_SEC + 1)
+        self.assertEqual(len(calls), 2)
+
+    def test_查不到不能快取(self):
+        """空窗期查到 None，五秒後號碼被別人拿走 —— 下一次一定要再看一眼"""
+        fake, calls = self._runner(["", "2026-09-03T06:00:00Z"])
+        with mock.patch.object(api, "_run", side_effect=fake), \
+             mock.patch.object(api.os, "name", "nt"):
+            self.assertIsNone(api._proc_created_at(4588, now=1000.0))
+            self.assertIsNotNone(api._proc_created_at(4588, now=1000.0 + 5))
+        self.assertEqual(len(calls), 2)
+
+    def test_第一次沒回收_之後被回收要抓得到(self):
+        """稽核者描述的那個情境。八天前派工；第一次查時原行程還活著。"""
+        # 第一次：建立時間 ≈ 派工時間 → 沒回收
+        with mock.patch.object(api, "_proc_created_at", return_value=T0 + 3):
+            self.assertFalse(api._recycled(4588, STAMP, now=T0 + 7 * 3600))
+        # 過了很久，號碼被 tailscale 拿走：建立時間是幾天後 → 必須判回收
+        with mock.patch.object(api, "_proc_created_at", return_value=T0 + 8 * 86400):
+            self.assertTrue(api._recycled(4588, STAMP, now=T0 + 9 * 86400))
+
+    def test_判定回收之後就記住_不再開PowerShell(self):
+        """回收是不可逆的。每 8 秒的輪詢對同一筆再開 PowerShell 是浪費。"""
+        with mock.patch.object(api, "_proc_created_at", return_value=T0 + 8 * 86400) as probe:
+            self.assertTrue(api._recycled(4588, STAMP, now=T0 + 9 * 86400))
+            self.assertTrue(api._recycled(4588, STAMP, now=T0 + 9 * 86400 + 8))
+            self.assertEqual(probe.call_count, 1)
+        # 即使之後查不到建立時間（行程又結束了），結論也不會退回「沒回收」
+        with mock.patch.object(api, "_proc_created_at", return_value=None):
+            self.assertTrue(api._recycled(4588, STAMP, now=T0 + 10 * 86400))
 
 
 if __name__ == "__main__":

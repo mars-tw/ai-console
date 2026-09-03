@@ -909,17 +909,31 @@ def _alive_pids(pids: set) -> set:
 # 開 PowerShell —— 那比假訊號本身更貴。答案依 pid 快取：
 # 被回收的判定不會變回來；真的還活著的，tasklist 那一層本來就會處理它結束。
 _RECYCLE_AFTER_SEC = 6 * 3600
-_CREATED_CACHE: dict = {}
+# 負向答案（「這個 pid 還是原本那個」）只能信一小段時間。
+# 第一版把第一次查到的建立時間永久快取 —— 稽核者（qwen）指出那正好讓防線失效：
+# 只要第一次查詢發生在原行程還活著時（建立時間≈派工時間 → 判「沒回收」），
+# 或落在原行程已死、號碼還沒被認領的空窗（查到 None），
+# 之後這個號碼被誰拿走都永遠判「沒回收」。八天前的派工照樣顯示執行中，
+# 而且是在「修好之後」。
+_CREATED_TTL_SEC = 10 * 60
+_CREATED_CACHE: dict = {}      # pid → (建立時間 epoch, 查詢時刻)
 _CREATED_LOCK = threading.Lock()
 
 
-def _proc_created_at(pid: int):
-    """行程的建立時間（epoch 秒）。查不到回 None —— 查不到不等於死了。"""
+def _proc_created_at(pid: int, now: float = None):
+    """行程的建立時間（epoch 秒）。查不到回 None —— 查不到不等於死了。
+
+    快取規則：查到的時間存 10 分鐘就重查；查不到（None）**不存**。
+    回收是不可逆的，但「還沒被回收」隨時會變 —— 所以只有正向結論可以久留，
+    而那個結論是 _recycled 自己算出來的，這裡只負責提供新鮮的建立時間。
+    """
     if os.name != "nt":
         return None
+    t = now if now is not None else time.time()
     with _CREATED_LOCK:
-        if pid in _CREATED_CACHE:
-            return _CREATED_CACHE[pid]
+        hit = _CREATED_CACHE.get(pid)
+        if hit is not None and t - hit[1] < _CREATED_TTL_SEC:
+            return hit[0]
     got = None
     try:
         r = _run(["powershell", "-NoProfile", "-Command",
@@ -933,10 +947,11 @@ def _proc_created_at(pid: int):
                 .replace(tzinfo=_dt.timezone.utc).timestamp()
     except Exception:
         got = None
-    with _CREATED_LOCK:
-        if len(_CREATED_CACHE) > 500:
-            _CREATED_CACHE.clear()
-        _CREATED_CACHE[pid] = got
+    if got is not None:
+        with _CREATED_LOCK:
+            if len(_CREATED_CACHE) > 500:
+                _CREATED_CACHE.clear()
+            _CREATED_CACHE[pid] = (got, t)
     return got
 
 
@@ -951,23 +966,38 @@ def _stamp_epoch(stamp: str):
         return None
 
 
+_RECYCLED_PIDS: dict = {}       # (pid, started) → True；回收是不可逆的，正向結論可以久留
+
+
 def _recycled(pid: int, started: str, now: float = None) -> bool:
     """這個 pid 是不是已經被發給別的行程了。
 
     只有在派工開始超過 _RECYCLE_AFTER_SEC 之後才會真的去查；
     查不到建立時間一律當作沒被回收 —— 寧可多顯示一會兒「執行中」，
     也不要把還在跑的工作判成結束（那是序列派工壞掉的直接原因）。
+
+    只有「已被回收」這個結論會永久記住（同一個 pid 不可能又變回原本那個行程）；
+    「還沒被回收」不記，交給 _proc_created_at 的短 TTL 定期重看。
     """
     t0 = _stamp_epoch(started)
     if t0 is None:
         return False
-    if (now if now is not None else time.time()) - t0 < _RECYCLE_AFTER_SEC:
+    t = now if now is not None else time.time()
+    if t - t0 < _RECYCLE_AFTER_SEC:
         return False
-    created = _proc_created_at(pid)
+    key = (int(pid), started)
+    if _RECYCLED_PIDS.get(key):
+        return True
+    created = _proc_created_at(pid, now=t)
     if created is None:
         return False
     # 派工開始之後 5 分鐘內建立的都算同一件（Popen 到行程真的跑起來有延遲）
-    return created > t0 + 300
+    if created > t0 + 300:
+        if len(_RECYCLED_PIDS) > 500:
+            _RECYCLED_PIDS.clear()
+        _RECYCLED_PIDS[key] = True
+        return True
+    return False
 
 
 _STAMP_LOCK = threading.Lock()

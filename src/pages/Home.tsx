@@ -1235,17 +1235,24 @@ export default function Home() {
                       title={dir}
                     >
                       <span className="text-xs text-mute3">{open ? '▾' : '▸'}</span>
-                      <span className="min-w-0 flex-1 truncate text-sm font-medium">📁 {folderName(dir)}</span>
+                      {/* 名稱要有下限，徽章要能縮。
+                          原本名稱是這一列唯一會縮的元素、徽章全是 flex-none ——
+                          於是「專案 + 狀態 + 待接力 + 數量」四個徽章一起出現時，
+                          辨識這一列用的名稱反而最先消失。實測 1280×720、側欄 320px：
+                          「📁 自動剪片」顯示寬度 0px，「📁 AI控制台」剩 34px，
+                          畫面上就是一排「📁 …」。稽核者把它報成「很多對話標題長得一樣」。
+                          優先順序應該反過來：徽章有 title 可以懸停看全文，名稱沒有替代品。 */}
+                      <span className="min-w-24 flex-1 truncate text-sm font-medium" title={folderName(dir)}>📁 {folderName(dir)}</span>
                       {line !== 'other' && (
                         <span
-                          className="min-w-0 max-w-24 flex-none truncate rounded-full bg-elev px-2 py-0.5 text-xs text-mute2"
+                          className="min-w-0 max-w-24 shrink truncate rounded-full bg-elev px-2 py-0.5 text-xs text-mute2"
                           title={index.projectTitles[line] || line}
                         >
                           {index.projectTitles[line] || line}
                         </span>
                       )}
-                      {badge && <span className={`flex-none rounded-full px-2 py-0.5 text-xs ${badge.cls}`}>{badge.label}</span>}
-                      {hub?.needs_handoff && <span className="flex-none rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-950 dark:text-amber-300">{t('待接力')}</span>}
+                      {badge && <span className={`min-w-0 shrink truncate rounded-full px-2 py-0.5 text-xs ${badge.cls}`} title={badge.label}>{badge.label}</span>}
+                      {hub?.needs_handoff && <span className="min-w-0 shrink truncate rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-950 dark:text-amber-300" title={t('待接力')}>{t('待接力')}</span>}
                       <span className="flex-none text-xs text-mute3">{convs.length}</span>
                     </button>
                     {apiOk && convs.some((c) => c.resume) && (
