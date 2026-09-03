@@ -273,6 +273,8 @@ export const EN: Record<string, string> = {
   'Claude（無頭）': 'Claude (headless)',
   'Codex（無頭）': 'Codex (headless)',
   'Qwen（無頭）': 'Qwen (headless)',
+  'Kimi（無頭）': 'Kimi (headless)',
+  'Grok（無頭）': 'Grok (headless)',
   'Grok（終端預填）': 'Grok (prefilled terminal)',
   '地端（LM Studio）': 'Local (LM Studio)',
   '輸入指令，Enter 派出…': 'Type an order, Enter to dispatch…',

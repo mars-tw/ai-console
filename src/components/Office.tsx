@@ -401,8 +401,10 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
               <option value="claude">{t('Claude（無頭）')}</option>
               <option value="codex">{t('Codex（無頭）')}</option>
               <option value="qwen">{t('Qwen（無頭）')}</option>
-              <option value="kimi">{t('Kimi（終端預填）')}</option>
-              <option value="grok">{t('Grok（終端預填）')}</option>
+              {/* kimi 與 grok 已改走無頭 CLI（19f1a3c），標籤要跟著改 ——
+                  寫「終端預填」會讓人以為派出去之後還要自己去按 Enter。 */}
+              <option value="kimi">{t('Kimi（無頭）')}</option>
+              <option value="grok">{t('Grok（無頭）')}</option>
               <option value="cursor">{t('Cursor（終端預填）')}</option>
               <option value="local">{t('地端（LM Studio）')}</option>
             </select>
