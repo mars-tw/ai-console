@@ -4887,6 +4887,29 @@ class Handler(BaseHTTPRequestHandler):
         但畫面上要能標成不可選，而不是選了才在 503 裡看到原因。
         """
         limited = self._limited_tools()
+        # 原因也一起給。畫面上只寫「額度用完」而不說為什麼、什麼時候恢復，
+        # 使用者對著頁尾「閒置」與下拉「額度用完」兩種說法無從判斷 ——
+        # 稽核者（kimi）指出這一點。status.json 裡本來就有 reset_at 與 evidence，
+        # 拿出來講就好；沒有的話前端會退回通用的「額度狀態無法確認」。
+        reasons = {}
+        try:
+            _st = json.loads(STATUS_JSON.read_text(encoding="utf-8"))
+            detect_rate_limits(_st)
+            # 上游掃描器先標過的工具，detect_rate_limits 會跳過（已標就不再認），
+            # 於是拿不到恢復時間。enrich_reset_times 會從派工 log 把時間補上 ——
+            # 它同時也會清掉「找不到恢復時間」的旗標，那是畫面那層的語意，
+            # 所以只在這份副本上跑，不影響上面 limited（路由）的判定。
+            _shown = json.loads(json.dumps(_st))
+            enrich_reset_times(_shown)
+            for _k in limited:
+                _v = (_shown.get("tools") or {}).get(_k) or (_st.get("tools") or {}).get(_k) or {}
+                _raw = (_st.get("tools") or {}).get(_k) or {}
+                if _v.get("reset_at"):
+                    reasons[_k] = f"{_v['reset_at']} 恢復"
+                elif _raw.get("evidence"):
+                    reasons[_k] = str(_raw["evidence"]).split("：", 1)[-1][:60]
+        except Exception:
+            reasons = {}
         out = []
         for tool in ["claude", "codex", "qwen", "grok", "kimi", "cursor"]:
             if not _bin_available(tool):
@@ -4896,6 +4919,7 @@ class Handler(BaseHTTPRequestHandler):
                 "label": self.TOOL_LABELS.get(tool, tool),
                 "mode": "terminal" if tool in self.TERMINAL_TOOLS else "headless",
                 "limited": tool in limited,
+                "reason": reasons.get(tool, ""),
             })
         out.append({"id": "local", "label": self.TOOL_LABELS["local"],
                     "mode": "local", "limited": False})

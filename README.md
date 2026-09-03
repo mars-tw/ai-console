@@ -136,9 +136,9 @@ python server/api.py       # 啟動整合伺服器 → http://127.0.0.1:5177/
 
 ```bash
 npm run verify             # 型別 + 靜態檢查 + 前後端測試，一次跑完
-npm test                   # 前後端測試一起跑（581 個）
+npm test                   # 前後端測試一起跑（602 個）
 npm run test:web           # 只跑前端（vitest，248 個）
-npm run test:py            # 只跑後端（unittest，333 個，純標準庫）
+npm run test:py            # 只跑後端（unittest，354 個，純標準庫）
 npm run typecheck          # 型別檢查（等同 tsc -b）
 npm run lint               # 靜態檢查（零警告）
 npm run pack               # 產生 Windows x64 可攜版到 release/
