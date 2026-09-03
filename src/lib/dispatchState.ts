@@ -41,6 +41,9 @@ export function look(s: DispatchState): Look {
       return { label: t('失敗'), dot: 'bg-red-500', tone: 'text-red-300' }
     case 'silent':
       return { label: t('沒有輸出'), dot: 'bg-mute2', tone: 'text-mute2' }
+    case 'stopped':
+      // 使用者按了停止：行程被砍、工作沒做完。不是失敗、更不是完成。
+      return { label: t('已停止'), dot: 'bg-mute3', tone: 'text-mute3' }
     case 'cancelled':
       return { label: t('已取消'), dot: 'bg-mute3', tone: 'text-mute3' }
     default:

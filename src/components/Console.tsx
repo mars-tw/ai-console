@@ -74,7 +74,7 @@ interface DispatchReply {
 }
 
 type ConsoleDispatch = DispatchRecord & {
-  outcome?: 'ok' | 'no_changes' | 'blocked' | 'error' | null
+  outcome?: 'ok' | 'no_changes' | 'blocked' | 'error' | 'stopped' | null
   cost?: DispatchCost | null
   issue?: string
   /** 這一筆的工作目錄在不在 git 裡。不在的話「看改了什麼」按了也沒東西 */
@@ -143,6 +143,9 @@ function outcomeLook(d: ConsoleDispatch): { label: string; tone: string } {
     // 然後真正的失敗也一起被忽略。
     case 'blocked':
       return { label: t('依規範停下（沒有執行）'), tone: 'text-sky-700 dark:text-sky-300' }
+    case 'stopped':
+      // 被人停掉的：沒跑完，但也不是它自己壞掉。跟失敗分開，重派鈕照給。
+      return { label: t('被停止（沒有跑完）'), tone: 'text-amber-700 dark:text-amber-300' }
     case 'error':
       return { label: t('執行失敗'), tone: 'text-red-700 dark:text-red-300' }
     default:
@@ -722,6 +725,32 @@ export default function Console() {
     setCancelBusy('')
   }
 
+  // 停掉執行中的無頭派工。這比取消危險：agent 可能正在改檔案，砍在一半會留下
+  // 改到一半的檔。所以先確認；但停了之後後端會老實標成「已停止」，
+  // 不會像用工作管理員殺掉那樣顯示成「已完成」。
+  const stopDispatch = async (d: ConsoleDispatch) => {
+    if (cancelBusy) return
+    if (!window.confirm(t('停掉正在跑的 {tool}？它可能正在改檔案，中途砍掉會留下改到一半的檔。'
+      + '停了之後這件會標成「已停止」，可以重派。', { tool: d.tool }))) return
+    setCancelBusy(d.id)
+    try {
+      const r = await fetch('/api/dispatch/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: d.id }),
+      }).then((x) => x.json()) as { ok?: boolean; error?: string; note?: string }
+      setNote(r.ok ? (r.note ? `⚠️ ${r.note}` : t('已停止這件，記成「已停止」')) : `⚠️ ${r.error || t('停止失敗')}`,
+        !r.ok || !!r.note)
+      if (r.ok) {
+        fetch('/api/dispatches').then((x) => (x.ok ? x.json() : null))
+          .then((x) => x?.dispatches && setDispatches(x.dispatches)).catch(() => {})
+      }
+    } catch {
+      setNote(t('⚠️ 控制 API 無回應'), true)
+    }
+    setCancelBusy('')
+  }
+
   const toggleDiff = async (id: string) => {
     if (diffFor === id) {
       setDiffFor(null)
@@ -1255,6 +1284,16 @@ export default function Console() {
                   <span className="inline-block h-1.5 w-1.5 flex-none animate-pulse rounded-full bg-amber-400" />
                   <span className="min-w-0 flex-1 truncate font-mono">{d.tail || t('（還沒有輸出）')}</span>
                   <span className="flex-none">{elapsed(d.started)}</span>
+                  {d.mode !== 'terminal' && !!d.pid && (
+                    <button
+                      className="flex-none text-[10px] text-mute2 hover:text-red-500"
+                      title={t('停掉這個正在跑的行程（會先確認）。停了會老實標成「已停止」，不會假裝完成')}
+                      disabled={cancelBusy === d.id}
+                      onClick={() => void stopDispatch(d)}
+                    >
+                      {cancelBusy === d.id ? '…' : t('⏹ 停止')}
+                    </button>
+                  )}
                 </div>
               )}
               {!!d.pending?.length && (

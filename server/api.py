@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import stat
+import signal
 import subprocess
 import sys
 import tempfile
@@ -897,6 +898,31 @@ def _alive_pids(pids: set) -> set:
     _ALIVE_CACHE["pids"] = alive
     return {p for p in pids if p in alive}
 
+def _kill_tree(pid: int) -> None:
+    """連子行程一起停：CLI 底下還掛著 node／git，只殺頂層會留孤兒繼續改檔。"""
+    pid = int(pid)
+    if os.name == "nt":
+        script = ('function KT($p){ Get-CimInstance Win32_Process -Filter "ParentProcessId=$p" '
+                  '| ForEach-Object { KT $_.ProcessId }; '
+                  'Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }; '
+                  f'KT {pid}')
+        try:
+            subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                           capture_output=True, timeout=30, **_NO_WINDOW)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    # 存活快取三秒內還會說它活著；停掉的當下就拿掉，畫面不用等下一次快照
+    try:
+        _ALIVE_CACHE["pids"].discard(pid)
+    except (AttributeError, KeyError):
+        pass
+
+
 # ── PID 被回收的假存活 ─────────────────────────────────
 #
 # 實際案例（2026-09-03）：08-26 派出的一筆 claude 派工，八天後畫面還顯示
@@ -1236,6 +1262,16 @@ _LOCAL_STATS_RE = re.compile(
 # 只認得前面兩種格式的話，codex 的每一趟都會顯示成「沒有用量」——
 # 而它其實是這裡最貴的一個。
 _CODEX_TOTAL_RE = re.compile(r'tokens?\s+used\s*[\r\n]+\s*([\d,]+)', re.I)
+# agy（ANTIGRAVITY）--output-format json 的結算（2026-09-03 實測）：
+#   {"status":"SUCCESS","response":"…","usage":{"input_tokens":53182,"output_tokens":2307,
+#    "thinking_tokens":1876,"cache_read_tokens":12238,"total_tokens":55489}}
+# 文字模式什麼用量都不印，所以 agy 的派工改走 JSON 模式。
+# 一定要釘住後面的 thinking_tokens：Claude CLI 的結算也有
+# "usage":{"input_tokens":…,"output_tokens":…}，但它的金額與 modelUsage 已經算過了，
+# 再認一次就是重複計費。
+_AGY_USAGE_RE = re.compile(
+    r'"usage"\s*:\s*\{[^{}]*?"input_tokens"\s*:\s*(\d+)[^{}]*?"output_tokens"\s*:\s*(\d+)'
+    r'[^{}]*?"thinking_tokens"')
 
 # 成本要掃完整 log，但不能把幾百 MB 一次讀進記憶體。每次只保留最後 64 KiB
 # 當跨區塊接縫，前面的統計增量寫進 accumulator。Codex 的 tokens used 是同一
@@ -1251,6 +1287,9 @@ _LOCAL_STATS_BYTES_RE = re.compile(
     br'"input_tokens"\s*:\s*(\d+)\s*,\s*"total_output_tokens"\s*:\s*(\d+)')
 _CODEX_TOTAL_BYTES_RE = re.compile(
     br'tokens?\s+used\s*[\r\n]+\s*([\d,]+)', re.I)
+_AGY_USAGE_BYTES_RE = re.compile(
+    br'"usage"\s*:\s*\{[^{}]*?"input_tokens"\s*:\s*(\d+)[^{}]*?"output_tokens"\s*:\s*(\d+)'
+    br'[^{}]*?"thinking_tokens"')
 
 # log 不會回頭改寫，所以同一個 (路徑, 大小) 的解析結果可以一直用。
 # 沒有這層的話，/api/dispatches 每 8 秒被打一次、每次重掃 30 份 log 的尾端，
@@ -1319,6 +1358,8 @@ def _traceback_issue(text: str, start: int) -> str:
 def _record_terminal_signal(record: dict):
     """一個 JSONL 結算物件只產生一個訊號，避免欄位順序互相推翻。"""
     result = record.get("result")
+    if result is None:
+        result = record.get("response")        # agy --output-format json 把回覆放在這裡
     result_text = result if isinstance(result, str) else ""
     terminal_reason = _normalise_terminal_status(record.get("terminal_reason"))
 
@@ -1388,6 +1429,44 @@ def _record_terminal_signal(record: dict):
     if terminal_reason in {"success", "succeeded", "complete", "completed", "end_turn"}:
         return "ok", ""
     return None
+
+
+def _display_log(text: str) -> str:
+    """agy 的 JSON 結算拆開來給人看：回覆原文 + 一行用量。不是那種 JSON 就原樣回。
+
+    改走 JSON 模式是為了拿到用量；代價本來是控制台裡看到一整坨跳脫過的 JSON。
+    這裡把代價吃掉：使用者看到的還是回覆原文，多一行「多少 token、幾秒」。
+    """
+    s = text.strip()
+    if not (s.startswith("{") and s.endswith("}")):
+        return text
+    try:
+        rec = json.loads(s)
+    except (json.JSONDecodeError, TypeError):
+        return text
+    if not isinstance(rec, dict) or "status" not in rec \
+            or not ("response" in rec or "error" in rec):
+        return text
+    parts = []
+    if rec.get("response"):
+        parts.append(str(rec["response"]).rstrip())
+    if rec.get("error"):
+        parts.append("⚠ " + str(rec["error"]).strip())
+    meta = [f"status={rec.get('status')}"]
+    usage = rec.get("usage") or {}
+    if isinstance(usage, dict) and usage.get("input_tokens") is not None:
+        try:
+            meta.append(f"{int(usage.get('input_tokens') or 0):,} 進 / "
+                        f"{int(usage.get('output_tokens') or 0):,} 出 token")
+        except (TypeError, ValueError):
+            pass
+    if rec.get("duration_seconds") is not None:
+        try:
+            meta.append(f"{float(rec['duration_seconds']):.0f} 秒")
+        except (TypeError, ValueError):
+            pass
+    parts.append("— agy：" + "，".join(meta))
+    return "\n\n".join(parts)
 
 
 def _terminal_signals(text: str) -> list:
@@ -1478,6 +1557,8 @@ def _text_cost_events(text: str):
         yield match.start(), match.end(), "local", match.groups()
     for match in _CODEX_TOTAL_RE.finditer(text):
         yield match.start(), match.end(), "codex", (match.group(1),)
+    for match in _AGY_USAGE_RE.finditer(text):
+        yield match.start(), match.end(), "usage", ("gemini", match.group(1), match.group(2))
 
 
 def _byte_cost_events(data: bytes):
@@ -1493,6 +1574,9 @@ def _byte_cost_events(data: bytes):
                tuple(value.decode("ascii") for value in match.groups()))
     for match in _CODEX_TOTAL_BYTES_RE.finditer(data):
         yield match.start(), match.end(), "codex", (match.group(1).decode("ascii"),)
+    for match in _AGY_USAGE_BYTES_RE.finditer(data):
+        yield (match.start(), match.end(), "usage",
+               ("gemini", match.group(1).decode("ascii"), match.group(2).decode("ascii")))
 
 
 def _cost_from_accumulator(acc: dict):
@@ -3491,7 +3575,7 @@ class Handler(BaseHTTPRequestHandler):
             lines = [ln for ln in raw.splitlines()
                      if "running headless with --yolo" not in ln
                      and "Shell cwd was reset" not in ln]
-            text = chr(10).join(lines).strip()
+            text = _display_log(chr(10).join(lines).strip())
             return self._json({"ok": True, "text": text[-8000:], "path": str(f),
                                "task": rec.get("task", "")})
 
@@ -3803,6 +3887,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.do_followup()
         if self.path == "/api/dispatch/cancel":
             return self.do_dispatch_cancel()
+        if self.path == "/api/dispatch/stop":
+            return self.do_dispatch_stop()
         if self.path == "/api/dispatch/retry":
             return self.do_dispatch_retry()
         if self.path == "/api/dispatch":
@@ -3919,7 +4005,7 @@ class Handler(BaseHTTPRequestHandler):
         # 所以只有最後那種才算「派工」。b98f6cb 曾把它拿掉（怕繞過治理），
         # 但治理前置是 rules.wrap 寫進每一張工單的，跟工具無關；
         # 使用者明說「AGY 這種傻的可以先用」——它走獨立額度池，放在接力鏈最前面。
-        "gemini": lambda task: [BIN["gemini"], "--dangerously-skip-permissions", "-p", task],
+        "gemini": lambda task: [BIN["gemini"], "--dangerously-skip-permissions", "--output-format", "json", "-p", task],
         "codex": lambda task: [BIN["codex"], "exec", "--skip-git-repo-check", task],
         "qwen": lambda task: ["cmd", "/c", BIN["qwen"], "-p", task],
         # kimi 的 -p 不能與 --yolo/--auto 併用（會直接 error 退出）；
@@ -3934,7 +4020,7 @@ class Handler(BaseHTTPRequestHandler):
     FOLLOWUP_TOOLS = {
         "claude": lambda p: [BIN["claude"], "--continue", "-p", p],
         # agy 的 -c 是「接續最近一段對話」；跟 kimi/grok 一樣要回到原 cwd 才接得對
-        "gemini": lambda p: [BIN["gemini"], "--dangerously-skip-permissions", "-c", "-p", p],
+        "gemini": lambda p: [BIN["gemini"], "--dangerously-skip-permissions", "--output-format", "json", "-c", "-p", p],
         "codex": lambda p: [BIN["codex"], "exec", "resume", "--last",
                             "--skip-git-repo-check", p],
         # 不要用 cmd /c。qwen 是 npm 的 .CMD 包裝殼，經過 cmd.exe 的話
@@ -4589,6 +4675,10 @@ class Handler(BaseHTTPRequestHandler):
         # 這個狀態代表的是「不要再把它算成待辦」，不是「行程已經死了」。
         if d.get("cancelled"):
             return "cancelled"
+        # 使用者按了停止而且行程真的死了：標「已停止」。
+        # 不能因為 log 裡沒有失敗訊號就算完成 —— 2026-09-03 被殺掉的六個 agy 全顯示 done／ok。
+        if d.get("stopped") and not alive:
+            return "stopped"
         if alive:
             return "running"
         raw_log = d.get("log") or ""
@@ -4723,6 +4813,34 @@ class Handler(BaseHTTPRequestHandler):
 
     # 目前這一批的進度，給介面看的
     BATCH = {"total": 0, "done": 0, "running": False, "current": "", "note": ""}
+
+    def do_dispatch_stop(self):
+        """停掉一件還在跑的無頭派工，並老實記成「已停止」。
+
+        原本沒有這顆按鈕（見 do_dispatch_cancel：中途砍掉正在改檔案的 agent 很危險），
+        結果真的要停的時候使用者只能開工作管理員殺行程 —— 登錄裡沒有任何記號，
+        log 也沒有失敗訊號，被殺掉的那件從此顯示「已完成」。2026-09-03 接力事故
+        就是這樣：六個被殺掉的 agy 全部標成 done／ok。
+        危險還是危險，所以前端要先確認；但停了就要記下來。
+        """
+        body = self._body()
+        did = str(body.get("id") or "").strip()
+        with self._REG_LOCK:
+            if not self.DISPATCHES:
+                self._load_registry()
+            rec = next((d for d in self.DISPATCHES if d.get("id") == did), None)
+            if not rec:
+                return self._json({"ok": False, "error": "找不到這筆派工"}, 404)
+            if rec.get("stopped"):
+                return self._json({"ok": True, "id": did, "already": True,
+                                   "note": "這件先前已經停過了"})
+            pid = int(rec.get("pid") or 0)
+            if not pid or pid not in _alive_pids({pid}):
+                return self._json({"ok": False, "error": "這件已經不在跑了，沒有東西可以停"}, 409)
+            _kill_tree(pid)
+            rec["stopped"] = time.strftime("%Y%m%d-%H%M%S")
+            self._save_registry()
+        return self._json({"ok": True, "id": did})
 
     def do_dispatch_cancel(self):
         """取消一件還沒被按下去的終端派工。
@@ -5287,12 +5405,13 @@ class Handler(BaseHTTPRequestHandler):
                 # 而 CLI 可以吐出幾百 MB 的 log —— 整份讀進來只為了取最後一行，
                 # 記憶體會被輪詢本身吃掉。
                 text = _tail_text(log)
+                shown = _display_log(text)      # agy 的 JSON 結算拆開給人看
                 if not d["alive"]:
-                    d["result"] = text[-400:]
+                    d["result"] = shown[-400:]
                 # 執行中的最後一行輸出。使用者最常問的是「到底有沒有在動」——
                 # 只有一個「執行中」的字樣看不出差別，看到 log 一直在變才知道還活著。
                 # CLI 的輸出帶 ANSI 色碼，直接顯示會變成一串 ESC[1m[31m
-                lines = [_ANSI_RE.sub("", ln).strip() for ln in text.splitlines()]
+                lines = [_ANSI_RE.sub("", ln).strip() for ln in shown.splitlines()]
                 lines = [ln for ln in lines if ln]
                 d["tail"] = lines[-1][:140] if lines else ""
                 try:
@@ -5316,6 +5435,8 @@ class Handler(BaseHTTPRequestHandler):
                 # 是後加的 outcome 把它輾過去了。
                 if d["state"] in ("running", "waiting"):
                     d["outcome"], d["issue"] = None, ""
+                elif d["state"] == "stopped":
+                    d["outcome"], d["issue"] = "stopped", "使用者停止了它，沒有跑完"
                 else:
                     d["outcome"], d["issue"] = got["outcome"], got["issue"]
             # 這一筆的工作目錄有沒有 git，決定「📝 看改了什麼」值不值得出現。
