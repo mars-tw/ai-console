@@ -16,8 +16,22 @@ const PERSONAS: Record<string, string> = {
   cursor: '你是 CURSOR，輔助編輯，一隻掛著耳機的琥珀龍，隨性自在。{LANG_HINT}',
   gemini: '你是 AGY，一隻傻傻的小黃龍，大眼睛流口水。說話簡短可愛，語尾偶爾帶「嗷」。{LANG_HINT}',
 }
+
+/**
+ * 同一隻龍有三個名字在流傳：頁尾狀態列與主控台叫 Gemini、
+ * 辦公室名牌叫 ANTIGRAVITY、人格自稱 AGY。第一次用的人看到黃龍掛著
+ * ANTIGRAVITY，回頁尾找不到這個名字，只能自己猜。這裡是辦公室的顯示層，
+ * 把三個名字並列一次就認得了。
+ *
+ * 刻意不改 SKINS.gemini.name：冒險分頁的夥伴名字直接吃 SKINS 的 name，
+ * 改源頭會讓那邊的名字也變成一長串。人格描述維持自稱 AGY（角色設定）。
+ */
+const DISPLAY_NAMES: Record<string, string> = {
+  gemini: 'ANTIGRAVITY（Gemini／agy）',
+}
+
 const CHARS = Object.fromEntries(
-  Object.entries(SKINS).map(([k, s]) => [k, { name: s.name, color: s.color, persona: PERSONAS[k] ?? '' }]),
+  Object.entries(SKINS).map(([k, s]) => [k, { name: DISPLAY_NAMES[k] ?? s.name, color: s.color, persona: PERSONAS[k] ?? '' }]),
 ) as Record<string, { name: string; color: string; persona: string }>
 
 /**
@@ -48,7 +62,27 @@ function DragonFace({ agent, size = 32 }: { agent: string; size?: number }) {
   )
 }
 
-interface ChatMsg { role: string; text: string }
+/**
+ * content 為空時不要把 reasoning 當答案。推理草稿是模型的思考過程，
+ * 不是給人看的回答——實測等兩分鐘出來一整段英文「Thinking Process」，
+ * 第一次用的人會以為 AI 壞掉。這裡回一句明確說明，草稿另外收合放著，
+ * 想看的人看得到，但它不能冒充答案。（與 AskAI 的同一份邏輯。）
+ */
+function pickAnswer(content: unknown, reasoning: unknown): { text: string; reasoning?: string } {
+  const body = content == null ? '' : String(content).trim()
+  if (body) return { text: body }
+  const draft = reasoning == null ? '' : String(reasoning).trim()
+  if (draft) return { text: t('模型只回了推理過程，沒有給出答案。'), reasoning: draft }
+  return { text: t('（空回應）') }
+}
+
+interface ChatMsg {
+  role: string
+  text: string
+  reasoning?: string   // 只回了推理過程時，收合起來的推理草稿
+  retryText?: string   // 換模型重問時要重送的那句話
+  retryModel?: string  // 重問改用哪個模型（目前模型的下一個可用模型）
+}
 
 interface Props {
   tools: Record<string, ToolStatus>
@@ -114,6 +148,17 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
     return () => clearInterval(timer)
   }, [chatBusy])
   const [routed, setRouted] = useState('')
+  // 「換個模型再問一次」要有清單才能挑下一個。只在掛載時讀一次，
+  // 讀不到就讓重問按鈕不出現，不擋對話本身。
+  const [localModels, setLocalModels] = useState<string[]>([])
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch('/api/models', { signal: controller.signal })
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => { if (d?.ok && Array.isArray(d.models)) setLocalModels(d.models) })
+      .catch(() => {})
+    return () => controller.abort()
+  }, [])
   // 中控
   const [cmdTool, setCmdTool] = useState('auto')
   const [cmdInput, setCmdInput] = useState('')
@@ -202,21 +247,28 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
     conversations.find((c) => c.project === pid && c.resume && !c.subagent && !c.dup)
 
   // ── 角色對話 ──
-  const sendAgentChat = async () => {
-    const text = agentInput.trim()
-    if (!text || !chatWith || chatBusy) return
-    const target = chatWith
+  // 「換個模型再問一次」要挑的模型：目前這個的下一個。
+  // 只有一個可用模型時沒有「下一個」可換，回傳空字串讓按鈕不出現，
+  // 別讓人按了重問卻跑同一個模型、得到同樣只有推理過程的結果。
+  const nextModelAfter = (used: string) => {
+    if (localModels.length < 2) return ''
+    return localModels[(localModels.indexOf(used) + 1) % localModels.length]
+  }
+
+  /**
+   * 對某一隻龍送一輪話。base 是貼上使用者這句話之前的歷史；
+   * modelOverride 只在「換個模型再問一次」時給，繞過快取的路由結果。
+   */
+  const agentChat = async (target: string, text: string, base: ChatMsg[], modelOverride?: string) => {
     const sys = persona(target)
-    const history = agentMsgs[target] || []
-    const next = [...history, { role: 'user', text }]
+    const next = [...base, { role: 'user', text }]
     setAgentMsgs((m) => ({ ...m, [target]: next }))
-    setAgentInput('')
     setChatBusy(true)
     setChatSec(0)
     const abort = new AbortController()
     chatAbort.current = abort
     try {
-      let model = routed
+      let model = modelOverride || routed
       if (!model) {
         const rr = await fetch('/api/route?task=general', { signal: abort.signal })
         const rd = await rr.json()
@@ -232,8 +284,16 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
         signal: abort.signal,
       })
       const d = await r.json()
-      const reply = d.ok ? (d.content || d.reasoning || t('（空回應）')) : `⚠️ ${d.error || t('失敗')}`
-      setAgentMsgs((m) => ({ ...m, [target]: [...next, { role: 'assistant', text: reply }] }))
+      let reply: ChatMsg
+      if (!d.ok) {
+        reply = { role: 'assistant', text: `⚠️ ${d.error || t('失敗')}` }
+      } else {
+        const picked = pickAnswer(d.content, d.reasoning)
+        reply = picked.reasoning
+          ? { role: 'assistant', text: picked.text, reasoning: picked.reasoning, retryText: text, retryModel: nextModelAfter(model) }
+          : { role: 'assistant', text: picked.text }
+      }
+      setAgentMsgs((m) => ({ ...m, [target]: [...next, reply] }))
     } catch (error) {
       const message = isAbortError(error)
         ? t('⏹️ 已停止等待；後端工作可能仍在執行')
@@ -243,6 +303,33 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
       if (chatAbort.current === abort) chatAbort.current = null
       setChatBusy(false)
     }
+  }
+
+  const sendAgentChat = async () => {
+    const text = agentInput.trim()
+    if (!text || !chatWith || chatBusy) return
+    const target = chatWith
+    setAgentInput('')
+    await agentChat(target, text, agentMsgs[target] || [])
+  }
+
+  /**
+   * 換個模型重問同一句。那次只回了推理過程的回覆先拿掉：
+   * 留著它，下一發會把「沒有給出答案」的標記當成有效上下文送回給模型。
+   */
+  const retryAgentChat = async (failedIndex: number) => {
+    if (!chatWith || chatBusy) return
+    const target = chatWith
+    const history = agentMsgs[target] || []
+    const failed = history[failedIndex]
+    const text = failed?.retryText
+    const chosenModel = failed?.retryModel
+    if (!text || !chosenModel) return
+    const prev = history[failedIndex - 1]
+    const base = prev && prev.role === 'user' && prev.text === text
+      ? history.slice(0, failedIndex - 1)   // 原問題會由 agentChat 重新貼上，避免同一句出現兩次
+      : history.slice(0, failedIndex)
+    await agentChat(target, text, base, chosenModel)
   }
 
   /**
@@ -601,7 +688,23 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
             <div className="flex flex-col gap-2" role="log" aria-live="polite" aria-relevant="additions" aria-busy={chatBusy}>
               {(agentMsgs[chatWith] || []).map((m, i) => (
                 <div key={i} className={`rounded-lg px-3 py-2 text-sm ${m.role === 'user' ? 'ml-8 bg-elev2 text-ink' : 'mr-8 bg-elev text-ink2 border border-line2'}`}>
-                  {m.text}
+                  <div className="whitespace-pre-wrap break-words">{m.text}</div>
+                  {m.reasoning && (
+                    <details className="mt-1.5 text-xs">
+                      <summary className="cursor-pointer select-none text-mute3">{t('看它的推理過程')}</summary>
+                      <div className="mt-1 whitespace-pre-wrap break-words text-mute2">{m.reasoning}</div>
+                    </details>
+                  )}
+                  {m.retryModel && (
+                    <button
+                      type="button"
+                      className="mt-1.5 rounded border border-line2 px-2 py-0.5 text-xs text-ink2 hover:bg-elev2 disabled:opacity-40"
+                      disabled={chatBusy}
+                      onClick={() => void retryAgentChat(i)}
+                    >
+                      {t('換個模型再問一次')}
+                    </button>
+                  )}
                 </div>
               ))}
               {chatBusy && (

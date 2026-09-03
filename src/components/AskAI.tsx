@@ -3,7 +3,27 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { t, useLang } from '@/i18n'
 import type { Lang } from '@/i18n'
 
-type AskMessage = { role: 'user' | 'assistant'; text: string }
+type AskMessage = {
+  role: 'user' | 'assistant'
+  text: string
+  reasoning?: string      // 只回了推理過程時，收合起來的推理草稿
+  retryText?: string      // 換模型重問時要重送的那句話
+  retryModel?: string     // 重問改用哪個模型（auto 以外的下一個可用模型）
+}
+
+/**
+ * content 為空時不要把 reasoning 當答案。推理草稿是模型的思考過程，
+ * 不是給人看的回答——實測等兩分鐘出來一整段英文「Thinking Process」，
+ * 第一次用的人會以為 AI 壞掉。這裡回一句明確說明，草稿另外收合放著，
+ * 想看的人看得到，但它不能冒充答案。
+ */
+function pickAnswer(content: unknown, reasoning: unknown): { text: string; reasoning?: string } {
+  const body = content == null ? '' : String(content).trim()
+  if (body) return { text: body }
+  const draft = reasoning == null ? '' : String(reasoning).trim()
+  if (draft) return { text: t('模型只回了推理過程，沒有給出答案。'), reasoning: draft }
+  return { text: t('（空回應）') }
+}
 
 export function askMessages(history: AskMessage[], text: string, lang: Lang = 'zh-TW') {
   return [
@@ -61,8 +81,15 @@ export default function AskAI() {
 
   useEffect(() => () => abortRef.current?.abort(), [])
 
-  const send = async () => {
-    const text = input.trim()
+  // 「換個模型再問一次」要挑的模型：目前這個的下一個。
+  // 只有一個可用模型時沒有「下一個」可換，回傳空字串讓按鈕不出現，
+  // 別讓人按了重問卻跑同一個模型、得到同樣只有推理過程的結果。
+  const nextModelAfter = (used: string) => {
+    if (models.length < 2) return ''
+    return models[(models.indexOf(used) + 1) % models.length]
+  }
+
+  const ask = async (text: string, chosenModel: string, history: AskMessage[]) => {
     if (!text || busy) return
     setBusy(true)
     setSeconds(0)
@@ -71,7 +98,7 @@ export default function AskAI() {
     const controller = new AbortController()
     abortRef.current = controller
     try {
-      let selected = model
+      let selected = chosenModel
       if (selected === 'auto') {
         const response = await fetch('/api/route?task=general', { signal: controller.signal })
         const data = await response.json()
@@ -79,19 +106,21 @@ export default function AskAI() {
         selected = data.model
         setRouteInfo(t('自動選擇：{model} — {reason}', { model: data.model, reason: data.reason || '' }))
       }
-      const next = [...messages, { role: 'user' as const, text }]
-      setMessages(next)
-      setInput('')
+      const echoed = [...history, { role: 'user' as const, text }]
+      setMessages(echoed)
       const response = await fetch('/api/chat', {
         method: 'POST',
         signal: controller.signal,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: selected, messages: askMessages(messages, text, lang) }),
+        body: JSON.stringify({ model: selected, messages: askMessages(history, text, lang) }),
       })
       const data = await response.json()
       if (!response.ok || !data?.ok) throw new Error(data?.error || t('回答失敗'))
-      const answer = String(data.content || data.reasoning || t('（空回應）'))
-      setMessages([...next, { role: 'assistant', text: answer }])
+      const picked = pickAnswer(data.content, data.reasoning)
+      const reply: AskMessage = picked.reasoning
+        ? { role: 'assistant', text: picked.text, reasoning: picked.reasoning, retryText: text, retryModel: nextModelAfter(selected) }
+        : { role: 'assistant', text: picked.text }
+      setMessages([...echoed, reply])
     } catch (failure) {
       if (failure instanceof Error && failure.name === 'AbortError') {
         setError(t('已停止等待這次回答。'))
@@ -102,6 +131,29 @@ export default function AskAI() {
       if (abortRef.current === controller) abortRef.current = null
       setBusy(false)
     }
+  }
+
+  const send = () => {
+    const text = input.trim()
+    if (!text || busy) return
+    setInput('')
+    void ask(text, model, messages)
+  }
+
+  /**
+   * 換個模型重問同一句。先把那次只有推理過程、沒給答案的回覆拿掉再重送：
+   * 留著它，下一發會把「沒有給出答案」這句標記當成有效上下文送回給模型。
+   */
+  const retryWithModel = (failedIndex: number) => {
+    const failed = messages[failedIndex]
+    const text = failed?.retryText
+    const chosenModel = failed?.retryModel
+    if (!text || !chosenModel || busy) return
+    const prev = messages[failedIndex - 1]
+    const base = prev && prev.role === 'user' && prev.text === text
+      ? messages.slice(0, failedIndex - 1)   // 原問題會由 ask 重新貼上，避免同一句出現兩次
+      : messages.slice(0, failedIndex)
+    void ask(text, chosenModel, base)
   }
 
   return (
@@ -153,6 +205,22 @@ export default function AskAI() {
             <div key={index} className={`max-w-[90%] rounded-lg px-4 py-3 text-sm leading-6 ${message.role === 'user' ? 'ml-auto bg-elev' : 'mr-auto border border-line'}`}>
               <div className="mb-1 text-xs text-mute3">{message.role === 'user' ? t('你') : t('AI 回答')}</div>
               <div className="whitespace-pre-wrap break-words">{message.text}</div>
+              {message.reasoning && (
+                <details className="mt-2 text-xs">
+                  <summary className="cursor-pointer select-none text-mute3">{t('看它的推理過程')}</summary>
+                  <div className="mt-1 whitespace-pre-wrap break-words text-mute2">{message.reasoning}</div>
+                </details>
+              )}
+              {message.retryModel && (
+                <button
+                  type="button"
+                  className="mt-2 rounded-md border border-line2 px-2.5 py-1 text-xs text-ink2 hover:bg-elev disabled:opacity-40"
+                  disabled={busy}
+                  onClick={() => retryWithModel(index)}
+                >
+                  {t('換個模型再問一次')}
+                </button>
+              )}
             </div>
           ))}
           {busy && <p role="status" className="text-xs text-mute2">{t('正在回答… {n} 秒', { n: seconds })}</p>}
