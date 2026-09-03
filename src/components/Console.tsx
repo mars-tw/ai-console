@@ -213,6 +213,9 @@ function PatchLines({ patch }: { patch: string }) {
 /** 斷線時的保守 fallback；連上後以 /api/dispatch/tools 的真實可用清單為準。 */
 const TOOLS = ['auto', 'claude', 'codex', 'qwen', 'grok', 'kimi', 'cursor', 'local'] as const
 
+/** 已結束派工每次露出的筆數。按「再顯示」一次多露這麼多筆，按到底為止 */
+const DONE_PAGE = 8
+
 interface SchedJob {
   id: string
   name: string
@@ -258,6 +261,10 @@ export default function Console() {
   const tone = useReadable()
   const [input, setInput] = useState('')
   const [toolOptions, setToolOptions] = useState<string[]>([...TOOLS])
+  // 限流中的工具。跟 QuickDispatch 用同一個來源（/api/dispatch/tools 回應裡的
+  // limited 旗標）—— 計畫裡的選單若不跟對話頁一樣把它們灰掉，
+  // 使用者選了限流的工具、按下派工才吃 503，白等一次派工往返。
+  const [limitedTools, setLimitedTools] = useState<Set<string>>(new Set())
   useEffect(() => {
     const controller = new AbortController()
     fetch('/api/dispatch/tools', { signal: controller.signal })
@@ -266,6 +273,10 @@ export default function Console() {
         if (!Array.isArray(data?.tools)) return
         setToolOptions(['auto', ...data.tools.map((item: { id?: unknown }) => String(item.id || ''))
           .filter((id: string) => id && id !== 'auto')])
+        setLimitedTools(new Set(data.tools
+          .filter((item: { limited?: unknown }) => item.limited === true)
+          .map((item: { id?: unknown }) => String(item.id || ''))
+          .filter((id: string) => id)))
       })
       .catch(() => {})
     return () => controller.abort()
@@ -304,6 +315,16 @@ export default function Console() {
   const [autoRun, setAutoRun] = useState(false)
   const [dispatches, setDispatches] = useState<ConsoleDispatch[]>([])
   const [showDone, setShowDone] = useState(false)
+  /**
+   * 已結束清單目前露出幾筆。
+   *
+   * 之前整份清單（進行中＋已結束）硬切 .slice(0, 12) —— 6 件進行中時
+   * 已結束只剩 6 個名額，但按鈕上寫的是「看已結束（24）」。數字承諾 24
+   * 卻只交付 6，落在窗口外那幾筆的「看改了什麼」「重派」永遠點不到，
+   * 使用者會以為那件根本沒跑。
+   * 現在：進行中的一律全列（本來就少）；已結束的分頁露出，按到底拿得到全部。
+   */
+  const [doneShown, setDoneShown] = useState(DONE_PAGE)
   /** 正在對哪一件補話，以及打到一半的內容 */
   const [replyTo, setReplyTo] = useState<string | null>(null)
   const [replyText, setReplyText] = useState('')
@@ -895,7 +916,9 @@ export default function Console() {
                     onChange={(e) => editStep(s.id, { tool: e.target.value })}
                   >
                     {[...new Set([...toolOptions, s.tool])].map((tl) => (
-                      <option key={tl} value={tl}>{tl}</option>
+                      <option key={tl} value={tl} disabled={limitedTools.has(tl)}>
+                        {tl}{limitedTools.has(tl) ? t('（額度用完）') : ''}
+                      </option>
                     ))}
                   </select>
                   {s.why && <span className="truncate text-[11px] text-mute3">{s.why}</span>}
@@ -1116,7 +1139,7 @@ export default function Console() {
             {done.length > 0 && (
               <button
                 className="rounded px-1 py-1.5 text-[10px] text-mute2 hover:bg-elev hover:text-ink3"
-                onClick={() => setShowDone((v) => !v)}
+                onClick={() => { setShowDone((v) => !v); setDoneShown(DONE_PAGE) }}
               >
                 {showDone ? t('收起已結束（{n}）', { n: done.length }) : t('看已結束（{n}）', { n: done.length })}
               </button>
@@ -1182,7 +1205,7 @@ export default function Console() {
           <div className="text-xs text-mute3">{t('沒有進行中的派工')}</div>
         )}
         <div className="flex flex-col gap-1">
-          {(showDone ? [...live, ...done] : live).slice(0, 12).map((d) => {
+          {(showDone ? [...live, ...done.slice(0, doneShown)] : live).map((d) => {
             const status = outcomeLook(d)
             const diff = diffData[d.id]
             const diffOpen = diffFor === d.id
@@ -1394,6 +1417,17 @@ export default function Console() {
             )
           })}
         </div>
+        {showDone && done.length > doneShown && (
+          <button
+            className="mt-1 self-start rounded px-1 py-1.5 text-[10px] text-mute2 hover:bg-elev hover:text-ink3"
+            onClick={() => setDoneShown((n) => n + DONE_PAGE)}
+          >
+            {t('再顯示 {m} 筆（還有 {n} 筆）', {
+              m: Math.min(DONE_PAGE, done.length - doneShown),
+              n: done.length - doneShown,
+            })}
+          </button>
+        )}
       </div>
     </div>
   )

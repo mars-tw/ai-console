@@ -623,6 +623,7 @@ export const EN: Record<string, string> = {
   '{n} 件進行中': '{n} in progress',
   '收起已結束（{n}）': 'Hide finished ({n})',
   '看已結束（{n}）': 'Show finished ({n})',
+  '再顯示 {m} 筆（還有 {n} 筆）': 'Show {m} more ({n} left)',
   '沒有進行中的派工': 'Nothing in progress',
   '目前沒有進行中的派工（最近 {n} 件都結束了）': 'Nothing in progress right now (the last {n} all finished)',
   '等你執行': 'Waiting for you',
