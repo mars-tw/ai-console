@@ -18,6 +18,7 @@ import {
 import { isLive, look, stateOf } from '@/lib/dispatchState'
 import { useReadable } from '@/theme'
 import LiveTerminal from '@/components/LiveTerminal'
+import QuotaStrip from '@/components/QuotaStrip'
 import type { DispatchRecord } from '@/types/data'
 
 interface Step {
@@ -1152,6 +1153,9 @@ export default function Console() {
           </div>
         )}
       </div>
+
+      {/* 派之前就看得到誰還有額度、今天燒了多少——不是撞牆之後才看到紅字 */}
+      <QuotaStrip compact />
 
       {/* ── 執行追蹤 ── */}
       <div className="rounded border border-line bg-panel p-3">

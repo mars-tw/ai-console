@@ -986,4 +986,15 @@ export const EN: Record<string, string> = {
   '這份對話沒有可帶入的內容，地端模型看不到它': 'This conversation has no content to attach; the local model cannot see it',
   '（系統提示，已略過）': '(system notice, skipped)',
   '找不到匯出的訊息檔。': 'No exported message file found.',
+
+  // ── 額度與今日用量 ────────────────────────────────
+  '額度與今日用量': "Quota & today's usage",
+  '額度資訊拿不到（控制 API 無回應）': 'Could not retrieve quota info (control API did not respond)',
+  '自動會挑': 'Auto-selected',
+  '可用': 'Available',
+  '限流': 'Rate-limited',
+  '額度狀態無法確認': 'Quota status unconfirmed',
+  '今天沒派': 'No dispatches today',
+  '{n} 件 · {in} 進 / {out} 出 token': '{n} jobs · {in} in / {out} out tokens',
 }
+
