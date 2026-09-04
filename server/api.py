@@ -3675,6 +3675,11 @@ class Handler(BaseHTTPRequestHandler):
             root, f = DATA_DIR, DATA_DIR / rel[5:]
         else:
             root, f = DIST_DIR, DIST_DIR / rel
+            # 手機遙控頁住在 /m/，而 vite 的 base 是 './'：index.html 引用 ./assets/…，
+            # 從 /m/ 開就變成 /m/assets/…。dist/m/ 底下沒有的檔，退一層到 dist/ 去找；
+            # 不然會退回 index.html（text/html），瀏覽器拒絕把它當模組執行，手機頁一片白。
+            if rel.startswith("m/") and not f.is_file() and (DIST_DIR / rel[2:]).is_file():
+                f = DIST_DIR / rel[2:]
         try:
             if not f.resolve().is_relative_to(root.resolve()):
                 return self._json({"ok": False, "error": "bad path"}, 400)

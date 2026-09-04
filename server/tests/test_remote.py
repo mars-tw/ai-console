@@ -118,6 +118,21 @@ class TestRemoteServer(unittest.TestCase):
         code, _ = self._req("/m/")
         self.assertNotEqual(code, 401)       # 沒 dist 時是 404，有 dist 時 200；重點是不擋在 token
 
+    def test_m底下的相對資產要對到dist的assets(self):
+        """vite 的 base 是 './'，index.html 引用 ./assets/…；從 /m/ 開就會要 /m/assets/…。
+        原本這條路找不到檔就退回 index.html（text/html），瀏覽器拒絕把它當模組執行，手機頁一片白。"""
+        dist = self.tmp / "dist"
+        (dist / "assets").mkdir(parents=True)
+        (dist / "assets" / "probe.js").write_text("export const ok = 1\n", encoding="utf-8")
+        (dist / "index.html").write_text("<html></html>", encoding="utf-8")
+        with mock.patch.object(api, "DIST_DIR", dist):
+            req = urllib.request.Request(self.base + "/m/assets/probe.js")
+            with urllib.request.urlopen(req, timeout=10) as r:
+                body = r.read().decode("utf-8")
+                ctype = r.headers.get("Content-Type", "")
+        self.assertIn("export const ok", body)
+        self.assertIn("javascript", ctype)
+
     # ── 鎖定 ──
     def test_猜十次就鎖(self):
         for _ in range(api._AUTH_FAIL_MAX):
