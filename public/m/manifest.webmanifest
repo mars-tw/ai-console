@@ -1,0 +1,16 @@
+{
+  "name": "AI 控制台 遙控",
+  "short_name": "AI 遙控",
+  "start_url": "/m/",
+  "scope": "/m/",
+  "display": "standalone",
+  "theme_color": "#18181b",
+  "background_color": "#09090b",
+  "icons": [
+    {
+      "src": "/m/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

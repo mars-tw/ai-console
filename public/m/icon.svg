@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <rect width="512" height="512" rx="108" fill="#09090b"/>
+  <rect x="24" y="24" width="464" height="464" rx="88" fill="#18181b" stroke="#27272a" stroke-width="8"/>
+  <!-- Phone body outline -->
+  <rect x="136" y="80" width="240" height="352" rx="36" fill="#18181b" stroke="#3b82f6" stroke-width="16"/>
+  <!-- Speaker / camera notch -->
+  <line x1="216" y1="120" x2="296" y2="120" stroke="#71717a" stroke-width="8" stroke-linecap="round"/>
+  <!-- Signal waves -->
+  <path d="M224 200 A48 48 0 0 1 288 200" fill="none" stroke="#10b981" stroke-width="12" stroke-linecap="round"/>
+  <path d="M200 176 A80 80 0 0 1 312 176" fill="none" stroke="#10b981" stroke-width="12" stroke-linecap="round"/>
+  <!-- Center AI pulse node -->
+  <circle cx="256" cy="244" r="20" fill="#3b82f6"/>
+  <!-- Console / dispatch control lines -->
+  <rect x="176" y="296" width="160" height="18" rx="9" fill="#27272a"/>
+  <rect x="176" y="328" width="112" height="18" rx="9" fill="#27272a"/>
+  <!-- Home indicator -->
+  <line x1="216" y1="392" x2="296" y2="392" stroke="#71717a" stroke-width="10" stroke-linecap="round"/>
+</svg>

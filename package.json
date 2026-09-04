@@ -24,6 +24,7 @@
     "@xterm/xterm": "^6.0.0",
     "clsx": "^2.1.1",
     "node-pty": "^1.1.0",
+    "qrcode": "^1.5.4",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router": "^7.6.1",
