@@ -30,6 +30,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import hmac
+import secrets
 import threading
 import time
 import unicodedata
@@ -3610,6 +3612,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.do_dispatches()
         if self.path == "/api/dispatch/usage":
             return self.do_dispatch_usage()
+        if self.path == "/api/remote":
+            # 含完整配對網址（token 在 # 後面，不會進任何伺服器日誌）。只給同源的桌面頁面。
+            if not self._same_origin():
+                return self._json({"ok": False, "error": "跨來源請求已拒絕"}, 403)
+            return self._json(_remote_status())
         if self.path == "/api/dispatch/tools":
             return self.do_dispatch_tools()
         if self.path.split("?", 1)[0] == "/api/search":
@@ -3893,6 +3900,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.do_dispatch_cancel()
         if self.path == "/api/dispatch/stop":
             return self.do_dispatch_stop()
+        if self.path == "/api/remote/enable":
+            return self._json(_remote_start())
+        if self.path == "/api/remote/disable":
+            return self._json(_remote_stop(forget=True))
+        if self.path == "/api/remote/rotate":
+            # 換一把新 token：舊的手機從此連不上，要重新掃 QR
+            _remote_stop(forget=True)
+            return self._json(_remote_start(secrets.token_urlsafe(24)))
         if self.path == "/api/dispatch/retry":
             return self.do_dispatch_retry()
         if self.path == "/api/dispatch":
@@ -5540,6 +5555,181 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"ok": True, "dispatches": out})
 
 
+# ── 手機遙控 ─────────────────────────────────────────────
+#
+# 使用者要在手機上看派工、派工、停工。做法不是另寫一個 app，而是同一個後端再開一個埠，
+# 只綁在 Tailscale 網卡上（WireGuard 已經加密、不開放區網與公網），每個請求都要帶配對
+# token，而且只開放派工相關的少數路徑——對話索引、檔案、技能、設定一律不給。
+# 這裡的每一條限制都對應主控台原本的安全假設：主控台假設 127.0.0.1 上的頁面就是自己人，
+# 遙控埠沒有這個假設，所以 token 與白名單都不能省。
+REMOTE_PORT = PORT + 1
+REMOTE_FILE = Path.home() / "ai-hub" / "dispatch-log" / "_remote.json"
+REMOTE_ALLOWED_GET = {"/api/health", "/api/dispatches", "/api/dispatch/tools",
+                      "/api/dispatch/usage", "/api/dispatch/log"}
+REMOTE_ALLOWED_POST = {"/api/dispatch", "/api/dispatch/followup", "/api/dispatch/stop",
+                       "/api/dispatch/cancel", "/api/dispatch/retry"}
+# 手機頁面本身與它的靜態檔。根路徑 / 不在內：那是桌面版整個主控台（含對話），遙控不開。
+REMOTE_STATIC_PREFIXES = ("/m", "/assets/", "/favicon", "/icon", "/vite.svg")
+_REMOTE = {"server": None, "thread": None, "bind": "", "token": ""}
+_REMOTE_LOCK = threading.Lock()
+# 猜 token 的擋下來：同一個來源十分鐘內錯十次就拒絕十分鐘
+_AUTH_FAILS: dict = {}
+_AUTH_FAIL_MAX = 10
+_AUTH_FAIL_WINDOW = 600
+
+
+def _tailscale_ip() -> str:
+    """Tailscale 的 IPv4。config.json 的 remote_bind 可以覆蓋（例如測試或別的 VPN）。"""
+    cfg = str(_CFG.get("remote_bind") or "").strip()
+    if cfg:
+        return cfg
+    exe = shutil.which("tailscale") or ""
+    if not exe and os.name == "nt":
+        for cand in (Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tailscale" / "tailscale.exe",):
+            if cand.is_file():
+                exe = str(cand)
+                break
+    if not exe:
+        return ""
+    try:
+        r = subprocess.run([exe, "ip", "-4"], capture_output=True, text=True, timeout=10, **_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    for line in (r.stdout or "").splitlines():
+        line = line.strip()
+        if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", line):
+            return line
+    return ""
+
+
+def _load_remote() -> dict:
+    try:
+        d = json.loads(REMOTE_FILE.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_remote(d: dict) -> None:
+    REMOTE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    REMOTE_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _auth_blocked(ip: str, now: float) -> bool:
+    hits = [t for t in _AUTH_FAILS.get(ip, []) if now - t < _AUTH_FAIL_WINDOW]
+    _AUTH_FAILS[ip] = hits
+    return len(hits) >= _AUTH_FAIL_MAX
+
+
+def _auth_failed(ip: str, now: float) -> None:
+    _AUTH_FAILS.setdefault(ip, []).append(now)
+    if len(_AUTH_FAILS) > 500:
+        _AUTH_FAILS.clear()
+
+
+def _remote_status() -> dict:
+    d = _load_remote()
+    on = _REMOTE["server"] is not None
+    tok = _REMOTE["token"] or str(d.get("token") or "")
+    bind = _REMOTE["bind"] or str(d.get("bind") or "") or _tailscale_ip()
+    # 完整網址（含 token）只會經由同源的桌面端點回給桌面頁面，用來畫 QR；不寫日誌
+    url = f"http://{bind}:{REMOTE_PORT}/m/#t={tok}" if (on and tok and bind) else ""
+    return {"ok": True, "enabled": on, "bind": bind, "port": REMOTE_PORT, "url": url,
+            "tokenTail": tok[-4:] if tok else "", "created": d.get("created", ""),
+            "tailscale": bool(bind)}
+
+
+def _remote_start(token: str = "") -> dict:
+    with _REMOTE_LOCK:
+        if _REMOTE["server"] is not None:
+            return {"ok": True, "already": True, **_remote_status()}
+        bind = _tailscale_ip()
+        if not bind:
+            return {"ok": False, "error": "找不到 Tailscale 位址：遙控只綁在 Tailscale 網卡上（不開放區網與公網）。"
+                                          "先裝好並登入 Tailscale，或在 server/config.json 設 remote_bind。"}
+        d = _load_remote()
+        tok = token or str(d.get("token") or "") or secrets.token_urlsafe(24)
+        try:
+            srv = ThreadingHTTPServer((bind, REMOTE_PORT), RemoteHandler)
+        except OSError as e:
+            return {"ok": False, "error": f"綁不上 {bind}:{REMOTE_PORT}：{e}"}
+        srv.daemon_threads = True
+        RemoteHandler.ALLOWED_ORIGINS = {f"http://{bind}:{srv.server_address[1]}"}
+        th = threading.Thread(target=srv.serve_forever, daemon=True, name="remote-http")
+        th.start()
+        _REMOTE.update(server=srv, thread=th, bind=bind, token=tok)
+        _save_remote({"token": tok, "bind": bind, "enabled": True,
+                      "created": d.get("created") or time.strftime("%Y%m%d-%H%M%S")})
+        return {"ok": True, **_remote_status()}
+
+
+def _remote_stop(forget: bool) -> dict:
+    """關掉遙控埠。forget=True 連 token 一起作廢（手機上存的那份從此無效）。"""
+    with _REMOTE_LOCK:
+        srv = _REMOTE["server"]
+        if srv is not None:
+            try:
+                srv.shutdown()
+                srv.server_close()
+            except OSError:
+                pass
+        _REMOTE.update(server=None, thread=None)
+        if forget:
+            _REMOTE["token"] = ""
+            try:
+                REMOTE_FILE.unlink()
+            except OSError:
+                pass
+        else:
+            d = _load_remote()
+            if d:
+                d["enabled"] = False
+                _save_remote(d)
+        return {"ok": True, **_remote_status()}
+
+
+class RemoteHandler(Handler):
+    """遙控埠的請求處理：先過 token 與白名單，其餘沿用主控台的邏輯（同一份登錄、同一套派工）。"""
+    ALLOWED_ORIGINS = set()          # 啟動時設成遙控埠自己的來源
+
+    def _remote_ok(self) -> bool:
+        token = _REMOTE["token"]
+        auth = self.headers.get("Authorization", "") or ""
+        given = auth[7:].strip() if auth.startswith("Bearer ") else ""
+        return bool(token) and bool(given) and hmac.compare_digest(given, token)
+
+    def _remote_gate(self, method: str) -> bool:
+        path = self.path.split("?", 1)[0]
+        if method == "GET" and (path == "/api/health" or path in ("/m", "/m/")
+                                or any(path.startswith(pre) for pre in REMOTE_STATIC_PREFIXES)):
+            return True
+        ip = str(self.client_address[0]) if self.client_address else ""
+        now = time.time()
+        if _auth_blocked(ip, now):
+            self._json({"ok": False, "error": "錯太多次 token，十分鐘後再試"}, 429)
+            return False
+        if not self._remote_ok():
+            _auth_failed(ip, now)
+            self._json({"ok": False, "error": "需要配對 token：用桌面版的「📱 手機遙控」重新掃 QR"}, 401)
+            return False
+        allowed = REMOTE_ALLOWED_GET if method == "GET" else REMOTE_ALLOWED_POST
+        if path not in allowed:
+            self._json({"ok": False, "error": "遙控模式不開放這個路徑"}, 403)
+            return False
+        return True
+
+    def do_GET(self):
+        if self._remote_gate("GET"):
+            return super().do_GET()
+
+    def do_POST(self):
+        if self._remote_gate("POST"):
+            return super().do_POST()
+
+    def log_message(self, *args):
+        return                        # 不把遙控請求（可能帶 token 的網址）寫進終端
+
+
 class SingleInstanceServer(ThreadingHTTPServer):
     """關掉位址重用。
 
@@ -5571,6 +5761,11 @@ if __name__ == "__main__":
               f"（可能有另一個實例正在啟動中，或該埠被其他程式佔用）", flush=True)
         sys.exit(1)
     print(f"AI 控制台 API 於 http://127.0.0.1:{PORT} （僅本機）", flush=True)
+    if _load_remote().get("enabled"):
+        _r = _remote_start()
+        # 只印位址，不印 token
+        print(f"手機遙控 於 http://{_r.get('bind')}:{REMOTE_PORT}/m/ （僅 Tailscale）" if _r.get("ok")
+              else f"手機遙控沒開：{_r.get('error')}", flush=True)
 
     # 定時工作的背景排程。
     #
