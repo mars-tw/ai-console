@@ -17,7 +17,7 @@
     "test:py": "python -m unittest discover -s server/tests",
     "preview": "vite preview",
     "app": "electron .",
-    "pack": "electron-packager . \"AI控制台\" --platform=win32 --arch=x64 --out=release --icon=build/icon.ico --overwrite --ignore=\"node_modules/(?!.*(electron|node-pty|node-addon-api))\" --ignore=\"^/src\" --ignore=\"^/public\" --ignore=\"^/archives\" --ignore=\"^/private\" --ignore=\"^/assets-src\" --ignore=\"^/release\""
+    "pack": "electron-packager . \"AI控制台\" --platform=win32 --arch=x64 --out=release --icon=build/icon.ico --overwrite --ignore=\"node_modules/(?!.*(electron|node-pty|node-addon-api))\" --ignore=\"^/src\" --ignore=\"^/public\" --ignore=\"^/archives\" --ignore=\"^/private\" --ignore=\"^/assets-src\" --ignore=\"^/release\" --ignore=\"^/\\.claude\" --ignore=\"^/\\.gemini\" --ignore=\"^/\\.qwen\" --ignore=\"^/\\.graphify-project\\.json\" --ignore=\"^/GEMINI\\.md\" --ignore=\"^/GRAPHIFY-BOOT\\.md\" --ignore=\"^/dist/data\" --ignore=\"^/\\.playwright-cli\" --ignore=\"^/\\.audit-tmp\""
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
