@@ -45,6 +45,18 @@ TOOL_ALIASES: dict[str, tuple[str, ...]] = {
     "local": ("地端", "本機模型", "lm studio", "lmstudio"),
 }
 
+# 拆不出來、或整句交給一個人的時候，交給誰。
+# 原本寫死 claude —— 最貴、而且依使用者的規則它是派工平台不是工人
+# （「CLAUDE CODEX 是主要派工平台，優先使用其他 AI 工作，AGY 可以先用」）。
+# 順序與 api.py 的接力鏈一致：便宜的先。
+CHEAP_ORDER: tuple[str, ...] = ("gemini", "qwen", "kimi", "grok", "codex", "claude", "local")
+
+
+def default_tool(allowed: set[str]) -> str:
+    return next((t for t in CHEAP_ORDER if t in allowed),
+                sorted(allowed)[0] if allowed else "local")
+
+
 # 指名的講法：用 X / 叫 X / 請 X / 派 X / 交給 X / 讓 X / use X …
 _NAMED_BEFORE = re.compile(r"(用|叫|請|派|交給|讓|指定|by|use|ask)\s*$")
 
@@ -78,6 +90,7 @@ PROMPT = """你是一個派工調度員。把使用者的需求拆成可以直�
 1. 能一件事做完就不要硬拆。簡單的需求就回一行。
 2. 最多 5 行。
 3. 每一行的工作敘述要「可以直接貼給那個 AI 執行」，包含足夠上下文，不要寫「同上」「接續前一步」。
+4. 執行者有價差：gemini、qwen 最便宜，kimi、grok 次之，codex、claude 最貴而且是派工平台。規格講得清楚的工作優先派給便宜的；只有需要跨檔案理解或困難推理的才派 codex 或 claude。
 
 輸出：每行一件工作，三個欄位用直線 | 分隔，依序是「執行者、要做的事、原因」。
 不要編號、不要標題列、不要程式碼框、不要任何說明文字。直接開始輸出工作。
@@ -173,7 +186,7 @@ def plan(instruction: str, model: str, skills: dict[str, str] | None = None,
     sk = dict(skills or DEFAULT_SKILLS)
     allowed = set(available) if available else set(sk)
     allowed &= set(sk) or allowed
-    fallback = "claude" if "claude" in allowed else (sorted(allowed)[0] if allowed else "local")
+    fallback = default_tool(allowed)
 
     # 使用者指名了誰，就照他講的。這比任何自動判斷都優先 ——
     # 明明講了「用 codex」卻派給別人，會讓人完全不敢再用這個介面。

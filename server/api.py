@@ -3608,6 +3608,8 @@ class Handler(BaseHTTPRequestHandler):
                 {**j, "desc": schedule.describe(j)} for j in schedule.load()]})
         if self.path == "/api/dispatches":
             return self.do_dispatches()
+        if self.path == "/api/dispatch/usage":
+            return self.do_dispatch_usage()
         if self.path == "/api/dispatch/tools":
             return self.do_dispatch_tools()
         if self.path.split("?", 1)[0] == "/api/search":
@@ -5052,7 +5054,7 @@ class Handler(BaseHTTPRequestHandler):
             return set()
 
     # 給人看的工具名。程式裡用小寫 id，畫面上用這個。
-    TOOL_LABELS = {"claude": "Claude", "codex": "Codex", "gemini": "Gemini",
+    TOOL_LABELS = {"claude": "Claude", "codex": "Codex", "gemini": "ANTIGRAVITY（agy）",
                    "qwen": "Qwen", "grok": "Grok", "kimi": "Kimi",
                    "cursor": "Cursor", "local": "地端模型"}
 
@@ -5072,6 +5074,13 @@ class Handler(BaseHTTPRequestHandler):
         # 使用者對著頁尾「閒置」與下拉「額度用完」兩種說法無從判斷 ——
         # 稽核者（kimi）指出這一點。status.json 裡本來就有 reset_at 與 evidence，
         # 拿出來講就好；沒有的話前端會退回通用的「額度狀態無法確認」。
+        reasons = self._tool_reasons(limited)
+        out = self._tool_rows(limited, reasons)
+        return self._json({"ok": True, "tools": out, "auto": self._auto_pick(limited),
+                           "limited": sorted(limited)})
+
+    def _tool_reasons(self, limited) -> dict:
+        """限流工具各自的原因（恢復時間或證據字樣）。拿不到就空。"""
         reasons = {}
         try:
             _st = json.loads(STATUS_JSON.read_text(encoding="utf-8"))
@@ -5079,7 +5088,7 @@ class Handler(BaseHTTPRequestHandler):
             # 上游掃描器先標過的工具，detect_rate_limits 會跳過（已標就不再認），
             # 於是拿不到恢復時間。enrich_reset_times 會從派工 log 把時間補上 ——
             # 它同時也會清掉「找不到恢復時間」的旗標，那是畫面那層的語意，
-            # 所以只在這份副本上跑，不影響上面 limited（路由）的判定。
+            # 所以只在這份副本上跑，不影響 limited（路由）的判定。
             _shown = json.loads(json.dumps(_st))
             enrich_reset_times(_shown)
             for _k in limited:
@@ -5091,8 +5100,14 @@ class Handler(BaseHTTPRequestHandler):
                     reasons[_k] = str(_raw["evidence"]).split("：", 1)[-1][:60]
         except Exception:
             reasons = {}
+        return reasons
+
+    def _tool_rows(self, limited, reasons) -> list:
+        """畫面上的工具列。順序照接力鏈（便宜的在前）：
+        原本寫死 claude、codex 在前而且**根本沒有 gemini** —— 「自動」會挑到 agy，
+        下拉卻選不到它，使用者看到「自動會挑 gemini」還以為畫面壞了。"""
         out = []
-        for tool in ["claude", "codex", "qwen", "grok", "kimi", "cursor"]:
+        for tool in [*self.CLOUD_CHAIN, *sorted(self.TERMINAL_TOOLS)]:
             if not _bin_available(tool):
                 continue          # 這台機器上沒裝，不要列出來給人選
             out.append({
@@ -5104,11 +5119,74 @@ class Handler(BaseHTTPRequestHandler):
             })
         out.append({"id": "local", "label": self.TOOL_LABELS["local"],
                     "mode": "local", "limited": False})
-        # auto 現在會挑到誰。畫面上直接寫出來，不要讓人猜。
-        pick = next((t for t in self.CLOUD_CHAIN
+        return out
+
+    def _auto_pick(self, limited) -> str:
+        """auto 現在會挑到誰。畫面上直接寫出來，不要讓人猜。"""
+        return next((t for t in self.CLOUD_CHAIN
                      if t not in limited and _bin_available(t)), "local")
-        return self._json({"ok": True, "tools": out, "auto": pick,
-                           "limited": sorted(limited)})
+
+    def do_dispatch_usage(self):
+        """各工具的額度狀態 + 今日／七日用量，給「額度與今日用量」那條看。
+
+        為什麼要有：2026-09-03 一天之內三次因為撞額度要人手動改派。使用者不缺
+        「已經撞牆」的紅字，缺的是**派之前**就知道誰還有額度、今天已經燒了多少。
+        成本不存在登錄裡，是從 log 掃出來的（_outcome_for 有快取，結束的 log 一輩子只掃一次）。
+        """
+        if not self.DISPATCHES:
+            self._load_registry()
+        limited = self._limited_tools()
+        reasons = self._tool_reasons(limited)
+        rows = self._tool_rows(limited, reasons)
+        now = time.time()
+        day = time.strftime("%Y%m%d", time.localtime(now))
+        week_floor = now - 7 * 86400
+        blank = lambda: {"jobs": 0, "ok": 0, "failed": 0, "stopped": 0, "in": 0, "out": 0, "usd": 0.0}
+        today = {r["id"]: blank() for r in rows}
+        week = {r["id"]: blank() for r in rows}
+        recent = [d for d in self.DISPATCHES
+                  if (_stamp_epoch(d.get("started", "")) or 0) >= week_floor]
+        alive_pids = _alive_pids({int(d["pid"]) for d in recent if d.get("pid")})
+        for d in recent:
+            tool = d.get("tool") or ""
+            if tool not in week:
+                continue
+            alive = (bool(d.get("pid")) and int(d["pid"]) in alive_pids
+                     and not _recycled(int(d["pid"]), d.get("started", ""),
+                                       force=bool(d.get("stopped"))))
+            state = self._dispatch_state(dict(d), alive)
+            cost = None
+            log = Path(d.get("log") or "")
+            if log.is_file():
+                try:
+                    size = log.stat().st_size
+                except OSError:
+                    size = 0
+                got = _outcome_for(log, size, "")
+                cost = got.get("cost")
+                outcome = got.get("outcome")
+            else:
+                outcome = None
+            buckets = [week[tool]]
+            if str(d.get("started", "")).startswith(day):
+                buckets.append(today[tool])
+            for b in buckets:
+                b["jobs"] += 1
+                if state == "stopped":
+                    b["stopped"] += 1
+                elif state == "failed" or outcome == "error":
+                    b["failed"] += 1
+                elif state == "done" and outcome in ("ok", "no_changes"):
+                    b["ok"] += 1
+                if cost:
+                    b["in"] += int(cost.get("in") or 0)
+                    b["out"] += int(cost.get("out") or 0)
+                    b["usd"] = round(b["usd"] + float(cost.get("usd") or 0), 6)
+        for r in rows:
+            r["today"] = today[r["id"]]
+            r["week"] = week[r["id"]]
+        return self._json({"ok": True, "day": time.strftime("%Y-%m-%d", time.localtime(now)),
+                           "auto": self._auto_pick(limited), "tools": rows})
 
     def _handoff_order(self, target: dict, text: str, why: str) -> str:
         """把一件做到一半的工作，交接給另一個 AI。

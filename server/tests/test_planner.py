@@ -158,7 +158,7 @@ class TestPlanShortCircuits(unittest.TestCase):
         got = planner.plan("把測試跑一遍", "", available=sorted(ALL))
         self.assertFalse(got["ok"])
         self.assertEqual(len(got["steps"]), 1)          # 失敗一定至少給一件
-        self.assertEqual(got["steps"][0]["tool"], "claude")
+        self.assertEqual(got["steps"][0]["tool"], planner.default_tool(set(ALL)))   # 預設不再是最貴的 claude
         self.assertIn("沒有可用模型", got["note"])
 
     def test_可用清單只剩地端時退路也要跟著換(self):
