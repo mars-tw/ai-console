@@ -3810,7 +3810,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 整條指令被拆壞，使用者看到的是
                 # 「檔案名稱、目錄名稱或磁碟區標籤語法錯誤」。
                 # 寫成檔案就沒有任何要跳脫的東西；chcp 65001 放在 cd 之前，
-                # 中文路徑那一行才讀得對（實測 C:\\Users\\User\\Documents\\燒雞 可以進去）。
+                # 中文路徑那一行才讀得對（實測 C:\\Users\\<你>\\Documents\\燒雞 可以進去）。
                 launch_dir = Path.home() / ".ai-console" / "launch"
                 launch_dir.mkdir(parents=True, exist_ok=True)
                 crlf = "\r\n"
