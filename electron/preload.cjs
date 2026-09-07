@@ -8,6 +8,10 @@
 
 const { contextBridge, ipcRenderer } = require('electron')
 
+contextBridge.exposeInMainWorld('acSetup', {
+  chooseDirectory: () => ipcRenderer.invoke('setup:choose-directory'),
+})
+
 /** 每個 session 的資料回呼。用 Map 而不是單一 listener，才能同時開多個終端 */
 const dataSubs = new Map()
 const exitSubs = new Map()

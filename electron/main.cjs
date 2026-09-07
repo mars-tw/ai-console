@@ -4,7 +4,7 @@
 //
 // 這裡刻意把每一步都寫進啟動日誌，因為打包後主程序的 console 看不到，
 // 出事時只會看到一個白視窗，很難查。日誌位置會顯示在錯誤畫面上。
-const { app, BrowserWindow, Menu, shell, ipcMain, Notification } = require('electron')
+const { app, BrowserWindow, Menu, shell, ipcMain, Notification, dialog } = require('electron')
 const ptyMgr = require('./pty.cjs')
 const { spawn } = require('child_process')
 const path = require('path')
@@ -89,9 +89,11 @@ function errorPage(reason) {
   li{margin:6px 0}
 </style>
 <div class="box">
-  <h1>整合伺服器沒有啟動</h1>
+  <h1>完成一個準備步驟，就能開始使用</h1>
   <p>${reason}</p>
-  <p>可以這樣查：</p>
+  <p>AI 控制台需要 Python 3.10 以上版本。請先安裝 Python，安裝時勾選加入 PATH，完成後重新開啟控制台。</p>
+  <p><a href="https://www.python.org/downloads/" target="_blank" style="color:#7dd3fc">開啟 Python 官方下載頁</a></p>
+  <p>如果已經安裝 Python，可從下方日誌查看啟動失敗原因：</p>
   <ul>
     <li>啟動日誌：<code>${LOG}</code></li>
     <li>手動啟動看錯誤訊息：<code>python server/api.py</code></li>
@@ -102,6 +104,30 @@ function errorPage(reason) {
 }
 
 let win = null
+
+function openOfficialPage(url) {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol === 'https:' && !parsed.username && !parsed.password) {
+      void shell.openExternal(parsed.href)
+    }
+  } catch { /* Invalid external links are ignored. */ }
+}
+
+function wireSetup() {
+  ipcMain.handle('setup:choose-directory', async (event) => {
+    if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) return null
+    try {
+      const url = new URL(event.senderFrame.url)
+      if (url.origin !== new URL(APP_URL).origin || url.pathname.startsWith('/m')) return null
+    } catch { return null }
+    const choice = await dialog.showOpenDialog(win, {
+      title: '選擇 AI 對話或匯出資料夾',
+      properties: ['openDirectory'],
+    })
+    return choice.canceled ? null : (choice.filePaths[0] || null)
+  })
+}
 
 /**
  * 應用程式選單。
@@ -245,6 +271,7 @@ async function createWindow() {
   buildMenu()
   wirePty()
   wireNotify()
+  wireSetup()
   win = new BrowserWindow({
     width: 1280,
     height: 840,
@@ -262,6 +289,19 @@ async function createWindow() {
       // contextIsolation 維持開著 —— 畫面那一層不該直接拿到 Node。
       preload: path.join(__dirname, 'preload.cjs'),
     },
+  })
+
+  // Setup links open in the user's browser, never inside the privileged renderer.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openOfficialPage(url)
+    return { action: 'deny' }
+  })
+  win.webContents.on('will-navigate', (event, url) => {
+    try {
+      if (new URL(url).origin === new URL(APP_URL).origin) return
+    } catch { /* Reject invalid destinations. */ }
+    event.preventDefault()
+    openOfficialPage(url)
   })
 
   const ok = await ensureServer()

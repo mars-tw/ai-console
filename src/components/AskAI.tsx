@@ -4,6 +4,7 @@ import { t, useLang } from '@/i18n'
 import type { Lang } from '@/i18n'
 import type { Dispatch, SetStateAction } from 'react'
 import { chatContext, nextChatModel, pickChatAnswer, retryChatHistory } from '@/lib/chatResponse'
+import type { AIConnection } from './AISetup'
 
 type AskMessage = {
   role: 'user' | 'assistant'
@@ -20,7 +21,11 @@ type AskMessage = {
  * 第一次用的人會以為 AI 壞掉。這裡回一句明確說明，草稿另外收合放著，
  * 想看的人看得到，但它不能冒充答案。
  */
-export type AskSession = { model: string; messages: AskMessage[]; input: string }
+export type AskSession = { model: string; connectionId?: string; connectionModels?: string[]; messages: AskMessage[]; input: string }
+
+export function askEndpoint(connectionId?: string): string {
+  return connectionId ? '/api/ai-connections/chat' : '/api/chat'
+}
 
 export function askMessages(history: AskMessage[], text: string, lang: Lang = 'zh-TW') {
   return [
@@ -35,11 +40,16 @@ export function askMessages(history: AskMessage[], text: string, lang: Lang = 'z
   ]
 }
 
-export default function AskAI({ session, onSessionChange }: { session: AskSession; onSessionChange: Dispatch<SetStateAction<AskSession>> }) {
+export default function AskAI({ session, onSessionChange, onSetup }: { session: AskSession; onSessionChange: Dispatch<SetStateAction<AskSession>>; onSetup?: () => void }) {
   const lang = useLang()
   const [models, setModels] = useState<string[]>([])
+  const [connections, setConnections] = useState<AIConnection[]>([])
+  const [connectionsLoading, setConnectionsLoading] = useState(true)
+  const [connectionsError, setConnectionsError] = useState('')
   const [modelStatus, setModelStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading')
-  const { model, messages, input } = session
+  const { model, connectionId, messages, input } = session
+  const connection = connections.find(item => item.id === connectionId)
+  const shownModels = connectionId ? Array.from(new Set([...(connection?.models || session.connectionModels || []), connection?.model || '', model].filter(item => item && item !== 'auto'))) : models
   const setModel = (value: string) => onSessionChange(current => ({ ...current, model: value }))
   const setMessages = (value: AskMessage[]) => onSessionChange(current => ({ ...current, messages: value }))
   const setInput = (value: string) => onSessionChange(current => ({ ...current, input: value }))
@@ -68,6 +78,14 @@ export default function AskAI({ session, onSessionChange }: { session: AskSessio
   useEffect(() => {
     const controller = new AbortController()
     void refreshModels(controller.signal)
+    fetch('/api/ai-connections', { signal: controller.signal, cache: 'no-store' })
+      .then(async response => {
+        const result = await response.json()
+        if (!response.ok || !result?.ok) throw new Error(result?.error || result?.loadError || `HTTP ${response.status}`)
+        if (!controller.signal.aborted) setConnections(Array.isArray(result.connections) ? result.connections : [])
+      })
+      .catch(failure => { if (!controller.signal.aborted) setConnectionsError(failure instanceof Error ? failure.message : String(failure)) })
+      .finally(() => { if (!controller.signal.aborted) setConnectionsLoading(false) })
     return () => controller.abort()
   }, [refreshModels])
 
@@ -82,10 +100,14 @@ export default function AskAI({ session, onSessionChange }: { session: AskSessio
   // 「換個模型再問一次」要挑的模型：目前這個的下一個。
   // 只有一個可用模型時沒有「下一個」可換，回傳空字串讓按鈕不出現，
   // 別讓人按了重問卻跑同一個模型、得到同樣只有推理過程的結果。
-  const nextModelAfter = (used: string) => nextChatModel(models, used)
+  const nextModelAfter = (used: string) => nextChatModel(shownModels, used)
 
   const ask = async (text: string, chosenModel: string, history: AskMessage[]) => {
     if (!text || busy) return
+    if (connectionId && (!connection || chosenModel === 'auto' || !chosenModel)) {
+      setError(t('請先在「接入 AI」檢查此連線並選擇模型。'))
+      return
+    }
     setBusy(true)
     setSeconds(0)
     setError('')
@@ -96,22 +118,24 @@ export default function AskAI({ session, onSessionChange }: { session: AskSessio
     setMessages(echoed)
     try {
       let selected = chosenModel
-      if (selected === 'auto') {
+      if (!connectionId && selected === 'auto') {
         const response = await fetch('/api/route?task=general', { signal: controller.signal })
         const data = await response.json()
         if (!response.ok || !data?.ok || !data.model) throw new Error(data?.reason || t('自動選擇模型失敗'))
         selected = data.model
         setRouteInfo(t('自動選擇：{model} — {reason}', { model: data.model, reason: data.reason || '' }))
       }
-      const response = await fetch('/api/chat', {
+      const response = await fetch(askEndpoint(connectionId), {
         method: 'POST',
         signal: controller.signal,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: selected, messages: askMessages(history, text, lang) }),
+        body: JSON.stringify({ ...(connectionId ? { id: connectionId } : {}), model: selected, messages: askMessages(history, text, lang) }),
       })
       const data = await response.json()
       if (controller.signal.aborted) return
-      if (!response.ok || !data?.ok) throw new Error(data?.error || t('回答失敗'))
+      const noAnswer = ['reasoning_only', 'empty_reply'].includes(data?.status)
+      if ((!response.ok || !data?.ok) && !noAnswer) throw new Error([data?.error || t('回答失敗'), data?.nextAction].filter(Boolean).join(' '))
+      if (noAnswer) setError([data?.error, data?.nextAction].filter(Boolean).join(' '))
       const picked = pickChatAnswer(data.content, data.reasoning)
       const reply: AskMessage = picked.excludeFromContext
         ? { role: 'assistant', ...picked, retryText: text, retryModel: nextModelAfter(selected) }
@@ -132,6 +156,10 @@ export default function AskAI({ session, onSessionChange }: { session: AskSessio
   const send = () => {
     const text = input.trim()
     if (!text || busy) return
+    if (connectionId && (!connection || model === 'auto' || !model)) {
+      setError(t('請先在「接入 AI」檢查此連線並選擇模型。'))
+      return
+    }
     setInput('')
     void ask(text, model, messages)
   }
@@ -160,21 +188,30 @@ export default function AskAI({ session, onSessionChange }: { session: AskSessio
         </p>
 
         <div className="mt-4 flex flex-wrap items-center gap-2">
-          <label className="text-sm text-ink2" htmlFor="ask-model">{t('使用哪個地端模型')}</label>
-          <select id="ask-model" className="rounded-md border border-line2 bg-panel px-2 py-1.5 text-sm" value={model} onChange={(event) => setModel(event.target.value)}>
-            <option value="auto">{t('🤖 自動（建議）')}</option>
-            {models.map((item) => <option key={item} value={item}>{item}</option>)}
+          <label className="text-sm text-ink2" htmlFor="ask-connection">{t('使用哪個 AI')}</label>
+          <select id="ask-connection" disabled={busy || connectionsLoading} className="max-w-full rounded-md border border-line2 bg-panel px-2 py-1.5 text-sm disabled:opacity-40" value={connectionId || ''} onChange={event => { const next = connections.find(item => item.id === event.target.value); if (event.target.value && !next) return; setError(''); setRouteInfo(''); onSessionChange(current => ({ ...current, connectionId: next?.id, connectionModels: next?.models, model: next?.model || 'auto' })) }}>
+            <option value="">LM Studio</option>
+            {connectionId && !connection && <option value={connectionId}>{t('連線尚未載入或已移除')}</option>}
+            {connections.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
           </select>
+          <label className="text-sm text-ink2" htmlFor="ask-model">{t('選擇模型')}</label>
+          <select id="ask-model" disabled={busy} className="max-w-full rounded-md border border-line2 bg-panel px-2 py-1.5 text-sm disabled:opacity-40" value={model} onChange={(event) => setModel(event.target.value)}>
+            {!connectionId && <option value="auto">{t('🤖 自動（建議）')}</option>}
+            {shownModels.map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+          {onSetup && <button type="button" className="text-sm underline" onClick={onSetup}>{t('接入其他 AI')}</button>}
         </div>
+        {connectionsError && <p role="status" className="mt-2 text-xs text-amber-700 dark:text-amber-300">{t('無法讀取已加入的 AI：{err}', { err: connectionsError })}</p>}
+        {connectionId && <p className="mt-2 text-xs leading-5 text-mute2">{t('問題與本頁聊天紀錄會傳送到所選服務；雲端服務可能計費。')}</p>}
 
-        {modelStatus === 'loading' && (
+        {!connectionId && modelStatus === 'loading' && (
           <p role="status" className="mt-2 text-xs text-mute2">{t('正在檢查地端模型…')}</p>
         )}
-        {modelStatus === 'unavailable' && (
+        {!connectionId && modelStatus === 'unavailable' && (
           <div role="status" className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/20 dark:text-amber-300">
             <p className="font-medium">{t('尚未連上可用的地端模型')}</p>
             <p className="mt-1 text-xs leading-5">
-              {t('請開啟 LM Studio、載入一個完整模型，再啟動 Local Server。完成後按「重新檢查」。')}
+              {t('請開啟 LM Studio 並下載一個模型。重新檢查後，送出問題時會檢查可否安全載入。')}
             </p>
             <button
               type="button"

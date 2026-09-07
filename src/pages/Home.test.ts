@@ -55,6 +55,10 @@ describe('新手首頁', () => {
 })
 
 describe('對話搜尋', () => {
+  it('不把新發現的唯讀來源當成過期的工具內對話隱藏', () => {
+    expect(conversationPassesFilters({ ...base, tool: 'other-ai', sourceKind: 'discovered', readOnly: true, inApp: false, mtime: 1 }, normalFilters)).toBe(true)
+    expect(conversationPassesFilters({ ...base, inApp: false, mtime: 1 }, normalFilters)).toBe(false)
+  })
   it('能分辨「搜得到但被篩選收起」，不會當成沒有結果', () => {
     const worker = { ...base, id: 'worker', dispatch: true, inApp: false }
     expect(conversationMatchesSearch(worker, '第一份')).toBe(true)

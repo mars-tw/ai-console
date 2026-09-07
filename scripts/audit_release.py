@@ -15,7 +15,7 @@ TEXT_EXTENSIONS = {'.json', '.py', '.js', '.cjs', '.mjs', '.ts', '.tsx', '.md', 
                    '.css', '.map', '.toml', '.yaml', '.yml', '.txt', '.bat', '.ps1', '.webmanifest', '.svg'}
 FORBIDDEN_PARTS = {'.claude', '.codex', '.gemini', '.qwen', '.grok', '.agents', '.git',
                    '.playwright-cli', '.audit-tmp', '__pycache__', 'output', 'private'}
-FORBIDDEN_FILES = {'config.json', '_remote.json', 'auth.json', '.env', '.graphify-project.json',
+FORBIDDEN_FILES = {'config.json', 'connections.json', '_remote.json', 'auth.json', '.env', '.graphify-project.json',
                    'graphify-boot.md', 'gemini.md'}
 
 
@@ -97,7 +97,8 @@ def audit(path: Path, kind: str, version: str, private_home: str | None = None,
         manifest = next(data for name, data, _ in contents(path) if name == manifest_name)
         if json.loads(manifest).get('version') != version:
             issues.append({'file': manifest_name, 'rule': 'wrong-version'})
-        required = ['server/api.py', 'electron/main.cjs', 'scripts/find-python.cjs']
+        required = ['server/api.py', 'server/ai_connections.py', 'server/setup_catalog.py',
+                    'electron/main.cjs', 'scripts/find-python.cjs']
         if kind != 'source':
             required += ['dist/index.html', 'dist/m/manifest.webmanifest',
                          'node_modules/node-pty/prebuilds/win32-x64/conpty.node']

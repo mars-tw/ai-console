@@ -26,8 +26,10 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 HOME = Path(os.path.expanduser("~"))
@@ -37,8 +39,22 @@ MAX_DEPTH = 6              # 從候選目錄往下最多幾層
 MAX_DIRS_PER_CAND = 3000   # 每個候選最多走訪幾個目錄
 MAX_FILES_SNIFF = 400      # 每個候選最多嗅探幾個檔案（每個只讀 16KB，很便宜）
 SNIFF_BYTES = 16384        # 每個檔案只讀前 16KB
-MIN_HITS = 2               # 至少幾個檔案像對話，才認定是 AI 工具
+MIN_HITS = 1               # 一份含角色及本文的對話已足夠；role-only 不算
 TIME_BUDGET = 25.0         # 整體掃描秒數上限
+MAX_ROOTS = 32
+MAX_EXTRA_ROOTS = 8
+MAX_CANDIDATES = 512
+JSON_BYTES = 8 * 1024 * 1024
+MAX_RECORDS = 10000
+MESSAGE_ARRAY_KEYS = ("messages", "history", "conversation", "turns", "entries")
+MESSAGE_WRAPPERS = ("message", "payload", "record", "data")
+TEXT_KEYS = ("content", "text", "input_text", "output_text", "parts")
+SQLITE_MESSAGE_TABLES = {"messages", "message", "chat_messages", "conversation_messages",
+                         "session_messages", "thread_messages"}
+SQLITE_ROLE_COLUMNS = ("role", "sender", "type")
+SQLITE_TEXT_COLUMNS = ("content", "text", "message", "body")
+SQLITE_ID_COLUMNS = ("conversation_id", "session_id", "thread_id", "chat_id")
+SQLITE_TIME_COLUMNS = ("timestamp", "created_at", "createdAt", "ts", "time")
 
 # 這些目錄一定不是對話紀錄，直接不進去（省下大量時間）
 NOISE_DIRS = {
@@ -196,10 +212,6 @@ def candidate_parents() -> list[Path]:
         p = HOME / rel
         if p.is_dir():
             out.append(p)
-    env_extra = os.environ.get("AI_CONSOLE_SCAN_DIRS", "")
-    for chunk in env_extra.split(os.pathsep):
-        if chunk and Path(chunk).is_dir():
-            out.append(Path(chunk))
     return out
 
 
@@ -212,75 +224,196 @@ def is_noise(name: str) -> bool:
     )
 
 
-def looks_like_message(obj) -> bool:
+def looks_like_message(obj, depth=0) -> bool:
     """一個 JSON 物件像不像一則對話訊息"""
-    if not isinstance(obj, dict):
+    if not isinstance(obj, dict) or depth > 6:
         return False
-    # 直接帶 role
+    # 角色本身常出現在設定；必须同時具有可解析的非空文字。
     role = obj.get("role") or obj.get("type") or obj.get("sender")
-    if isinstance(role, str) and role.lower() in ROLE_WORDS:
+    if (isinstance(role, str) and role.lower() in ROLE_WORDS
+            and any(_has_text(obj.get(k)) for k in TEXT_KEYS)):
         return True
-    # 包一層的：{"message": {"role": ...}}
-    inner = obj.get("message") or obj.get("payload") or obj.get("data")
-    if isinstance(inner, dict):
-        r = inner.get("role") or inner.get("type")
-        if isinstance(r, str) and r.lower() in ROLE_WORDS:
+    for key in MESSAGE_WRAPPERS:
+        inner = obj.get(key)
+        if isinstance(inner, dict) and looks_like_message(inner, depth + 1):
             return True
-    # 有 content/text 又有時間戳，通常也是訊息流
-    has_text = any(k in obj for k in ("content", "text", "input_text", "output_text", "parts"))
-    has_time = any(k in obj for k in ("timestamp", "ts", "createdAt", "created_at", "time"))
-    return has_text and has_time
+    return False
 
 
-def sniff_jsonl(path: Path) -> bool:
+def _has_text(value, depth=0) -> bool:
+    if depth > 6:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(_has_text(x, depth + 1) for x in value)
+    if isinstance(value, dict):
+        return any(_has_text(value.get(k), depth + 1) for k in TEXT_KEYS)
+    return False
+
+
+def is_link(path: Path) -> bool:
+    """Windows junctions are reparse points, even on Python without is_junction()."""
     try:
-        with path.open("rb") as f:
-            head = f.read(SNIFF_BYTES)
+        info = path.lstat()
+        return stat.S_ISLNK(info.st_mode) or bool(
+            getattr(info, "st_file_attributes", 0) & 0x400)
     except OSError:
-        return False
-    text = head.decode("utf-8", "ignore")
-    lines = [l for l in text.splitlines() if l.strip().startswith("{")][:6]
-    if not lines:
-        return False
-    hits = 0
-    for l in lines:
-        try:
-            if looks_like_message(json.loads(l)):
-                hits += 1
-        except json.JSONDecodeError:
-            continue          # 最後一行可能被 SNIFF_BYTES 切斷，正常
-    return hits >= max(1, len(lines) // 2)
+        return True
 
 
-def sniff_json(path: Path) -> bool:
-    try:
-        if path.stat().st_size > 4 * 1024 * 1024:
+def safe_path(path: Path, *, file=False) -> bool:
+    path = Path(os.path.abspath(path))
+    if file and is_excluded_file(path.name):
+        return False
+    dirs = path.parents if file else (path, *path.parents)
+    for part in dirs:
+        if is_excluded_dir(part.name) or is_link(part):
             return False
-        obj = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    arr = obj if isinstance(obj, list) else None
-    if isinstance(obj, dict):
-        for k in ("messages", "history", "conversation", "turns", "entries"):
-            if isinstance(obj.get(k), list):
-                arr = obj[k]
-                break
-    if not isinstance(arr, list) or not arr:
-        return False
-    return sum(1 for x in arr[:6] if looks_like_message(x)) >= 1
+    return not (file and is_link(path))
 
 
-def sniff_db(path: Path) -> bool:
+def _json_records(obj, depth=0):
+    if depth > 6:
+        return
+    if isinstance(obj, list):
+        for row in obj:
+            yield from _json_records(row, depth + 1)
+    elif isinstance(obj, dict):
+        for key in MESSAGE_ARRAY_KEYS:
+            if isinstance(obj.get(key), list):
+                yield from _json_records(obj[key], depth + 1)
+                return
+        # Export wrappers can contain messages arrays one or two levels below data.
+        for key in MESSAGE_WRAPPERS:
+            inner = obj.get(key)
+            if isinstance(inner, dict) and any(k in inner for k in MESSAGE_ARRAY_KEYS):
+                yield from _json_records(inner, depth + 1)
+                return
+        yield obj
+
+
+def _quoted(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _read_sqlite(path: Path, max_bytes: int, max_records: int, deadline=None) -> dict:
+    """Read only allowlisted message columns; never SELECT * or inspect auth tables."""
+    result = {"records": [], "status": "unsupported", "reasons": [], "format": "sqlite"}
+    stop = min(deadline or float("inf"), time.time() + 2.0)
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True, timeout=1)
+        # mode=ro sees committed WAL rows. query_only forbids writes; no immutable stale view.
+        con = sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True, timeout=0.2)
         try:
+            con.execute("PRAGMA query_only=ON")
+            con.set_progress_handler(lambda: int(time.time() > stop), 1000)
             names = [r[0] for r in con.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'")]
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN (" +
+                ",".join("?" for _ in SQLITE_MESSAGE_TABLES) + ")", tuple(SQLITE_MESSAGE_TABLES))]
+            used = 0
+            for table in sorted(names):
+                columns = {r[1] for r in con.execute(f"PRAGMA table_info({_quoted(table)})")}
+                role = next((c for c in SQLITE_ROLE_COLUMNS if c in columns), None)
+                body = next((c for c in SQLITE_TEXT_COLUMNS if c in columns), None)
+                if not role or not body:
+                    continue
+                result["status"] = "ok"
+                sid = next((c for c in SQLITE_ID_COLUMNS if c in columns), None)
+                ts = next((c for c in SQLITE_TIME_COLUMNS if c in columns), None)
+                # substr bounds even a maliciously huge cell before transferring it to Python.
+                selected = [f"substr({_quoted(role)}, 1, 32)",
+                            f"substr({_quoted(body)}, 1, ?)"]
+                selected += [f"substr({_quoted(sid)}, 1, 256)" if sid else "NULL",
+                             f"substr({_quoted(ts)}, 1, 128)" if ts else "NULL"]
+                query = f"SELECT {', '.join(selected)} FROM {_quoted(table)} LIMIT ?"
+                for r, text, doc_id, timestamp in con.execute(query, (max_bytes + 1, max_records + 1)):
+                    if len(result["records"]) >= max_records:
+                        result["reasons"].append("record-limit")
+                        break
+                    if not isinstance(text, str):
+                        continue
+                    used += len(text.encode("utf-8"))
+                    if used > max_bytes:
+                        result["reasons"].append("byte-limit")
+                        break
+                    if text.lstrip().startswith(("[", "{")):
+                        try:
+                            text = json.loads(text)
+                        except (ValueError, RecursionError):
+                            pass
+                    rec = {"role": r, "content": text, "timestamp": timestamp or ""}
+                    if sid:
+                        rec["_conversation_id"] = str(doc_id or "")
+                    if looks_like_message(rec):
+                        result["records"].append(rec)
+                if result["reasons"]:
+                    break
         finally:
             con.close()
     except sqlite3.Error:
-        return False
-    return any(DB_TABLE_RE.search(n) for n in names)
+        result["status"] = "unreadable"
+        result["reasons"].append("sqlite-read-error")
+    return result
+
+
+def read_conversation_records(path: Path, *, max_bytes=JSON_BYTES,
+                              max_records=MAX_RECORDS, deadline=None) -> dict:
+    """Shared bounded format reader used by discovery and indexing."""
+    path = Path(path)
+    ext = path.suffix.lower()
+    result = {"records": [], "status": "unsupported", "reasons": [], "format": ext.lstrip(".")}
+    if not safe_path(path, file=True):
+        result["status"] = "excluded"
+        return result
+    if ext in DB_EXT:
+        return _read_sqlite(path, max_bytes, max_records, deadline)
+    if ext not in CONV_EXT:
+        return result
+    try:
+        with path.open("rb") as fh:
+            raw = fh.read(max_bytes + 1)
+        limited = len(raw) > max_bytes
+        if limited:
+            result["reasons"].append("byte-limit")
+        text = raw[:max_bytes].decode("utf-8-sig", "replace")
+        result["status"] = "ok"
+        if ext == ".json":
+            if limited:
+                return result
+            rows = _json_records(json.loads(text))
+        else:
+            def lines():
+                for line in text.splitlines():
+                    if deadline and time.time() > deadline:
+                        result["reasons"].append("time-limit")
+                        return
+                    try:
+                        yield from _json_records(json.loads(line))
+                    except (ValueError, RecursionError):
+                        continue
+            rows = lines()
+        for row in rows:
+            if len(result["records"]) >= max_records:
+                result["reasons"].append("record-limit")
+                break
+            result["records"].append(row)
+    except (OSError, ValueError, RecursionError):
+        result["status"] = "unreadable"
+        result["reasons"].append("file-read-error")
+    return result
+
+
+def sniff_jsonl(path: Path) -> bool:
+    return any(looks_like_message(r) for r in
+               read_conversation_records(path, max_bytes=SNIFF_BYTES)["records"])
+
+
+def sniff_json(path: Path) -> bool:
+    return any(looks_like_message(r) for r in read_conversation_records(path)["records"])
+
+
+def sniff_db(path: Path) -> bool:
+    return bool(read_conversation_records(path, max_bytes=SNIFF_BYTES)["records"])
 
 
 def sniff(path: Path) -> bool:
@@ -316,11 +449,28 @@ def common_root(paths: list[Path], cand: Path) -> Path:
     return root
 
 
-def scan_candidate(cand: Path, deadline: float, deep: bool) -> dict | None:
+def _report(deep=False) -> dict:
+    return {"complete": True, "reasons": [], "deep": deep,
+            "startedAt": datetime.now(timezone.utc).isoformat(), "durationMs": 0,
+            "candidates": 0, "directories": 0, "filesInspected": 0,
+            "matchedFiles": 0, "skippedFiles": 0, "skippedDirectories": 0,
+            "unsupportedFiles": 0, "roots": [], "cached": False, "cacheAgeSeconds": 0}
+
+
+def report_reason(report: dict | None, reason: str) -> None:
+    if report is not None:
+        report["complete"] = False
+        if reason not in report["reasons"]:
+            report["reasons"].append(reason)
+
+
+def scan_candidate(cand: Path, deadline: float, deep: bool, report=None) -> dict | None:
     """走訪一個候選目錄，回傳偵測結果（不像 AI 工具就回 None）"""
     # scan_candidate 也是可公開呼叫的單元，不能只倚賴 scan() 的上層過濾。
-    if is_excluded_candidate(cand.name):
+    if is_excluded_candidate(cand.name) or not safe_path(cand):
         return None
+
+    report = report if report is not None else _report(deep)
 
     hits: list[Path] = []
     exts: set[str] = set()
@@ -328,107 +478,216 @@ def scan_candidate(cand: Path, deadline: float, deep: bool) -> dict | None:
     files_sniffed = 0
     max_dirs = MAX_DIRS_PER_CAND * (4 if deep else 1)
     max_files = MAX_FILES_SNIFF * (4 if deep else 1)
+    max_depth = MAX_DEPTH * (2 if deep else 1)
 
-    for dirpath, dirnames, filenames in os.walk(cand):
+    def onerror(_error):
+        report_reason(report, "directory-read-error")
+
+    for dirpath, dirnames, filenames in os.walk(cand, followlinks=False, onerror=onerror):
         if time.time() > deadline:
+            report_reason(report, "time-limit")
             break
         d = Path(dirpath)
         depth = len(d.relative_to(cand).parts)
-        if depth >= MAX_DEPTH:
-            dirnames[:] = []
         # os.walk 只會在這份清單保留目錄後才往下 scandir；必須在
         # 這裡原地剪枝，不可等進入後才略過檔案。
-        dirnames[:] = [n for n in dirnames if not is_noise(n)]
+        kept = [n for n in dirnames if not is_noise(n) and not is_link(d / n)]
+        report["skippedDirectories"] += len(dirnames) - len(kept)
+        dirnames[:] = kept
+        if depth >= max_depth and dirnames:
+            report_reason(report, "depth-limit")
+            report["skippedDirectories"] += len(dirnames)
+            dirnames[:] = []
         # 像對話目錄的先走，雜項後走
         dirnames.sort(key=lambda n: (0 if PRIORITY_RE.match(n) else 1, n.lower()))
         dirs_seen += 1
         if dirs_seen > max_dirs:
+            report_reason(report, "directory-limit")
             break
-        for fn in filenames:
+        report["directories"] += 1
+        for fn in sorted(filenames, key=str.casefold):
+            if time.time() > deadline:
+                report_reason(report, "time-limit")
+                break
             # 擋在副檔名、stat 與 sniff 之前，保證敏感檔不會被開啟。
             if is_excluded_file(fn):
+                report["skippedFiles"] += 1
                 continue
             ext = Path(fn).suffix.lower()
             if ext not in CONV_EXT and ext not in DB_EXT:
+                report["skippedFiles"] += 1
                 continue
             f = d / fn
-            try:
-                if f.stat().st_size < 120:
-                    continue
-            except OSError:
+            if is_link(f):
+                report["skippedFiles"] += 1
                 continue
-            files_sniffed += 1
-            if files_sniffed > max_files:
+            if files_sniffed >= max_files:
+                report_reason(report, "file-limit")
                 break
-            if sniff(f):
+            files_sniffed += 1
+            report["filesInspected"] += 1
+            parsed = read_conversation_records(
+                f, max_bytes=JSON_BYTES if ext == ".json" else SNIFF_BYTES, deadline=deadline)
+            matched = any(looks_like_message(r) for r in parsed["records"])
+            if parsed["status"] == "unsupported":
+                report["unsupportedFiles"] += 1
+                report_reason(report, "unsupported-format")
+            elif parsed["status"] == "unreadable":
+                report["skippedFiles"] += 1
+                report_reason(report, "file-read-error")
+            for reason in parsed["reasons"]:
+                # A sufficient sample establishes the format; it does not claim full parsing.
+                if not matched or reason not in ("byte-limit", "record-limit"):
+                    report_reason(report, reason)
+            if matched:
                 hits.append(f)
+                report["matchedFiles"] += 1
                 exts.add(ext)
-                if len(hits) >= 40:
-                    break
-        if len(hits) >= 40 or files_sniffed > max_files:
+        if files_sniffed >= max_files:
+            # There may be unexplored sibling directories even at an exact file boundary.
+            report_reason(report, "file-limit")
             break
 
     if len(hits) < MIN_HITS:
         return None
 
     raw = cand.name.lstrip(".").lower()
-    tool = TOOL_ALIASES.get(raw, raw)
-    root = common_root(hits, cand)
-    # 從命中的檔名歸納出一個 glob
-    if all(h.suffix.lower() in (".jsonl", ".ndjson") for h in hits):
-        names = {h.name for h in hits}
-        pattern = next(iter(names)) if len(names) == 1 else "*.jsonl"
-    elif all(h.suffix.lower() == ".json" for h in hits):
-        pattern = "*.json"
-    else:
-        pattern = "*.json*"
+    tool = TOOL_ALIASES.get(raw, re.sub(r"[^\w.-]+", "-", raw).strip("-") or "imported")
+    # Keep the candidate root: a partial sample's common parent can hide siblings.
+    root = common_root(hits, cand) if report["complete"] else cand
+    patterns = ["*" + ext for ext in sorted(exts)]
+    pattern = patterns[0] if len(patterns) == 1 else "*"
 
     return {
         "tool": tool,
         "label": KNOWN_LABELS.get(tool, cand.name.lstrip(".").replace("-", " ").title()),
         "root": str(root),
         "pattern": pattern,
+        "patterns": patterns,
         "hits": len(hits),
-        "kind": "sqlite" if exts & DB_EXT else "jsonl",
+        "kind": "mixed" if len(exts) > 1 else ("sqlite" if exts & DB_EXT else next(iter(exts))[1:]),
         "from": str(cand),
     }
 
 
-def scan(deep: bool = False) -> list[dict]:
-    """掃描全機，回傳偵測到的 AI 對話來源（依命中數排序）"""
+def validate_extra_roots(extra_roots=None, *, include_env=True) -> list[Path]:
+    """Explicit roots are individual tool/export folders, never drive/home/storage roots."""
+    chunks = list(extra_roots or [])
+    if include_env:
+        chunks.extend(c for c in os.environ.get("AI_CONSOLE_SCAN_DIRS", "").split(os.pathsep) if c)
+    if len(chunks) > MAX_EXTRA_ROOTS:
+        raise ValueError(f"At most {MAX_EXTRA_ROOTS} extra scan roots are allowed")
+    roots = []
+    broad = {HOME, HOME / "Documents", HOME / "Desktop", HOME / "Downloads",
+             HOME / "AppData", HOME / "AppData/Roaming", HOME / "AppData/Local",
+             HOME / ".config", HOME / ".local", HOME / ".local/share"}
+    for key in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "PUBLIC"):
+        if os.environ.get(key):
+            broad.add(Path(os.environ[key]))
+    broad.add(HOME.parent)
+    broad_keys = {os.path.normcase(os.path.abspath(p)) for p in broad}
+    for value in chunks:
+        if not isinstance(value, (str, os.PathLike)):
+            raise ValueError("Scan root must be an absolute tool/export directory")
+        root = Path(value)
+        # Reject traversal before normalization; then validate the actual canonical root.
+        # C:\Users\.. must never become an accepted whole-drive scan.
+        if not root.is_absolute() or ".." in root.parts or not safe_path(root):
+            raise ValueError("Scan root must be a safe, existing, specific tool/export directory")
+        try:
+            root = root.resolve(strict=True)
+        except (OSError, RuntimeError):
+            raise ValueError("Scan root must be a safe, existing, specific tool/export directory") from None
+        if (root == Path(root.anchor)
+                or os.path.normcase(os.path.abspath(root)) in broad_keys
+                or not safe_path(root) or is_noise(root.name) or not root.is_dir()):
+            raise ValueError("Scan root must be a safe, existing, specific tool/export directory")
+        root = Path(os.path.abspath(root))
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def scan_with_report(deep: bool = False, extra_roots=None) -> dict:
+    """Completeness is scoped to the listed safe roots, never a claim about whole disks."""
+    t0 = time.time()
+    report = _report(deep)
     deadline = time.time() + (TIME_BUDGET * (4 if deep else 1))
     found: dict[str, dict] = {}
     seen_dirs: set[Path] = set()
+    explicit = validate_extra_roots(extra_roots)
 
-    for parent in candidate_parents():
+    def add(cand):
+        if cand in seen_dirs or is_noise(cand.name) or not safe_path(cand):
+            return
+        if len(seen_dirs) >= MAX_CANDIDATES:
+            report_reason(report, "candidate-limit")
+            return
+        seen_dirs.add(cand)
+        report["candidates"] += 1
+        res = scan_candidate(cand, deadline, deep, report)
+        if res:
+            key = res["root"]
+            if key not in found or res["hits"] > found[key]["hits"]:
+                found[key] = res
+
+    # User-selected roots run first, while the same global time/candidate budgets apply.
+    for cand in explicit:
+        report["roots"].append(str(cand))
+        add(cand)
+
+    for i, parent in enumerate(candidate_parents()):
         # AI_CONSOLE_SCAN_DIRS 也可能被指到過寬或敏感的根；即使是
         # 顯式設定，憑證儲存仍不可被當成 parent 列舉。
-        if is_excluded_dir(parent.name):
+        if i >= MAX_ROOTS:
+            report_reason(report, "root-limit")
+            break
+        if time.time() > deadline:
+            report_reason(report, "time-limit")
+            break
+        if is_excluded_dir(parent.name) or not safe_path(parent):
             continue
+        report["roots"].append(str(parent))
         try:
-            children = sorted(p for p in parent.iterdir() if p.is_dir())
+            children = []
+            with os.scandir(parent) as entries:
+                for entry in entries:
+                    if time.time() > deadline:
+                        report_reason(report, "time-limit")
+                        break
+                    if len(children) >= MAX_CANDIDATES:
+                        report_reason(report, "candidate-limit")
+                        break
+                    if (not is_noise(entry.name) and not is_link(Path(entry.path))
+                            and entry.is_dir(follow_symlinks=False)):
+                        children.append(Path(entry.path))
+            children.sort()
         except OSError:
+            report_reason(report, "directory-read-error")
             continue
         for cand in children:
             if time.time() > deadline:
+                report_reason(report, "time-limit")
                 break
             if cand in seen_dirs or is_noise(cand.name):
                 continue
             # 家目錄底下只看 dot 資料夾，不然會把 Documents 之類整個翻一遍
             if parent == HOME and not cand.name.startswith("."):
                 continue
-            seen_dirs.add(cand)
             try:
-                res = scan_candidate(cand, deadline, deep)
+                add(cand)
             except (OSError, PermissionError):
+                report_reason(report, "directory-read-error")
                 continue
-            if not res:
-                continue
-            key = res["root"]
-            if key not in found or res["hits"] > found[key]["hits"]:
-                found[key] = res
 
-    return sorted(found.values(), key=lambda r: (-r["hits"], r["tool"]))
+    report["durationMs"] = round((time.time() - t0) * 1000)
+    return {"sources": sorted(found.values(), key=lambda r: (-r["hits"], r["tool"])),
+            "scan": report}
+
+
+def scan(deep: bool = False, extra_roots=None) -> list[dict]:
+    """Backward-compatible list-only discovery API."""
+    return scan_with_report(deep, extra_roots)["sources"]
 
 
 def main():

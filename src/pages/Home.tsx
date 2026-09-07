@@ -4,6 +4,8 @@ import type { ReactNode } from 'react'
 import type { ConversationDetail, ConversationSummary, IndexData } from '@/types/data'
 import Adventure from '@/components/Adventure'
 import AskAI from '@/components/AskAI'
+import AISetup, { SetupWelcome } from '@/components/AISetup'
+import type { AIConnection } from '@/components/AISetup'
 import type { AskSession } from '@/components/AskAI'
 import { chatContext, nextChatModel, pickChatAnswer, retryChatHistory } from '@/lib/chatResponse'
 import Console from '@/components/Console'
@@ -68,7 +70,7 @@ export function conversationPassesFilters(
   if (filters.showTrash !== inTrash) return false
   if (!filters.showSubagent && conversation.subagent) return false
   if (!filters.showDup && conversation.dup) return false
-  if (!conversation.inApp && !filters.showOld && conversation.mtime < filters.cutoff) return false
+  if (!conversation.inApp && conversation.sourceKind !== 'discovered' && !filters.showOld && conversation.mtime < filters.cutoff) return false
   // 來源桌面側欄明確存在的對話比推測式 dispatch 分類更權威。
   if (!conversation.inApp && !filters.showDispatch && conversation.dispatch) return false
   if (filters.onlyCJK && !HAS_CJK.test(conversation.title)) return false
@@ -103,7 +105,7 @@ export function shouldShowSearchNoResults(
 }
 
 function canDeleteFromConsole(c: ConversationSummary): boolean {
-  return !SOURCE_MANAGED_DELETE_TOOLS.has(c.tool)
+  return !c.readOnly && !SOURCE_MANAGED_DELETE_TOOLS.has(c.tool)
 }
 
 const TAIL_ERROR_TEXT: Record<string, string> = {
@@ -319,9 +321,13 @@ export default function Home() {
     () => new Map((index?.conversations ?? []).map((c) => [c.id, c])),
     [index],
   )
-  const [viewMode, setViewMode] = useState<'list' | 'ask' | 'console' | 'office' | 'rpg' | 'skills'>('list')
+  const [viewMode, setViewMode] = useState<'list' | 'ask' | 'console' | 'office' | 'rpg' | 'skills' | 'setup'>('list')
   const [askSession, setAskSession] = useState<AskSession>({ model: 'auto', messages: [], input: '' })
   const [syncOpen, setSyncOpen] = useState(false)
+  const startSetupChat = (connection?: AIConnection) => {
+    setAskSession(current => ({ ...current, connectionId: connection?.id, connectionModels: connection?.models, model: connection?.model || 'auto' }))
+    setViewMode('ask')
+  }
   /**
    * 側欄開合。
    *
@@ -920,7 +926,7 @@ export default function Home() {
     const scanned = new Date(index.generated_at).getTime() || 0
     const dirCutoff = activeDays > 0 && !q && scanned ? scanned - activeDays * 86400000 : 0
     return [...map.entries()]
-      .filter(([, convs]) => !dirCutoff || convs.some((c) => c.inApp || c.mtime >= dirCutoff))
+      .filter(([, convs]) => !dirCutoff || convs.some((c) => c.inApp || c.sourceKind === 'discovered' || c.mtime >= dirCutoff))
       .map(([dir, convs]) => {
         // 該資料夾的主要工作線 = 成員中最常見的分類
         const counts = new Map<string, number>()
@@ -1033,6 +1039,7 @@ export default function Home() {
   const tabs = (
     <div className="flex flex-none items-center gap-1 overflow-x-auto border-b border-line px-3 py-1.5">
       {([
+        ['setup', t('🔌 接入 AI')],
         ['list', t('📋 對話')], ['ask', t('💬 問 AI')], ['console', t('🎙️ 派工主控台')],
         ['office', t('🎮 辦公室')], ['rpg', t('⚔️ 冒險')],
         ['skills', t('🧩 AI 技能')],
@@ -1053,8 +1060,10 @@ export default function Home() {
     <div className="flex h-screen flex-col bg-panel text-ink">
       <main className="flex min-w-0 flex-1 flex-col">
         {tabs}
-        {viewMode === 'ask' ? (
-          <AskAI session={askSession} onSessionChange={setAskSession} />
+        {viewMode === 'setup' ? (
+          <AISetup onStartChat={startSetupChat} />
+        ) : viewMode === 'ask' ? (
+          <AskAI session={askSession} onSessionChange={setAskSession} onSetup={() => setViewMode('setup')} />
         ) : viewMode === 'console' ? (
           <Console />
         ) : viewMode === 'office' ? (
@@ -1066,14 +1075,20 @@ export default function Home() {
         ) : (
           error ? (
             <div className="min-h-0 flex-1 overflow-y-auto">
-              <p role="alert" className="mx-auto mt-5 max-w-4xl px-6 text-sm text-red-600">
-                {t('對話清單尚未建立：{err}', { err: error })}
-              </p>
-              <ConversationSync
+              <div className="mx-auto max-w-4xl space-y-4 px-4 py-6 sm:px-6">
+                <SetupWelcome onStart={() => setViewMode('setup')} />
+                <p role="status" className="text-sm text-mute2">{t('還沒有對話清單，也能先接入 AI 或直接開始提問。')}</p>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {BEGINNER_ACTIONS.map((action, i) => <button key={action} type="button" className="rounded-xl border border-line p-4 text-left text-sm hover:bg-elev" onClick={() => { if (i === 0) setSyncOpen(true); else setViewMode(i === 1 ? 'ask' : i === 2 ? 'console' : 'skills') }}>{t(action)}</button>)}
+                </div>
+                <details className="text-xs text-mute2"><summary className="cursor-pointer">{t('對話清單狀態')}</summary><p className="mt-2 break-words">{t('對話清單尚未建立：{err}', { err: error })}</p></details>
+              </div>
+              {syncOpen && <ConversationSync
                 index={null}
                 apiOk={apiOk}
                 onComplete={(next) => { setIndex(normalize(next)); setError('') }}
-              />
+                onClose={() => setSyncOpen(false)}
+              />}
             </div>
           ) : (
             <div className="flex flex-1 items-center justify-center p-8">
@@ -1289,8 +1304,8 @@ export default function Home() {
 
             {!search.trim() && groups.length === 0 && (
               <div role="status" aria-live="polite" className="px-3 py-6 text-center text-xs text-mute3">
-                <div>{t('目前的進階篩選沒有符合的對話')}</div>
-                <button
+                <div>{t(index.conversations.length === 0 ? '尚未匯入對話，請按上方「匯入／同步對話」開始搜尋。' : '目前的進階篩選沒有符合的對話')}</div>
+                {index.conversations.length > 0 && <button
                   className="mt-3 rounded border border-line2 px-3 py-1 hover:bg-elev"
                   onClick={() => {
                     setActiveDays(0); setShowOld(true); setShowSubagent(true)
@@ -1298,7 +1313,7 @@ export default function Home() {
                   }}
                 >
                   {t('重設所有進階篩選')}
-                </button>
+                </button>}
               </div>
             )}
             {!search.trim() && groups.map(({ dir, line, convs }) => {
@@ -1390,6 +1405,7 @@ export default function Home() {
                               {t('metadata 衝突')}
                             </span>
                           )}
+                          {c.readOnly && <span className="ml-1 rounded bg-elev px-1 text-xs text-mute3">{t('唯讀匯入')}</span>}
                           {c.dup && <span className="ml-1 rounded bg-elev px-1 text-xs text-mute3">{t('副本')}→{c.dupOfTool}</span>}
                           {!!c.dupCount && <span className="ml-1 rounded bg-elev px-1 text-xs text-mute3">+{t('{n} 副本', { n: c.dupCount })}</span>}
                         </span>
@@ -1449,8 +1465,10 @@ export default function Home() {
             它會跟著內容一起捲走，等於沒有浮動。 */}
         <main className="relative flex min-w-0 flex-1 flex-col">
           {tabs}
-          {viewMode === 'ask' ? (
-            <AskAI session={askSession} onSessionChange={setAskSession} />
+          {viewMode === 'setup' ? (
+            <AISetup onStartChat={startSetupChat} />
+          ) : viewMode === 'ask' ? (
+            <AskAI session={askSession} onSessionChange={setAskSession} onSetup={() => setViewMode('setup')} />
           ) : viewMode === 'console' ? (
             <Console />
           ) : viewMode === 'office' ? (
@@ -1475,6 +1493,7 @@ export default function Home() {
           ) : !selected ? (
             <section aria-labelledby="beginner-home-title" className="min-h-0 flex-1 overflow-y-auto px-4 py-8 sm:px-8">
               <div className="mx-auto max-w-3xl">
+                <div className="mb-6"><SetupWelcome onStart={() => setViewMode('setup')} /></div>
                 <p className="text-sm text-mute2">{t('AI 控制台')}</p>
                 <h1 id="beginner-home-title" className="mt-1 text-2xl font-semibold text-ink">
                   {t('你現在想做什麼？')}
@@ -1537,6 +1556,7 @@ export default function Home() {
                 <div className="mb-1 flex items-center gap-3">
                   <h2 className="min-w-0 flex-1 truncate text-base font-medium">{selected.title}</h2>
                   <span className="flex-none rounded-full bg-elev px-2 py-0.5 text-xs text-mute2">{selected.toolLabel}</span>
+                  {selected.readOnly && <span className="text-xs text-mute2">{t('唯讀匯入')}</span>}
                 </div>
                 <div className="flex flex-wrap items-center gap-3 text-xs text-mute3">
                   <span>{relTime(selected.mtime)}</span>
@@ -1769,14 +1789,14 @@ export default function Home() {
                     </div>
                     {/* 問問題與交工作是兩個不同意圖。QuickDispatch 有自己的工作草稿，
                         不會把上面還沒送出的問題當成可執行工單。 */}
-                    <QuickDispatch
+                    {!selected?.readOnly && <QuickDispatch
                       conv={selected ? { title: selected.title, projectDir: selected.projectDir } : null}
                       recent={(detail?.messages || []).slice(-6).map((m) => ({
                         role: m.role === 'assistant' ? 'assistant' : 'user',
                         text: m.text,
                       }))}
                       onToast={showToast}
-                    />
+                    />}
                   </div>
                 )}
               </div>

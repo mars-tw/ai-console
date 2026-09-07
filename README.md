@@ -7,15 +7,16 @@
 給一般使用者與第一次接觸 AI 的人使用的本地控制台：用白話入口找舊對話、同步四個 AI、直接問地端模型、管理技能，或把工作明確派給 AI 執行。
 附一間會動的像素辦公室，和一套可以邊工作邊玩的小型 MMORPG。
 
-**索引、搜尋、技能預覽與控制介面都在本機執行。**「直接問 AI」只連本機 LM Studio；只有使用者明確派工給雲端 AI CLI 時，內容才會依該工具的服務方式送出。介面支援繁體中文與 English。
+**索引、搜尋、技能預覽與控制介面都在本機執行。** 問答可選內建 LM Studio，或你自行接入的 OpenAI 相容服務；選擇雲端服務時，問題與該頁聊天紀錄會送到指定服務，可能計費。派工則依所選 AI 工具的服務方式傳送內容。介面支援繁體中文與 English。
 
 > A local hub for every AI CLI on your machine — one searchable inbox for all your
 > conversations, one-click resume in the original working directory, and a local-model
 > chat that continues any thread without burning cloud quota. Ships with a pixel office
 > that visualises each tool as a dragon, and a small single-player MMORPG to idle in.
 > The index, search, skill preview, and control UI run on `127.0.0.1`. “Ask AI” uses
-> local LM Studio only; content reaches a cloud provider only when you explicitly dispatch
-> work to that provider's CLI.
+> local LM Studio or an OpenAI-compatible service you explicitly connect. Choosing a cloud
+> service sends your question and the current chat history to that provider and may incur charges.
+> Task dispatch uses the selected AI tool's service.
 > The UI is available in Traditional Chinese and English.
 
 ## 下載與開始
@@ -23,7 +24,9 @@
 從 [最新 Release](https://github.com/mars-tw/ai-console/releases/latest) 下載 `ai-console-win32-x64` ZIP，解壓縮後開啟 `AI控制台.exe`。
 Windows 版需要可用的 Python 3.10+；若已安裝 Kimi Desktop，也能使用它附帶的 Python。手機遙控另需在電腦與手機安裝並登入同一個 Tailscale 網路。
 
-v1.3.1 改善重點：問答切頁保留、派工確實帶上勾選的對話背景、手機配對失敗可直接修正、日誌持續更新，以及技能預覽與安裝內容一致。手機靜態資源也加上獨立路徑限制，避免繞過對話資料的存取邊界。
+v1.4.0 新增「接入 AI／開始使用」：檢查已安裝工具、連接其他相容服務、選模型、測試回覆，再開始問問題。對話搜尋補上 NDJSON、JSON 訊息陣列與支援的 SQLite 格式，並清楚顯示搜尋範圍、上限與未完成部分。
+
+![接入 AI：安裝檢查與新手指引（示範資料）](docs/screenshot-setup.png)
 
 <img src="docs/screenshot-mobile.png" width="390" alt="手機遙控示範：連線、派工與更新中的日誌">
 
@@ -41,14 +44,15 @@ v1.3.1 改善重點：問答切頁保留、派工確實帶上勾選的對話背�
 
 ## 功能
 
-- **新手首頁**：第一畫面只問「你現在想做什麼？」並提供「找回舊對話／直接問 AI／交給 AI 執行／管理 AI 技能」四個入口；同步按鈕就在搜尋旁，不要求先懂模型名、CLI 或資料夾路徑
+- **新手首頁**：即使沒有對話索引，也能先按「接入 AI／開始使用」。原有「找回舊對話／直接問 AI／交給 AI 執行／管理 AI 技能」四個入口保留
+- **接入其他 AI**：內建常見工具的安裝檢查與官方說明；「已安裝」不代表已登入或能派工。另可新增本機 HTTP 或雲端 HTTPS 的 OpenAI 相容 API，依序讀取模型清單、儲存、測試真正回覆，再進入問答；不會因接入問答服務就授予它檔案或派工權限
+- **金鑰不落檔**：手動輸入的 API 金鑰僅留本機背景服務記憶體，關閉視窗不會清除；重新啟動背景服務或移除此連線後需重新提供。進階使用者可填環境變數名稱。連線設定只保存非機密欄位；更換服務網址須新增另一個連線，避免把舊金鑰送到別的服務
 - **問問題與執行工作完全分開**：「💬 問 AI」只回答、不動檔案、不呼叫工具；「🎙️ 派工主控台」才會真的開始工作，送出前還會再次明說可能讀寫專案檔案
 - **四工具對話同步**：Codex、Claude、Qwen、Kimi 一次掃描，每個來源分別顯示找到幾份、失敗原因與可行修復；停止按鈕會誠實說明只是停止畫面等待，後端可能仍在完成
 - **AI 技能中心**：列出每個 AI 已安裝與相容技能，透過 ZIP、資料夾或既有技能進行三步驟匯入。匯入包一律視為不受信任資料，只檢查與複製，不執行腳本或 hook，不覆寫同名技能；全域治理技能只能作為唯讀來源，不能由新手精靈寫入
 - **預覽後才能安裝**：安裝會比對預覽時的內容指紋；來源中途改變就請你重新預覽。切換來源或取消時，過期回應不會把畫面跳回舊技能。「格式可匯入」只代表檔案檢查通過，與 AI 實際執行相容性分開表示。
-- **統一對話索引**：**掃描全機找出所有 AI 工具的對話紀錄**。判斷依據是檔案內容
-  （JSONL 每行是不是帶 role 的訊息、SQLite 有沒有 thread/session/message 表），
-  不是寫死的工具名單 —— 所以你裝的工具沒被寫進程式，一樣掃得到
+- **統一對話索引**：搜尋常見 AI 資料夾，也可擴大搜尋或自行選擇對話資料夾。依內容識別單份 JSONL、NDJSON、JSON 訊息陣列與支援的 SQLite 訊息表；SQLite 內不同對話會分開顯示。未知工具的對話以唯讀匯入呈現，不宣稱已接入原工具，也不直接改動其檔案
+- **搜尋範圍看得見**：手動重新搜尋會略過舊快取；遇到時間、數量、深度、權限或格式限制會標明未完成，不會把局部結果稱為全機完整掃描
 - **還原原生名稱**：對話標題直接讀取各工具的官方紀錄（Codex threads DB、Grok summary.json、Kimi state.json…）
 - **搜對話內容，不是只搜標題**：標題是各家工具自己取的，常常跟內容沒關係 ——
   但人記得的是「我那時候在哪一段對話裡討論過 CP950」。
@@ -113,17 +117,19 @@ v1.3.1 改善重點：問答切頁保留、派工確實帶上勾選的對話背�
 - **冒險模式**：內建一套小型 MMORPG，可以邊工作邊掛機練功；純單機，clone 下來就能玩
 - **ai-hub 整合**（選配）：讀取 `~/ai-hub/status.json` 顯示各工具即時限流/活動狀態與專案接力標記
 
-## 掃描全機 AI
+## 搜尋這台電腦的 AI 對話
 
 ```bash
 python tools/scan_ai.py          # 看掃到哪些 AI 對話來源
 python tools/scan_ai.py --deep   # 放寬上限，掃得更徹底
 python tools/indexer.py --rescan # 重新掃描並重建索引
+python tools/indexer.py --rescan --deep-scan # 擴大有上限的搜尋
+python tools/indexer.py --rescan --scan-root /path/to/ai-conversations # 指定對話資料夾
 ```
 
-掃描只讀不寫，有深度、檔案數、時間三重上限，不會翻整台硬碟。結果快取在
-`public/data/sources.json`，七天內不重掃。掃不到的話可以用
-`AI_CONSOLE_SCAN_DIRS` 指定額外目錄。
+來源掃描只讀，不會翻整台硬碟或讀取憑證目錄；索引器另在 `public/data/` 寫入可搜尋的對話副本。一般搜尋有深度、檔案數、時間等上限；擴大搜尋也是有上限的，不代表所有磁碟都已完成。結果與未完成原因可在同步頁查看。
+
+來源快取在 `public/data/sources.json`，背景索引可沿用七天；介面的「重新搜尋」與 `--rescan` 一律重新發現來源。可用 `AI_CONSOLE_SCAN_DIRS` 或重複 `--scan-root` 加入最多八個對話資料夾，不接受整顆磁碟、家目錄或符號連結。SQLite 只讀取可辨識的訊息表，不支援的 schema 會回報，並非任意資料庫皆可匯入。
 
 ## 生圖與生影片
 
@@ -175,7 +181,7 @@ pip 依賴，測試不該是第一個引進的。覆蓋的重點是「看程式�
 要壓測才會現形」的那幾類：同一毫秒的 id 撞號、併發讀改寫掉資料、
 排程 tick 期間別的執行緒拿不拿得到鎖、把使用者文字放進命令列會發生什麼事。
 
-地端續聊：安裝 LM Studio 並啟動其本地伺服器（預設 `127.0.0.1:1234`），載入任一模型即可。
+地端續聊：安裝 LM Studio 並下載完整模型；內建入口會在送出問題時檢查安全使用條件，必要時準備服務與模型。不要把 LM Studio 的 1234 埠另接成自訂服務。其他相容服務須提供模型清單與 `chat/completions` 文字回覆 API；此版本不支援工具呼叫、圖片或語音輸入。
 
 ## 像素辦公室（🎮 分頁）
 

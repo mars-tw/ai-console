@@ -69,8 +69,47 @@ import planner   # noqa: E402
 import rules     # noqa: E402
 import schedule  # noqa: E402
 from conversation_tail import ConversationTailError, load_indexed_tail  # noqa: E402
+from setup_catalog import setup_catalog  # noqa: E402
 
 PORT = 5177
+
+_AI_CONNECTIONS = None
+_AI_CONNECTIONS_LOCK = threading.Lock()
+
+
+def _ai_connections():
+    global _AI_CONNECTIONS
+    with _AI_CONNECTIONS_LOCK:
+        if _AI_CONNECTIONS is None:
+            from ai_connections import AIConnections
+            _AI_CONNECTIONS = AIConnections()
+        return _AI_CONNECTIONS
+
+
+def refresh_arguments(body: dict) -> list[str]:
+    """Manual refresh always re-discovers sources; deep/root options stay explicit."""
+    if not isinstance(body, dict):
+        raise ValueError('搜尋選項格式不正確。')
+    deep = body.get('deep', False)
+    if not isinstance(deep, bool):
+        raise ValueError('擴大搜尋選項必須是開啟或關閉。')
+    roots = body.get('extraRoots', [])
+    if not isinstance(roots, list) or len(roots) > 8:
+        raise ValueError('最多指定 8 個額外對話資料夾。')
+    argv = [sys.executable, str(INDEXER), '--rescan']
+    if deep:
+        argv.append('--deep-scan')
+    for root in roots:
+        if not isinstance(root, str) or not root.strip() or len(root) > 1024 or '\x00' in root:
+            raise ValueError('額外資料夾路徑無效。')
+        path = Path(root).expanduser()
+        if not path.is_absolute():
+            raise ValueError('請選擇具體的對話資料夾，不能使用整個磁碟。')
+        canonical = Path(os.path.abspath(path))
+        if canonical == Path(canonical.anchor):
+            raise ValueError('請選擇具體的對話資料夾，不能使用整個磁碟。')
+        argv.extend(('--scan-root', str(path)))
+    return argv
 
 # 技能中心只會接觸這六個公開技能根目錄。這份表不含登入、帳號、
 # token 或瀏覽器 profile，也不會從設定檔推測使用者身分。
@@ -3523,6 +3562,31 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/health":
             return self._json({"ok": True, "ts": time.time()})
+        if self.path in {'/api/setup', '/api/ai-connections'}:
+            if not self._same_origin():
+                return self._json({'ok': False, 'error': '跨來源請求已拒絕'}, 403)
+            try:
+                catalog = _ai_connections().catalog({
+                    name: _bin_available('gemini' if name == 'agy' else name)
+                    for name in ('qwen', 'kimi', 'grok', 'codex', 'claude', 'agy', 'cursor')
+                })
+                if self.path == '/api/ai-connections':
+                    return self._json(catalog)
+                # Installers can place binaries in known paths while this server
+                # stays running; recheck on the explicit setup refresh.
+                for tool in _BIN_CANDIDATES:
+                    BIN[tool] = _find_bin(tool)
+                models = [model for model in lms_models() if model_complete(model)]
+                tailscale = bool(shutil.which('tailscale')) or (
+                    Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'Tailscale' / 'tailscale.exe'
+                ).is_file()
+                result = setup_catalog(_bin_available, models, catalog.get('connections', []),
+                                       lmstudio_installed=LMS_BIN.is_file(), tailscale_available=tailscale)
+                if catalog.get('loadError'):
+                    result['connectionError'] = catalog['loadError']
+                return self._json(result)
+            except Exception:
+                return self._json({'ok': False, 'error': '無法讀取 AI 設定，請重新檢查。'}, 503)
         if self.path == "/api/bins":
             # 互動終端要拿執行檔路徑才開得起 pty session。
             #
@@ -3800,13 +3864,36 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error":
                                "跨來源請求已拒絕（此 API 只接受本應用自己的呼叫）"}, 403)
 
+        connection_actions = {
+            '/api/ai-connections/probe': 'probe', '/api/ai-connections/save': 'save',
+            '/api/ai-connections/test': 'test', '/api/ai-connections/delete': 'delete',
+            '/api/ai-connections/chat': 'chat',
+        }
+        if self.path in connection_actions:
+            body = self._body()
+            if not isinstance(body, dict) or getattr(self, '_body_error', None):
+                return self._json({'ok': False, 'error': '連線請求格式不正確。'}, 400)
+            try:
+                result = getattr(_ai_connections(), connection_actions[self.path])(body)
+            except Exception:
+                # Provider exceptions and headers may contain secrets; never echo them.
+                return self._json({'ok': False, 'error': 'AI 連線暫時無法使用，請重新檢查。'}, 503)
+            return self._json(result, 200 if result.get('ok') else 400)
+
         if self.path == "/api/refresh":
+            body = self._body()
+            if getattr(self, '_body_error', None):
+                return self._json({'ok': False, 'error': '搜尋選項格式不正確。'}, 400)
+            try:
+                argv = refresh_arguments(body)
+            except ValueError as exc:
+                return self._json({'ok': False, 'error': str(exc)}, 400)
             try:
                 # 同進程的 archive/delete 先結束，才啟動 indexer。父進程不能
                 # 再拿 cross-process lock：child 會在整個 build 期間自行持有它。
                 with _INDEX_LOCK:
-                    r = _run([sys.executable, str(INDEXER)], capture_output=True,
-                             text=True, timeout=300, cwd=str(APP_ROOT))
+                    r = _run(argv, capture_output=True, text=True, encoding='utf-8',
+                             errors='replace', timeout=300, cwd=str(APP_ROOT))
                 if r.returncode != 0:
                     return self._json({"ok": False, "error": "對話同步失敗。",
                                        "out": (r.stdout or r.stderr)[-500:]}, 500)
@@ -3816,7 +3903,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"ok": False,
                                        "error": f"同步完成，但新索引無法讀取：{exc}"}, 500)
                 return self._json({"ok": True, "out": (r.stdout or r.stderr)[-500:],
-                                   "sources": _conversation_source_health(index_data)})
+                                   "sources": _conversation_source_health(index_data),
+                                   "scan": index_data.get('scan')})
             except Exception as e:
                 return self._json({"ok": False, "error": str(e)}, 500)
 
@@ -3825,6 +3913,8 @@ class Handler(BaseHTTPRequestHandler):
             conv = find_conv(body.get("id", ""))
             if not conv:
                 return self._json({"ok": False, "error": "找不到對話"}, 404)
+            if conv.get('readOnly') or conv.get('sourceKind') == 'discovered':
+                return self._json({'ok': False, 'error': '匯入的對話僅供閱讀，請在原本的 AI 操作。'}, 409)
             try:
                 cmd, cwd = build_launch(conv)
             except ValueError as e:
@@ -4180,6 +4270,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error": "找不到這個對話"}, 404)
 
         tool = str(conv.get("tool") or "")
+        if conv.get('readOnly') or conv.get('sourceKind') == 'discovered':
+            return self._json({'ok': False, 'error': '匯入的對話僅供閱讀，請在原本的 AI 操作。',
+                               'sourceAppRequired': True}, 409)
         # 這三家還有 DB/catalog/state/archive 等權威側欄 metadata。只搬 jsonl
         # 會在下次掃描復活，甚至留下半份對話；控制台不直接改它們的內部狀態。
         if tool in {"codex", "qwen", "kimi"}:
@@ -4272,7 +4365,8 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     if fresh is None:
                         raise KeyError(conv_id)
-                    if (str(fresh.get("tool") or "") != tool
+                    if (fresh.get('readOnly') or fresh.get('sourceKind') == 'discovered'
+                            or str(fresh.get("tool") or "") != tool
                             or str(fresh.get("path") or "") != str(conv.get("path") or "")
                             or str(fresh.get("sessionId") or "") != str(conv.get("sessionId") or "")):
                         return self._json({
@@ -4341,7 +4435,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error": f"讀取索引失敗：{exc}"}, 500)
         if not conv:
             return self._json({"ok": False, "error": "找不到這個對話"}, 404)
-        if conv.get("tool") != "claude":
+        if conv.get('readOnly') or conv.get('sourceKind') == 'discovered' or conv.get("tool") != "claude":
             return self._json({
                 "ok": False,
                 "error": "此來源有自己的權威封存狀態，請在來源應用中封存",
@@ -4394,7 +4488,8 @@ class Handler(BaseHTTPRequestHandler):
                     fresh_session_id = canonical_claude_session_id(index_entry.get("sessionId"))
                 except ValueError:
                     return self._json({"ok": False, "error": "索引裡的 Claude session id 已失效"}, 409)
-                if index_entry.get("tool") != "claude" or fresh_session_id != session_id:
+                if (index_entry.get('readOnly') or index_entry.get('sourceKind') == 'discovered'
+                        or index_entry.get("tool") != "claude" or fresh_session_id != session_id):
                     return self._json({
                         "ok": False, "error": "索引列在交易期間已變更，請重新整理後再試",
                     }, 409)

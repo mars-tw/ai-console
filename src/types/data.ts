@@ -36,6 +36,8 @@ export interface ConversationSummary {
   dispatch?: boolean
   resume: string
   hasMessages: boolean
+  sourceKind?: 'discovered'
+  readOnly?: boolean
   /** 來源工具自己標記的封存 */
   archived?: boolean
   /** 來源桌面應用的權威側欄目前看得到這一列 */
@@ -71,6 +73,8 @@ export interface IndexData {
   tools: Record<string, ToolStatus>
   projectTitles: Record<string, string>
   conversations: ConversationSummary[]
+  /** Search coverage is bounded; incomplete scans must remain visible to users. */
+  scan?: ConversationScanReport
   stats: {
     total: number; subagent: number; duplicates?: number; dispatch?: number
     unique?: number; elapsed_sec: number
@@ -81,7 +85,26 @@ export interface IndexData {
     pinned?: number
     inApp?: number
     metadataConflict?: number
+    discovered_sources?: string[]
+    discoveredConversations?: number
   }
+}
+
+export interface ConversationScanReport {
+  complete: boolean
+  reasons: string[]
+  deep: boolean
+  startedAt: string
+  durationMs: number
+  candidates: number
+  directories: number
+  filesInspected: number
+  matchedFiles: number
+  skippedFiles: number
+  skippedDirectories: number
+  unsupportedFiles: number
+  roots: string[]
+  cached?: boolean
 }
 
 /** /api/dispatches 回傳的派工紀錄 */

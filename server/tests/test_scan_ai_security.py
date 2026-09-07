@@ -124,7 +124,7 @@ class TestSensitiveStorePruning(unittest.TestCase):
 
         visited: list[str] = []
 
-        def fake_scan_candidate(path, _deadline, _deep):
+        def fake_scan_candidate(path, _deadline, _deep, _report=None):
             visited.append(path.name)
             return None
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { conversationSourceCounts, requestConversationSync, syncCompletionSummary } from './ConversationSync'
-import type { ConversationSummary, IndexData } from '@/types/data'
+import { additionalConversationSources, conversationSourceCounts, extraScanRoots, requestConversationSync, scanCoverageWarning, scanReasonText, syncCompletionSummary } from './ConversationSync'
+import type { ConversationScanReport, ConversationSummary, IndexData } from '@/types/data'
 
 function conversation(
   id: string,
@@ -42,9 +42,9 @@ function indexWith(conversations: ConversationSummary[]): IndexData {
 describe('對話匯入／同步摘要', () => {
   it('會先用真正的 POST 同步，再讀回新索引', async () => {
     const next = indexWith([conversation('c1', 'codex')])
-    const calls: { url: string; method?: string; cache?: RequestCache }[] = []
+    const calls: { url: string; method?: string; cache?: RequestCache; body?: BodyInit | null }[] = []
     const fakeFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-      calls.push({ url: String(input), method: init?.method, cache: init?.cache })
+      calls.push({ url: String(input), method: init?.method, cache: init?.cache, body: init?.body })
       return calls.length === 1
         ? new Response(JSON.stringify({
           ok: true,
@@ -57,9 +57,33 @@ describe('對話匯入／同步摘要', () => {
       index: next,
       sources: [{ id: 'codex', label: 'Codex', status: 'ok', count: 1 }],
     })
-    expect(calls[0]).toEqual({ url: '/api/refresh', method: 'POST', cache: undefined })
+    expect(calls[0]).toEqual({ url: '/api/refresh', method: 'POST', cache: undefined, body: JSON.stringify({ rescan: true, deep: false }) })
     expect(calls[1]?.url).toMatch(/^\/data\/index\.json\?sync=\d+$/)
     expect(calls[1]?.cache).toBe('no-store')
+  })
+
+  it('sends explicit expanded-search options and unique user-chosen roots', async () => {
+    const roots = extraScanRoots(' C:\\extra\r\n\nC:\\other\nC:\\extra ')
+    expect(roots).toEqual(['C:\\extra', 'C:\\other'])
+    const calls: RequestInit[] = []
+    await requestConversationSync(async (_url, init) => {
+      calls.push(init || {})
+      return new Response(JSON.stringify(calls.length === 1 ? { ok: true } : indexWith([])))
+    }, undefined, { deep: true, extraRoots: roots })
+    expect(JSON.parse(String(calls[0].body))).toEqual({ rescan: true, deep: true, extraRoots: roots })
+  })
+
+  it('keeps partial coverage visible even if all four source counts are nonzero', () => {
+    const report: ConversationScanReport = {
+      complete: false, reasons: ['time_budget'], deep: true, startedAt: '', durationMs: 10,
+      candidates: 4, directories: 5, filesInspected: 10, matchedFiles: 4, skippedFiles: 0,
+      skippedDirectories: 1, unsupportedFiles: 0, roots: ['C:\\extra'],
+    }
+    expect(scanCoverageWarning(report)).toBe(true)
+    expect(scanCoverageWarning({ ...report, complete: true, reasons: [] })).toBe(false)
+    expect(scanCoverageWarning()).toBe(false)
+    expect(scanReasonText('time-limit')).toContain('搜尋時間')
+    expect(scanReasonText('unsupported-format')).toContain('格式')
   })
 
   it('同步失敗時不會伪造新索引或成功數字', async () => {
@@ -80,6 +104,16 @@ describe('對話匯入／同步摘要', () => {
     ]))
 
     expect(counts).toEqual({ codex: 1, claude: 1, qwen: 0, kimi: 0 })
+  })
+
+  it('另外列出發現的唯讀來源，並保持四個權威側欄計數獨立', () => {
+    const index = indexWith([
+      conversation('c1', 'codex'),
+      conversation('o1', 'other-ai', { sourceKind: 'discovered', readOnly: true, inApp: false }),
+      conversation('o2', 'other-ai', { sourceKind: 'discovered', readOnly: true, inApp: false }),
+    ])
+    expect(additionalConversationSources(index)).toEqual([{ id: 'other-ai', label: 'other-ai', count: 2 }])
+    expect(conversationSourceCounts(index)).toEqual({ codex: 1, claude: 0, qwen: 0, kimi: 0 })
   })
 
   it('完成摘要回傳可翻譯的數字，不先拼成中文句子', () => {

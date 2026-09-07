@@ -11,6 +11,8 @@ ai-console 索引器
 - Codex 的 thread_spawn 子代理對話標記 subagent=true，前端預設隱藏
 """
 import json
+import fnmatch
+import hashlib
 import os
 import re
 import sys
@@ -27,13 +29,19 @@ try:  # ``import tools.indexer`` package mode
     from .scan_ai import (is_excluded_candidate as scan_excluded_candidate,
                           is_excluded_dir as scan_excluded_dir,
                           is_excluded_file as scan_excluded_file,
-                          is_noise as scan_is_noise)
+                          is_noise as scan_is_noise, safe_path as scan_safe_path,
+                          is_link as scan_is_link, read_conversation_records,
+                          report_reason, DB_EXT, MESSAGE_WRAPPERS, looks_like_message,
+                          validate_extra_roots as scan_validate_roots)
 except ImportError:  # ``python tools/indexer.py`` / tools on sys.path
     from index_lock import conversation_index_lock
     from scan_ai import (is_excluded_candidate as scan_excluded_candidate,
                          is_excluded_dir as scan_excluded_dir,
                          is_excluded_file as scan_excluded_file,
-                         is_noise as scan_is_noise)
+                         is_noise as scan_is_noise, safe_path as scan_safe_path,
+                         is_link as scan_is_link, read_conversation_records,
+                         report_reason, DB_EXT, MESSAGE_WRAPPERS, looks_like_message,
+                         validate_extra_roots as scan_validate_roots)
 
 HOME = Path(os.path.expanduser("~"))
 AI_HUB = HOME / "ai-hub"
@@ -259,7 +267,7 @@ def extract_text(node, depth=0):
     if isinstance(node, dict):
         if isinstance(node.get("text"), str):
             return node["text"]
-        for k in ("content", "message", "text", "parts"):
+        for k in ("content", "message", "text", "parts", "input_text", "output_text"):
             if k in node:
                 return extract_text(node[k], depth + 1)
     return ""
@@ -308,7 +316,7 @@ def looks_like_paste(t: str) -> bool:
     return False
 
 
-def parse_jsonl_messages(path: Path, full: bool, detect_spawn: bool = False):
+def parse_jsonl_messages(path: Path, full: bool, detect_spawn: bool = False, *, parsed=None):
     """回傳 (messages, first_user_text, last_ts, msg_count, is_subagent, cwd)"""
     msgs = []
     first_user = ""
@@ -320,36 +328,32 @@ def parse_jsonl_messages(path: Path, full: bool, detect_spawn: bool = False):
     is_subagent = False
     cwd = ""
     try:
-        size = path.stat().st_size
-        with open(path, "rb") as fh:
-            if full:
-                raw = fh.read()
-            else:
-                raw = fh.read(HEAD_BYTES)
-        if detect_spawn and b"thread_spawn" in raw[:HEAD_BYTES]:
-            is_subagent = True
-        text = raw.decode("utf-8", errors="ignore")
-        for line in text.splitlines():
-            line = line.strip()
-            if not line or not line.startswith("{"):
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
+        if parsed is None:
+            parsed = read_conversation_records(
+                path, max_bytes=FULL_PARSE_LIMIT if full else HEAD_BYTES)
+        if detect_spawn:
+            is_subagent = any("thread_spawn" in json.dumps(r) for r in parsed["records"][:100])
+        for rec in parsed["records"]:
+            if not isinstance(rec, dict):
                 continue
             if not cwd and isinstance(rec.get("cwd"), str):
                 cwd = rec["cwd"]
             # 取時間戳
-            ts = rec.get("timestamp") or rec.get("ts") or rec.get("created_at") or ""
+            ts = rec.get("timestamp") or rec.get("ts") or rec.get("created_at") or rec.get("createdAt") or ""
             if isinstance(ts, str) and ts:
                 last_ts = ts
             # 找 role + 內容（容忍各種格式）
             candidates = [rec]
-            for wrap in ("message", "payload", "record"):
-                if isinstance(rec.get(wrap), dict):
-                    candidates.append(rec[wrap])
+            frontier = [rec]
+            for _ in range(6):
+                frontier = [node[wrap] for node in frontier for wrap in MESSAGE_WRAPPERS
+                            if isinstance(node.get(wrap), dict)]
+                if not frontier:
+                    break
+                candidates.extend(frontier)
             for c in candidates:
-                role = norm_role(c.get("role") or c.get("type") if c.get("type") in ROLES else c.get("role"))
+                role = norm_role(c.get("role") or c.get("sender") or
+                                 (c.get("type") if c.get("type") in ROLES else ""))
                 if not role:
                     t = str(c.get("type", "")).lower()
                     if "user" in t:
@@ -361,6 +365,11 @@ def parse_jsonl_messages(path: Path, full: bool, detect_spawn: bool = False):
                 body = extract_text(c.get("content") if "content" in c else c)
                 if not body or not body.strip():
                     continue
+                ts = c.get("timestamp") or c.get("ts") or c.get("created_at") or c.get("createdAt") or ts
+                if isinstance(ts, str) and ts:
+                    last_ts = ts
+                if not cwd and isinstance(c.get("cwd"), str):
+                    cwd = c["cwd"]
                 count += 1
                 if role == "user" and (not first_user or first_user_is_paste):
                     cand = re.sub(r"\s+", " ", body).strip()
@@ -375,7 +384,7 @@ def parse_jsonl_messages(path: Path, full: bool, detect_spawn: bool = False):
                         first_user_is_paste = looks_like_paste(cand)
                 if full and len(msgs) < MAX_MSGS:
                     msgs.append({"role": role, "text": body[:MAX_TEXT], "ts": ts if isinstance(ts, str) else ""})
-        if not full and count == 0:
+        if not full and count == 0 and parsed["status"] == "ok" and parsed["reasons"]:
             # 大檔只讀了頭部，count 未知
             count = -1
     except OSError:
@@ -933,10 +942,16 @@ ACTIVE_TOOLS = {t.strip() for t in
                 os.environ.get("AI_CONSOLE_ACTIVE_TOOLS", "codex,claude,qwen,kimi").split(",")
                 if t.strip()}
 TRASH_AFTER_DAYS = int(os.environ.get("AI_CONSOLE_TRASH_DAYS", "30"))
+AUTHORITATIVE_DESKTOP_TOOLS = frozenset({"codex", "claude", "qwen", "kimi"})
 
 
-def trash_reason(tool: str, mtime: float, now: float) -> str:
+def trash_reason(tool: str, mtime: float, now: float, *, discovered_read_only=False) -> str:
     """回傳進垃圾桶的理由；不該進就回空字串"""
+    # Discovery confirms readable conversation content, not desktop membership or
+    # permission to execute a tool. Keep those imports visible independent of the
+    # machine owner's historical active-tool/age defaults.
+    if discovered_read_only:
+        return ""
     if ACTIVE_TOOLS and tool not in ACTIVE_TOOLS:
         return "not-active-tool"
     if TRASH_AFTER_DAYS > 0 and (now - mtime) > TRASH_AFTER_DAYS * 86400:
@@ -1028,31 +1043,67 @@ SOURCES = [
 # 過期或加 --rescan 才重掃。
 SOURCES_CACHE = DATA_DIR / "sources.json"
 SCAN_TTL = 7 * 86400
+LAST_SCAN_REPORT = {"complete": False, "reasons": ["not-scanned"], "cached": False}
 
 
-def discover_sources(force: bool = False) -> list[dict]:
+def discover_sources(force: bool = False, deep: bool = False, extra_roots=None) -> list[dict]:
     """回傳掃描到的來源（會用快取）"""
-    if not force and SOURCES_CACHE.exists():
+    global LAST_SCAN_REPORT
+    cache = {}
+    if SOURCES_CACHE.exists():
+        try:
+            cache = json.loads(SOURCES_CACHE.read_text(encoding="utf-8"))
+            if not isinstance(cache, dict):
+                cache = {}
+        except (OSError, ValueError):
+            pass
+    if not force and not deep and not extra_roots and SOURCES_CACHE.exists():
         try:
             cache = json.loads(SOURCES_CACHE.read_text(encoding="utf-8"))
             if time.time() - cache.get("scanned_at", 0) < SCAN_TTL:
+                LAST_SCAN_REPORT = dict(cache.get("scan") or {
+                    "complete": False, "reasons": ["legacy-cache"]})
+                LAST_SCAN_REPORT.update(cached=True, cacheAgeSeconds=max(
+                    0, round(time.time() - cache.get("scanned_at", 0))))
                 return cache.get("sources", [])
         except (OSError, json.JSONDecodeError):
             pass
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         try:
-            from .scan_ai import scan
+            from .scan_ai import scan_with_report
         except ImportError:
-            from scan_ai import scan
-        found = scan()
+            from scan_ai import scan_with_report
+        result = scan_with_report(deep=deep, extra_roots=extra_roots)
+        found = result["sources"]
+        LAST_SCAN_REPORT = result["scan"]
+    except ValueError:
+        raise  # Invalid explicit roots are validation errors, not an empty successful scan.
     except Exception as e:
+        LAST_SCAN_REPORT = {"complete": False, "reasons": ["scan-failed"], "cached": False}
         print(f"  自動掃描失敗（{e}），只用已知來源", flush=True)
-        return []
+        found = []
+    if not LAST_SCAN_REPORT.get("complete") and isinstance(cache.get("sources"), list):
+        rows = found + cache["sources"]
+        safe, _ = merge_discovered_sources([], rows)
+        accepted = {os.path.normcase(str(s["root"])): s for s in safe}
+        retained = []
+        for row in rows:
+            key = os.path.normcase(str(row.get("root", ""))) if isinstance(row, dict) else ""
+            if key in accepted:
+                patterns = set(accepted[key].get("patterns", [accepted[key]["pattern"]]))
+                for old in cache["sources"]:
+                    old_safe, _ = merge_discovered_sources([], [old])
+                    if old_safe and source_roots_overlap(Path(row["root"]), old_safe[0]["root"]):
+                        patterns.update(old_safe[0].get("patterns", [old_safe[0]["pattern"]]))
+                retained.append({**row, "patterns": sorted(patterns),
+                                 "pattern": next(iter(patterns)) if len(patterns) == 1 else "*"})
+                del accepted[key]
+        LAST_SCAN_REPORT["retainedSources"] = max(0, len(retained) - len(found))
+        found = retained
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    SOURCES_CACHE.write_text(json.dumps(
-        {"scanned_at": time.time(), "sources": found}, ensure_ascii=False, indent=2),
-        encoding="utf-8")
+    _atomic_write_json(SOURCES_CACHE,
+                      {"scanned_at": time.time(), "sources": found, "scan": LAST_SCAN_REPORT})
     return found
 
 
@@ -1208,12 +1259,21 @@ def merge_discovered_sources(base_sources: list[dict], discovered_rows: list[dic
         try:
             root = Path(row["root"])
             pattern = str(row["pattern"])
+            patterns = row.get("patterns", [pattern])
             tool = str(row["tool"])
             label = str(row["label"])
             hits = int(row.get("hits", 0))
         except (KeyError, TypeError, ValueError):
             continue
-        if not root.is_dir() or not pattern or not tool:
+        try:
+            root = scan_validate_roots([root], include_env=False)[0]
+        except (ValueError, IndexError):
+            continue
+        if (not scan_safe_path(root) or not root.is_dir() or not pattern
+                or not re.fullmatch(r"[\w.-]+", tool)
+                or not isinstance(patterns, list) or not patterns or len(patterns) > 8
+                or any(not isinstance(p, str) or not p or "/" in p or "\\" in p
+                       or ".." in p for p in patterns)):
             continue
         # 快取可能由舊版掃描器產生，必須重新套用目前的完整政策。
         real_root = Path(os.path.realpath(os.path.abspath(os.fspath(root))))
@@ -1225,7 +1285,8 @@ def merge_discovered_sources(base_sources: list[dict], discovered_rows: list[dic
         if any(source_roots_overlap(root, known) for known in accepted_roots):
             continue
         sources.append({"tool": tool, "label": label, "root": root,
-                        "pattern": pattern, "resume": lambda sid, cwd: ""})
+                        "pattern": pattern, "patterns": patterns, "discovered": True,
+                        "resume": lambda sid, cwd: ""})
         accepted_roots.append(root)  # 後續 cached row 也要與剛接受的來源比對
         labels.append(f"{label}（{hits} 個對話檔）")
     return sources, labels
@@ -1261,8 +1322,78 @@ def _atomic_write_json(path: Path, value) -> None:
                 pass
 
 
+def _scan_options():
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--rescan", action="store_true")
+    parser.add_argument("--deep-scan", action="store_true")
+    parser.add_argument("--scan-root", action="append", default=[])
+    args, _ = parser.parse_known_args()
+    return args
+
+
+def iter_source_documents(src, report, deadline, *, deep=False):
+    """Prune before traversal and keep SQLite conversations separate, within hard bounds."""
+    root = Path(src["root"])
+    if not scan_safe_path(root) or not root.is_dir():
+        return
+    patterns = src.get("patterns") or [src["pattern"]]
+    files = dirs = 0
+    max_files, max_dirs, max_depth = (100000, 24000, 24) if deep else (50000, 12000, 12)
+    def failed(_error):
+        report_reason(report, "index-directory-read-error")
+    for directory, children, names in os.walk(root, followlinks=False, onerror=failed):
+        if time.time() > deadline:
+            report_reason(report, "index-time-limit")
+            return
+        dirs += 1
+        if dirs > max_dirs:
+            report_reason(report, "index-directory-limit")
+            return
+        folder = Path(directory)
+        children[:] = [n for n in children if not scan_is_noise(n)
+                       and not NOISE_DIR_RE.match(n) and not scan_is_link(folder / n)]
+        children.sort(key=str.casefold)
+        if len(folder.relative_to(root).parts) >= max_depth and children:
+            report_reason(report, "index-depth-limit")
+            children[:] = []
+        for name in sorted(names, key=str.casefold):
+            path = folder / name
+            if (_in_noise_dir(path, root) or scan_is_link(path)
+                    or not any(fnmatch.fnmatch(name.casefold(), p.casefold()) for p in patterns)):
+                continue
+            if time.time() > deadline or files >= max_files:
+                report_reason(report, "index-time-limit" if time.time() > deadline else "index-file-limit")
+                return
+            files += 1
+            try:
+                full = path.suffix.lower() in DB_EXT or path.stat().st_size <= FULL_PARSE_LIMIT
+            except OSError:
+                report_reason(report, "index-file-read-error")
+                continue
+            parsed = read_conversation_records(path, max_bytes=FULL_PARSE_LIMIT if full else HEAD_BYTES,
+                                               deadline=deadline)
+            if parsed["status"] in ("unsupported", "unreadable", "excluded"):
+                report_reason(report, "index-" + parsed["status"])
+                report["indexSkippedFiles"] = report.get("indexSkippedFiles", 0) + 1
+                continue
+            for reason in parsed["reasons"]:
+                report_reason(report, "index-" + reason)
+            if path.suffix.lower() in DB_EXT:
+                groups = {}
+                for record in parsed["records"]:
+                    groups.setdefault(record.get("_conversation_id", ""), []).append(record)
+                for doc_id, records in groups.items():
+                    yield path, doc_id, {**parsed, "records": records}
+            else:
+                yield path, None, parsed
+
+
 def _build_index():
     t0 = time.time()
+    args = _scan_options()
+    # Reject unsafe explicit roots before touching existing exported messages.
+    scan_validate_roots(args.scan_root)  # Includes explicit AI_CONSOLE_SCAN_DIRS settings.
     CONV_DIR.mkdir(parents=True, exist_ok=True)
     # 清掉舊匯出
     for old in CONV_DIR.glob("*.json"):
@@ -1284,15 +1415,22 @@ def _build_index():
 
     # 自動發現：掃描全機，把已知來源沒涵蓋到的補進來
     sources, discovered = merge_discovered_sources(
-        list(SOURCES), discover_sources("--rescan" in sys.argv),
+        list(SOURCES), discover_sources(args.rescan or args.deep_scan or bool(args.scan_root),
+                                       deep=args.deep_scan, extra_roots=args.scan_root),
         # Qwen Desktop header 是 metadata catalog，不可當成對話本文。
         reserved_roots=(HOME / ".craft-agent" / "workspaces",))
 
+    scan_report = dict(LAST_SCAN_REPORT)
+    scan_report["reasons"] = list(scan_report.get("reasons", []))
+    index_deadline = time.time() + (90 if args.deep_scan else 45)
     for src in sources:
         root = src["root"]
+        discovered_read_only = bool(src.get("discovered")
+                                    and src["tool"] not in AUTHORITATIVE_DESKTOP_TOOLS)
         if not root.exists():
             continue
-        for path in root.rglob(src["pattern"]):
+        for path, database_id, parsed in iter_source_documents(
+                src, scan_report, index_deadline, deep=args.deep_scan):
             # 跳過工具內部的快取與日誌目錄。
             #
             # rglob 本來是完全不挑目錄的，工具自己的暫存檔只要副檔名對就會被
@@ -1310,11 +1448,17 @@ def _build_index():
                 mtime = path.stat().st_mtime
             except OSError:
                 continue
-            if size < 200:  # 幾乎是空檔
+            if not size or (size < 200 and not any(looks_like_message(r) for r in parsed["records"])):
                 continue
             sid = session_id_for(path, root)
-            full = size <= FULL_PARSE_LIMIT
-            msgs, first_user, last_ts, count, is_subagent, cwd = parse_jsonl_messages(path, full, detect_spawn=(src["tool"] == "codex"))
+            if database_id is not None:
+                sid = "db-" + hashlib.sha256(
+                    (str(path.relative_to(root)) + "\0" + database_id).encode("utf-8")).hexdigest()[:24]
+            full = path.suffix.lower() in DB_EXT or size <= FULL_PARSE_LIMIT
+            msgs, first_user, last_ts, count, is_subagent, cwd = parse_jsonl_messages(
+                path, full, detect_spawn=(src["tool"] == "codex"), parsed=parsed)
+            if src.get("discovered") and count <= 0:
+                continue
             # kimi-code：agents/main 以外的 wire.jsonl 都是子代理
             if src["tool"] == "kimi" and path.parent.name != "main":
                 is_subagent = True
@@ -1406,7 +1550,6 @@ def _build_index():
             project = classify(hay)
             conv_id = f'{src["tool"]}__{sid}'
             if conv_id in used_ids:  # 同 UUID 出現在多處（副本/resume 鏈），加雜湊後綴保證唯一
-                import hashlib
                 conv_id += "-" + hashlib.md5(str(path).encode("utf-8")).hexdigest()[:6]
             used_ids.add(conv_id)
             first_user_msg = next(
@@ -1424,12 +1567,16 @@ def _build_index():
             authoritative_active = bool(
                 authoritative_source and not archived
                 and not (source_meta and source_meta.metadata_errors))
+            if discovered_read_only:
+                in_app = False  # Never claim the source desktop's sidebar was verified.
             policy_reason = "" if authoritative_active else trash_reason(
-                src["tool"], mtime, t0)
+                src["tool"], mtime, t0, discovered_read_only=discovered_read_only)
             if authoritative_active:
                 effective_trash_reason = ""
             elif archived:
                 effective_trash_reason = "archived"
+            elif discovered_read_only:
+                effective_trash_reason = "" if count > 0 else "no-messages"
             elif not in_app:
                 effective_trash_reason = "not-in-app"
             elif not count:
@@ -1465,6 +1612,9 @@ def _build_index():
                 "hasMessages": bool(msgs),
             }
             _surface_metadata(entry, source_meta, codex_meta)
+            if discovered_read_only:
+                entry.update(sourceKind="discovered", readOnly=True, inApp=False,
+                             metadataSource="content-discovery", resume="")
             conversations.append(entry)
             if msgs:
                 (CONV_DIR / f"{conv_id}.json").write_text(
@@ -1561,6 +1711,7 @@ def _build_index():
         "projects": hub_projects,
         "tools": hub_tools,
         "projectTitles": PROJECT_TITLES,
+        "scan": scan_report,
         "conversations": conversations,
         "stats": {
             "total": len(conversations),
@@ -1575,6 +1726,8 @@ def _build_index():
             "unique": len(conversations) - dup_count,
             "elapsed_sec": round(time.time() - t0, 1),
             "discovered_sources": discovered,
+            "discoveredConversations": sum(1 for c in conversations
+                                           if c.get("sourceKind") == "discovered"),
         },
     }
     DATA_DIR.mkdir(parents=True, exist_ok=True)

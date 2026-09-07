@@ -17,7 +17,8 @@ class ReleaseArtifactTests(unittest.TestCase):
         for prefix in ('', 'app/resources/app/', 'ai-console-1.3.1/'):
             for filename in ('.claude/launch.json', 'dist/data/conv/a.json',
                              'server/config.json', 'public/data/index.json',
-                             'logs/_remote.json', '__pycache__/api.pyc', '.env.local'):
+                             'logs/_remote.json', '__pycache__/api.pyc', '.env.local',
+                             '.ai-console/connections.json'):
                 with self.subTest(name=prefix + filename):
                     self.assertTrue(release_audit.forbidden_path(prefix + filename))
 

@@ -1,7 +1,11 @@
 /* eslint-disable react-refresh/only-export-components -- 純函式是同步 UI 的可驗證合約 */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { t } from '@/i18n'
-import type { IndexData } from '@/types/data'
+import type { ConversationScanReport, IndexData } from '@/types/data'
+
+declare global {
+  interface Window { acSetup?: { chooseDirectory: () => Promise<string | null> } }
+}
 
 export const CONVERSATION_SOURCES = [
   { id: 'codex', label: 'Codex' },
@@ -64,12 +68,60 @@ export interface ConversationSyncResult {
   sources: ConversationSourceHealth[]
 }
 
+export function additionalConversationSources(index: IndexData | null): { id: string; label: string; count: number }[] {
+  const found = new Map<string, { id: string; label: string; count: number }>()
+  for (const conversation of index?.conversations || []) {
+    if (conversation.sourceKind !== 'discovered' || conversation.subagent || conversation.dup) continue
+    const source = found.get(conversation.tool) || { id: conversation.tool, label: conversation.toolLabel, count: 0 }
+    source.count += 1
+    found.set(conversation.tool, source)
+  }
+  return [...found.values()]
+}
+
+export function scanCoverageWarning(scan?: ConversationScanReport): boolean {
+  return !!scan && !scan.complete
+}
+
+const SCAN_REASON_TEXT: Record<string, string> = {
+  'not-scanned': '尚未搜尋這些位置，請開始一次搜尋。',
+  'legacy-cache': '目前使用舊版搜尋紀錄，重新搜尋才能確認涵蓋範圍。',
+  'scan-failed': '搜尋程序沒有完成，請重新搜尋或縮小範圍。',
+  'unsupported': '找到目前不支援的對話格式，這些檔案尚未匯入。',
+  'unreadable': '有些檔案無法讀取，請確認檔案權限或是否仍存在。',
+  'excluded': '有些檔案不符合可匯入條件，因此未加入對話清單。',
+  'time-limit': '搜尋時間已達上限，可以縮小範圍後再搜尋。',
+  'depth-limit': '部分資料夾層級太深，請把該資料夾加入其他搜尋位置。',
+  'directory-limit': '資料夾數量已達上限，請分批加入其他搜尋位置。',
+  'file-limit': '檔案數量已達上限，請縮小搜尋範圍。',
+  'candidate-limit': '對話來源數量已達上限，請分批搜尋。',
+  'root-limit': '搜尋起點數量已達上限，請分批加入其他資料夾。',
+  'directory-read-error': '有些資料夾無法讀取，可能沒有權限或已不存在。',
+  'file-read-error': '有些檔案無法讀取，請確認檔案權限或是否仍存在。',
+  'sqlite-read-error': '有些對話資料庫無法讀取，可能正在使用中或格式不支援。',
+  'unsupported-format': '找到目前不支援的對話格式，這些檔案尚未匯入。',
+  'record-limit': '部分檔案的對話筆數超過上限，尚未完整讀取。',
+  'byte-limit': '部分對話檔過大，尚未完整讀取。',
+}
+
+export function scanReasonText(reason: string): string {
+  return t(SCAN_REASON_TEXT[reason.replace(/^index-/, '')] || reason)
+}
+
+export function extraScanRoots(value: string): string[] {
+  return [...new Set(value.split(/\r?\n/).map(root => root.trim()).filter(Boolean))]
+}
+
 /** 實際的同步合約：先 POST 跑完 indexer，再讀回新索引，不由畫面猜數字。 */
 export async function requestConversationSync(
   fetcher: SyncFetch = fetch,
   signal?: AbortSignal,
+  options: { deep?: boolean; extraRoots?: string[] } = {},
 ): Promise<ConversationSyncResult> {
-  const response = await fetcher('/api/refresh', { method: 'POST', signal })
+  const response = await fetcher('/api/refresh', {
+    method: 'POST', signal, headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rescan: true, deep: options.deep === true, ...(options.extraRoots?.length ? { extraRoots: options.extraRoots } : {}) }),
+  })
   const reply = await response.json() as {
     ok?: boolean
     error?: string
@@ -99,11 +151,15 @@ export default function ConversationSync({ index, apiOk, onComplete, onClose }: 
   const [resultIndex, setResultIndex] = useState<IndexData | null>(null)
   const [sourceHealth, setSourceHealth] = useState<ConversationSourceHealth[]>([])
   const [error, setError] = useState('')
+  const [deep, setDeep] = useState(false)
+  const [extraRoots, setExtraRoots] = useState('')
   const startedAt = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
   const [beforeCounts, setBeforeCounts] = useState(() => conversationSourceCounts(index))
   const shownIndex = state === 'complete' ? resultIndex : index
   const shownCounts = useMemo(() => conversationSourceCounts(shownIndex), [shownIndex])
+  const additionalSources = useMemo(() => additionalConversationSources(shownIndex), [shownIndex])
+  const additionalTotal = additionalSources.reduce((total, source) => total + source.count, 0)
   const healthById = useMemo(
     () => new Map(sourceHealth.map((item) => [item.id, item])),
     [sourceHealth],
@@ -135,7 +191,7 @@ export default function ConversationSync({ index, apiOk, onComplete, onClose }: 
     const controller = new AbortController()
     abortRef.current = controller
     try {
-      const result = await requestConversationSync(fetch, controller.signal)
+      const result = await requestConversationSync(fetch, controller.signal, { deep, extraRoots: extraScanRoots(extraRoots) })
       const nextIndex = result.index
       setElapsed(Math.max(0, Math.floor((Date.now() - startedAt.current) / 1000)))
       setResultIndex(nextIndex)
@@ -166,7 +222,7 @@ export default function ConversationSync({ index, apiOk, onComplete, onClose }: 
             {t('匯入／同步 AI 對話')}
           </h1>
           <p className="mt-1 text-sm leading-6 text-mute2">
-            {t('會從這台電腦的 Codex、Claude、Qwen 和 Kimi 找回對話。不會刪除或修改原對話。')}
+            {t('搜尋這台電腦常見位置中的 Codex、Claude、Qwen 和 Kimi 對話。不會刪除或修改原對話。')}
           </p>
         </div>
         {onClose && (
@@ -180,6 +236,18 @@ export default function ConversationSync({ index, apiOk, onComplete, onClose }: 
           </button>
         )}
       </div>
+
+      <fieldset disabled={state === 'scanning'} className="rounded-xl border border-line bg-panel p-4 disabled:opacity-60">
+        <legend className="px-1 text-sm font-medium">{t('搜尋範圍')}</legend>
+        <label className="flex items-start gap-2 text-sm"><input type="radio" name="sync-scope" className="mt-1" checked={!deep} onChange={() => setDeep(false)} /><span>{t('搜尋常見位置（建議）')}<span className="mt-1 block text-xs leading-5 text-mute2">{t('先搜尋這個使用者帳號的 AI 工具資料夾。')}</span></span></label>
+        <label className="mt-3 flex items-start gap-2 text-sm"><input type="radio" name="sync-scope" className="mt-1" checked={deep} onChange={() => setDeep(true)} /><span>{t('擴大搜尋')}<span className="mt-1 block text-xs leading-5 text-mute2">{t('搜尋更多可讀取的位置；遇到權限、格式或搜尋上限時，會列出尚未完成的部分。')}</span></span></label>
+        <details className="mt-4 text-sm">
+          <summary className="cursor-pointer text-mute2">{t('進階：其他對話資料夾')}</summary>
+          <label className="mt-3 block">{t('其他對話資料夾（選填，每行一個）')}<textarea rows={2} className="mt-1 block w-full rounded-md border border-line2 bg-app p-2 text-sm" value={extraRoots} onChange={event => setExtraRoots(event.target.value)} placeholder={t('貼上存放 AI 對話的完整資料夾路徑')} /></label>
+          {typeof window !== 'undefined' && window.acSetup?.chooseDirectory && <button type="button" className="mt-2 rounded-md border border-line2 px-3 py-1.5 text-sm" onClick={() => { void window.acSetup?.chooseDirectory().then(path => { if (path) setExtraRoots(current => extraScanRoots(`${current}\n${path}`).join('\n')) }).catch(failure => setError(failure instanceof Error ? failure.message : String(failure))) }}>{t('選擇資料夾')}</button>}
+          <p className="mt-2 text-xs leading-5 text-mute2">{t('只加入存放對話的資料夾，避免選取整顆磁碟。')}</p>
+        </details>
+      </fieldset>
 
       <div
         className="grid gap-3 sm:grid-cols-2"
@@ -240,6 +308,12 @@ export default function ConversationSync({ index, apiOk, onComplete, onClose }: 
         })}
       </div>
 
+      {additionalSources.length > 0 && <section aria-labelledby="additional-conversation-sources">
+        <h2 id="additional-conversation-sources" className="text-sm font-semibold">{t('其他找到的對話來源')}</h2>
+        <p className="mt-1 text-xs leading-5 text-mute2">{t('這些對話以唯讀方式匯入，可以在控制台查看。')}</p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">{additionalSources.map(source => <article key={source.id} className="rounded-xl border border-line bg-panel p-4"><h3 className="font-medium">{source.label}</h3><p className="mt-1 text-sm text-mute2">{t('找到 {n} 份', { n: source.count })} · {t('唯讀匯入')}</p></article>)}</div>
+      </section>}
+
       <div
         role={state === 'error' ? 'alert' : 'status'}
         aria-live="polite"
@@ -248,15 +322,17 @@ export default function ConversationSync({ index, apiOk, onComplete, onClose }: 
       >
         {state === 'scanning' ? (
           <>
-            <p className="font-medium">{t('正在掃描四個 AI…已等待 {n} 秒', { n: elapsed })}</p>
-            <p className="mt-1 text-xs text-mute2">{t('通常需要 20–30 秒，請保持此頁開啟。')}</p>
+            <p className="font-medium">{t('正在搜尋 AI 對話…已等待 {n} 秒', { n: elapsed })}</p>
+            <p className="mt-1 text-xs text-mute2">{t('所需時間取決於搜尋範圍與檔案數，請保持此頁開啟。')}</p>
           </>
         ) : state === 'complete' ? (
-          <p className="font-medium text-emerald-700 dark:text-emerald-300">
-            {completion.needsAttention === 0
+          <p className={`font-medium ${scanCoverageWarning(shownIndex?.scan) ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300'}`}>
+            {scanCoverageWarning(shownIndex?.scan)
+              ? t('已更新找到的 {n} 份對話；部分位置尚未完成搜尋。', { n: completion.total + additionalTotal })
+              : completion.needsAttention === 0
               ? t('同步完成，共找到 {n} 份可在原 AI 開啟的對話。', { n: completion.total })
               : t('同步完成，共找到 {total} 份對話；有 {count} 個 AI 需要處理。', {
-                total: completion.total,
+                total: completion.total + additionalTotal,
                 count: completion.needsAttention,
               })}{' '}{t('耗時 {n} 秒。', { n: elapsed })}
           </p>
@@ -269,9 +345,16 @@ export default function ConversationSync({ index, apiOk, onComplete, onClose }: 
         ) : state === 'stopped' ? (
           <p>{t('已停止等待；後端可能仍在背景同步。畫面先保留舊清單，下次重新整理會讀到最新結果。')}</p>
         ) : (
-          <p>{t('按下開始後，四個 AI 會一起掃描。整個過程不會顯示虛假百分比。')}</p>
+          <p>{shownIndex?.scan ? t('目前清單來自上次搜尋；可以再次搜尋更新。') : t('選擇搜尋範圍後開始，找到的對話會加入控制台清單。')}</p>
         )}
       </div>
+
+      {shownIndex?.scan && <div role={scanCoverageWarning(shownIndex.scan) ? 'status' : undefined} className={`rounded-xl border p-4 text-sm ${scanCoverageWarning(shownIndex.scan) ? 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300' : 'border-line text-mute2'}`}>
+        <p className="font-medium">{scanCoverageWarning(shownIndex.scan) ? t('這次搜尋有未完成的部分') : t('已完成這次指定範圍的搜尋')}</p>
+        <p className="mt-1 text-xs leading-5">{t('這是所選範圍內的搜尋結果，不代表電腦上所有位置都已搜尋。')}</p>
+        {shownIndex.scan.reasons.length > 0 && <ul className="mt-2 list-inside list-disc text-xs leading-6">{shownIndex.scan.reasons.map((reason, i) => <li key={`${i}:${reason}`}>{scanReasonText(reason)}</li>)}</ul>}
+        <details className="mt-2 text-xs"><summary className="cursor-pointer">{t('查看搜尋範圍與數量')}</summary><p className="mt-2">{t('已檢查 {files} 個檔案、{dirs} 個資料夾；跳過 {skipped} 項。', { files: shownIndex.scan.filesInspected, dirs: shownIndex.scan.directories, skipped: shownIndex.scan.skippedFiles + shownIndex.scan.skippedDirectories })}</p><ul className="mt-2 space-y-1 break-all">{shownIndex.scan.roots.map(root => <li key={root}>{root}</li>)}</ul>{shownIndex.scan.cached && <p className="mt-2">{t('目前顯示上次搜尋的紀錄；重新搜尋可更新。')}</p>}</details>
+      </div>}
 
       <div className="flex flex-wrap items-center gap-3">
         <button
@@ -283,8 +366,8 @@ export default function ConversationSync({ index, apiOk, onComplete, onClose }: 
           {state === 'scanning'
             ? t('同步中… {n} 秒', { n: elapsed })
             : state === 'complete'
-              ? t('再同步一次')
-              : t('開始匯入／同步')}
+              ? t('重新搜尋對話')
+              : deep ? t('開始擴大搜尋') : t('開始搜尋常見位置')}
         </button>
         {state === 'scanning' && (
           <button
