@@ -731,16 +731,32 @@ def _installed_skill_inventory(home: Path | None = None) -> dict:
             name = (fm.get("name") or child.name).strip()
             description = fm.get("description", "").strip()[:600]
             key = name.casefold()
-            try:
-                digest = None if linked else _skill_digest(_read_installed_skill_dir(child))
-            except SkillPackageError:
-                digest = None
+            digest = None
+            validation = {"status": "unverified", "reason": "來源為連結，無法安全檢查或複製"}
+            if not linked:
+                try:
+                    files = _read_installed_skill_dir(child)
+                    digest = _skill_digest(files)
+                    _skill_package({"kind": "files", "files": [
+                        {"path": path, "data": base64.b64encode(data).decode("ascii")}
+                        for path, data in files.items()
+                    ]}, home=home_path)
+                    validation = {"status": "valid-format"}
+                except SkillPackageError as exc:
+                    validation = {
+                        "status": "unverified" if exc.code in {
+                            "SOURCE_NOT_FOUND", "SOURCE_READ_FAILED", "SYMLINK_REJECTED",
+                        } else "invalid",
+                        "reason": str(exc),
+                    }
             rec = grouped.setdefault(key, {"name": name, "description": description,
                                             "source": target, "installedTargets": [],
                                             "digests": {}, "folders": {},
+                                            "validationByTarget": {},
                                             "digestUnavailable": []})
             rec["installedTargets"].append(target)
             rec["digests"][target] = digest
+            rec["validationByTarget"][target] = validation
             rec["folders"][target] = child.name
             if digest is None:
                 rec["digestUnavailable"].append(target)
@@ -753,7 +769,13 @@ def _installed_skill_inventory(home: Path | None = None) -> dict:
         digests = rec.pop("digests")
         rec.pop("folders")
         first_digest = next((digest for digest in digests.values() if digest is not None), None)
-        rec["targets"] = compatible
+        validation_states = {item["status"] for item in rec["validationByTarget"].values()}
+        rec["validationStatus"] = ("valid-format" if "valid-format" in validation_states
+                                   else "unverified" if "unverified" in validation_states
+                                   else "invalid")
+        # These targets describe a checked file format, never runtime compatibility.
+        rec["targets"] = compatible if rec["validationStatus"] == "valid-format" else []
+        rec["compatibilityVerified"] = False
         rec["conflicts"] = [
             {"target": target, "reason": "技能完整內容與主要來源不同"}
             for target, digest in digests.items()
@@ -3954,6 +3976,15 @@ class Handler(BaseHTTPRequestHandler):
                 code, message, status = self._body_error
                 raise SkillPackageError(code, message, status)
             package = _skill_package(body)
+            preview_digest = body.get("previewDigest")
+            if not isinstance(preview_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", preview_digest):
+                raise SkillPackageError(
+                    "PREVIEW_REQUIRED", "請先完成安全預覽，再安裝技能。", 409,
+                    help_text="返回選擇來源，重新按「安全預覽」。")
+            if preview_digest != package["digest"]:
+                raise SkillPackageError(
+                    "PREVIEW_STALE", "技能內容在預覽後已改變，本次沒有寫入任何檔案。", 409,
+                    help_text="請重新預覽最新內容，再選擇 AI 安裝。")
             results = _install_skill(package, body.get("targets"))
             return self._json({"ok": True, "status": "installed",
                                "skill": _skill_summary(package),
@@ -5574,7 +5605,30 @@ REMOTE_ALLOWED_GET = {"/api/health", "/api/dispatches", "/api/dispatch/tools",
 REMOTE_ALLOWED_POST = {"/api/dispatch", "/api/dispatch/followup", "/api/dispatch/stop",
                        "/api/dispatch/cancel", "/api/dispatch/retry"}
 # 手機頁面本身與它的靜態檔。根路徑 / 不在內：那是桌面版整個主控台（含對話），遙控不開。
-REMOTE_STATIC_PREFIXES = ("/m", "/assets/", "/favicon", "/icon", "/vite.svg")
+def _remote_static_relative(path: str) -> str | None:
+    """Allow only the mobile shell and flat, fingerprinted build assets."""
+    try:
+        decoded = urllib.parse.unquote(path, errors="strict")
+    except (UnicodeError, ValueError):
+        return None
+    if "\\" in decoded or "%" in decoded or any(ord(ch) < 32 for ch in decoded) \
+            or any(part in {".", ".."} for part in decoded.split("/")):
+        return None
+    shell = {
+        "/m": "index.html", "/m/": "index.html",
+        "/m/manifest.webmanifest": "m/manifest.webmanifest",
+        "/m/sw.js": "m/sw.js", "/m/icon.svg": "m/icon.svg",
+        "/m/favicon.png": "favicon.png", "/favicon.png": "favicon.png",
+    }
+    if decoded in shell:
+        return shell[decoded]
+    match = re.fullmatch(
+        r"/(?:m/)?assets/([A-Za-z0-9_-]+-[A-Za-z0-9_-]{8}\.(?:js|mjs|css|woff2?|png|jpe?g|webp|gif|svg|ico|avif))",
+        decoded,
+    )
+    return f"assets/{match.group(1)}" if match else None
+
+
 _REMOTE = {"server": None, "thread": None, "bind": "", "token": ""}
 _REMOTE_LOCK = threading.Lock()
 # 猜 token 的擋下來：同一個來源十分鐘內錯十次就拒絕十分鐘
@@ -5705,8 +5759,7 @@ class RemoteHandler(Handler):
 
     def _remote_gate(self, method: str) -> bool:
         path = self.path.split("?", 1)[0]
-        if method == "GET" and (path == "/api/health" or path in ("/m", "/m/")
-                                or any(path.startswith(pre) for pre in REMOTE_STATIC_PREFIXES)):
+        if method == "GET" and (path == "/api/health" or _remote_static_relative(path) is not None):
             return True
         ip = str(self.client_address[0]) if self.client_address else ""
         now = time.time()
@@ -5726,6 +5779,33 @@ class RemoteHandler(Handler):
     def do_GET(self):
         if self._remote_gate("GET"):
             return super().do_GET()
+
+    def _static(self):
+        # Never inherit the desktop SPA fallback or /m/* -> dist/* remapping.
+        relative = _remote_static_relative(self.path.split("?", 1)[0])
+        if relative is None:
+            return self._json({"ok": False, "error": "遙控模式不開放這個路徑"}, 403)
+        root = DIST_DIR.resolve()
+        target = root / relative
+        try:
+            if target.resolve() != target:
+                return self._json({"ok": False, "error": "bad path"}, 403)
+            if not target.is_file():
+                return self._json({"ok": False, "error": "not found"}, 404)
+            body = target.read_bytes()
+        except (OSError, ValueError):
+            return self._json({"ok": False, "error": "read fail"}, 404)
+        mime = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        if target.suffix in (".js", ".mjs"):
+            mime = "text/javascript"
+        self.send_response(200)
+        self.send_header("Content-Type", f"{mime}; charset=utf-8" if mime.startswith("text/") else mime)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable"
+                         if relative.startswith("assets/") else "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_POST(self):
         if self._remote_gate("POST"):

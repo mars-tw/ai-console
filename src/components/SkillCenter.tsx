@@ -13,6 +13,8 @@ export interface SkillRecord {
   targets?: string[]
   installedTargets?: string[]
   conflicts?: { target: string; reason: string }[]
+  validationStatus?: 'valid-format' | 'invalid' | 'unverified'
+  validationByTarget?: Record<string, { status: 'valid-format' | 'invalid' | 'unverified'; reason?: string }>
 }
 
 export interface SkillTarget {
@@ -55,6 +57,7 @@ export interface PreviewTarget {
 
 interface PreviewSkill {
   name: string
+  digest?: string
   description?: string
   folder?: string
   fileCount?: number
@@ -157,7 +160,36 @@ export function skillErrorText(message: string): string {
   if (match) return t('{path} 太大，單檔上限 {size}', { path: match[1], size: match[2] })
   match = message.match(/^檔案總量太大，上限 (.+)$/)
   if (match) return t('檔案總量太大，上限 {size}', { size: match[1] })
+  if (message.includes('；')) return message.split('；').map(skillErrorText).join(t('；'))
   return t(message)
+}
+
+/** A source edit or cancellation invalidates both pending I/O and late completions. */
+export function createPreviewSession() {
+  let generation = 0
+  let controller: AbortController | null = null
+  const cancel = () => {
+    generation += 1
+    controller?.abort()
+    controller = null
+  }
+  return {
+    cancel,
+    begin() {
+      cancel()
+      const current = generation
+      const request = new AbortController()
+      controller = request
+      return {
+        signal: request.signal,
+        isCurrent: () => generation === current && !request.signal.aborted,
+      }
+    },
+  }
+}
+
+export function canCopySkillSource(skill: SkillRecord, source: string): boolean {
+  return skill.validationByTarget?.[source]?.status === 'valid-format'
 }
 
 function formatBytes(bytes: number): string {
@@ -242,6 +274,7 @@ export default function SkillCenter() {
   const [installResult, setInstallResult] = useState<InstallResponse | null>(null)
   const [installFailure, setInstallFailure] = useState<InstallResponse | null>(null)
   const firstError = useRef<HTMLDivElement>(null)
+  const previewSession = useRef(createPreviewSession())
 
   const loadCatalog = async () => {
     setCatalogBusy(true)
@@ -258,6 +291,10 @@ export default function SkillCenter() {
   }
 
   useEffect(() => { void loadCatalog() }, [])
+  useEffect(() => {
+    const session = previewSession.current
+    return () => session.cancel()
+  }, [])
   useEffect(() => { if (error) firstError.current?.focus() }, [error])
 
   const installedOptions = useMemo(() => {
@@ -269,11 +306,15 @@ export default function SkillCenter() {
         source,
         name: skill.name,
         description: skill.description || '',
+        copyable: canCopySkillSource(skill, source),
+        validation: skill.validationByTarget?.[source],
       }))
     })
   }, [catalog])
 
   const clearAfterSource = () => {
+    previewSession.current.cancel()
+    setBusy(false)
     setPreview(null)
     setPackagePayload(null)
     setSelectedTargets([])
@@ -294,7 +335,7 @@ export default function SkillCenter() {
   const buildPackage = async (): Promise<PackagePayload> => {
     if (sourceKind === 'installed') {
       const chosen = installedOptions.find((option) => option.key === installedChoice)
-      if (!chosen) throw new Error('請先選擇一個已安裝的技能')
+      if (!chosen?.copyable) throw new Error('請選擇已通過格式檢查的技能來源')
       return { kind: 'installed', source: chosen.source, name: chosen.name }
     }
     const candidates = pickedFiles.map((file) => ({ path: filePath(file), size: file.size }))
@@ -322,16 +363,21 @@ export default function SkillCenter() {
 
   const runPreview = async () => {
     if (busy) return
+    const request = previewSession.current.begin()
     setBusy(true)
     setError('')
     try {
       const payload = await buildPackage()
+      if (!request.isCurrent()) return
       const data = await apiJson<PreviewResponse>('/api/skills/preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        signal: request.signal,
       })
-      if (!data.ok || !data.skill) throw new Error(data.error || '無法預覽這個技能')
+      if (!request.isCurrent()) return
+      if (!data.ok || !data.skill) throw new Error([data.error, data.help].filter(Boolean).join('；') || '無法預覽這個技能')
+      if (!data.skill.digest || !/^[0-9a-f]{64}$/.test(data.skill.digest)) throw new Error('預覽缺少內容驗證資料，請重新整理後再試')
       setPackagePayload(payload)
       setPreview(data)
       // 安裝是外部寫入：不替使用者預選，更不一次灑到全部工具。
@@ -339,9 +385,9 @@ export default function SkillCenter() {
       setConflictChoice(hasSkillConflict(data.targets || []) ? '' : 'available')
       setStep(2)
     } catch (previewError) {
-      setError(previewError instanceof Error ? previewError.message : '無法預覽這個技能')
+      if (request.isCurrent()) setError(previewError instanceof Error ? previewError.message : '無法預覽這個技能')
     } finally {
-      setBusy(false)
+      if (request.isCurrent()) setBusy(false)
     }
   }
 
@@ -359,7 +405,7 @@ export default function SkillCenter() {
   }
 
   const install = async () => {
-    if (!packagePayload || busy || !selectedTargets.length) return
+    if (!packagePayload || !preview?.skill?.digest || busy || !selectedTargets.length) return
     setBusy(true)
     setError('')
     setInstallResult(null)
@@ -368,8 +414,12 @@ export default function SkillCenter() {
       const data = await apiJson<InstallResponse>('/api/skills/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...packagePayload, targets: selectedTargets }),
+        body: JSON.stringify({ ...packagePayload, targets: selectedTargets, previewDigest: preview.skill.digest }),
       })
+      if (!data.ok && (data.code === 'PREVIEW_STALE' || data.code === 'PREVIEW_REQUIRED')) {
+        clearAfterSource()
+        throw new Error([data.error, data.help].filter(Boolean).join('；') || '請重新預覽技能內容')
+      }
       const outcome = classifyInstallResponse(data)
       setInstallResult(outcome.success)
       setInstallFailure(outcome.failure)
@@ -427,19 +477,20 @@ export default function SkillCenter() {
                     <div className="flex items-center justify-between gap-2">
                       <h3 className="font-medium">{targetLabel(target.id, target.label)}</h3>
                       <span className={`rounded-full px-2 py-0.5 text-[11px] ${target.readOnly ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : targetAvailable(target) ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300' : 'bg-elev text-mute2'}`}>
-                        {target.readOnly ? t('唯讀來源') : targetAvailable(target) ? t('可接收技能') : t('未安裝工具')}
+                        {target.readOnly ? t('唯讀來源') : targetAvailable(target) ? t('可接收技能') : t('技能目錄不可用')}
                       </span>
                     </div>
                     <p className="mt-2 text-xs text-mute2">
                       <span className="font-semibold text-ink2">{installed}</span> {t('個已安裝')}
                       <span className="mx-2 text-line3">·</span>
-                      <span className="font-semibold text-ink2">{compatible}</span> {t('個相容')}
+                      <span className="font-semibold text-ink2">{compatible}</span> {t('個格式可匯入')}
                     </p>
                   </article>
                 )
               })}
             </div>
           )}
+          <p className="mt-2 text-xs text-mute2">{t('格式可匯入只代表檔案通過檢查，尚未驗證 AI 的實際相容性；已安裝數也包含待檢查或格式有誤的來源。')}</p>
         </section>
 
         <section className="rounded-xl border border-line2 bg-panel p-4 sm:p-5" aria-labelledby="import-title">
@@ -469,7 +520,7 @@ export default function SkillCenter() {
                   {([
                     ['zip', 'ZIP 技能包', '選擇一個已下載的 .zip 檔'],
                     ['files', '技能資料夾', '直接選擇含 SKILL.md 的資料夾'],
-                    ['installed', '從現有技能複製', '把已安裝技能加到另一個相容 AI'],
+                    ['installed', '從現有技能複製', '把通過格式檢查的技能複製到另一個 AI'],
                   ] as const).map(([kind, title, note]) => (
                     <label key={kind} className={`flex cursor-pointer gap-3 rounded-lg border p-3 ${sourceKind === kind ? 'border-line3 bg-elev' : 'border-line hover:bg-elev/40'}`}>
                       <input type="radio" name="skill-source" value={kind} checked={sourceKind === kind} onChange={() => chooseSource(kind)} />
@@ -487,7 +538,7 @@ export default function SkillCenter() {
                 {sourceKind === 'zip' && (
                   <label className="block text-sm font-medium">
                     {t('選擇 ZIP')}
-                    <input className="mt-2 block w-full text-sm file:mr-3 file:rounded-md file:border file:border-line file:bg-panel file:px-3 file:py-2 file:text-xs" type="file" accept=".zip,application/zip" onChange={(event) => { setPickedFiles(Array.from(event.target.files || [])); setError('') }} />
+                    <input className="mt-2 block w-full text-sm file:mr-3 file:rounded-md file:border file:border-line file:bg-panel file:px-3 file:py-2 file:text-xs" type="file" accept=".zip,application/zip" onChange={(event) => { clearAfterSource(); setPickedFiles(Array.from(event.target.files || [])) }} />
                   </label>
                 )}
                 {sourceKind === 'files' && (
@@ -498,24 +549,28 @@ export default function SkillCenter() {
                       type="file"
                       multiple
                       {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
-                      onChange={(event) => { setPickedFiles(Array.from(event.target.files || [])); setError('') }}
+                      onChange={(event) => { clearAfterSource(); setPickedFiles(Array.from(event.target.files || [])) }}
                     />
                   </label>
                 )}
                 {sourceKind === 'installed' && (
                   <label className="block text-sm font-medium">
                     {t('選擇現有技能')}
-                    <select className="mt-2 w-full rounded-md border border-line bg-panel px-3 py-2 text-sm" value={installedChoice} onChange={(event) => { setInstalledChoice(event.target.value); setError('') }}>
+                    <select className="mt-2 w-full rounded-md border border-line bg-panel px-3 py-2 text-sm" value={installedChoice} onChange={(event) => { clearAfterSource(); setInstalledChoice(event.target.value) }}>
                       <option value="">{t('請選擇…')}</option>
-                      {installedOptions.map((option) => <option key={option.key} value={option.key}>{option.name} — {targetLabel(option.source)}</option>)}
+                      {installedOptions.map((option) => <option key={option.key} value={option.key} disabled={!option.copyable}>{option.name} — {targetLabel(option.source)}{!option.copyable ? ` (${t(option.validation?.status === 'invalid' ? '格式有誤，無法複製' : '尚未完成安全檢查')})` : ''}</option>)}
                     </select>
+                    {installedOptions.some((option) => !option.copyable) && (
+                      <p className="mt-2 text-xs font-normal text-mute2">{t('無法複製的來源請先修正原始 SKILL.md 或檔案問題，再按「重新整理」；也可改選 ZIP 或資料夾重新預覽。')}</p>
+                    )}
                   </label>
                 )}
                 {pickedFiles.length > 0 && (
                   <p className="mt-2 text-xs text-mute2">{t('已選 {count} 個檔案，共 {size}', { count: pickedFiles.length, size: formatBytes(pickedFiles.reduce((sum, file) => sum + file.size, 0)) })}</p>
                 )}
               </div>
-              <div className="mt-4 flex justify-end">
+              <div className="mt-4 flex justify-end gap-2">
+                {busy && <button className="rounded-md border border-line px-3 py-2 text-sm hover:bg-elev" onClick={clearAfterSource}>{t('取消預覽')}</button>}
                 <button className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-invink hover:bg-ink2 disabled:opacity-40" disabled={busy || catalogBusy} onClick={() => void runPreview()}>
                   {busy ? t('正在安全檢查…') : t('下一步：安全預覽')}
                 </button>
@@ -556,6 +611,7 @@ export default function SkillCenter() {
                           />
                           <span className="min-w-0"><span className="block text-sm font-medium">{targetLabel(target.id, target.label)}</span><span className={`block text-xs ${target.status === 'conflict' ? 'text-red-600 dark:text-red-400' : 'text-mute2'}`}>
                             {target.status === 'available' ? t('可以安裝') : target.status === 'installed' ? t('相同版本已安裝') : target.status === 'conflict' ? t('同名但內容不同，禁止覆寫') : t('這個工具目前不可用')}
+                            {target.reason && <span className="mt-1 block">{skillErrorText(target.reason)}</span>}
                           </span></span>
                         </label>
                       )
@@ -567,7 +623,7 @@ export default function SkillCenter() {
               {hasSkillConflict(preview.targets || []) && (
                 <fieldset className="mt-4 rounded-lg border border-red-300 bg-red-50 p-4 dark:border-red-800 dark:bg-red-950/20">
                   <legend className="px-1 text-sm font-semibold text-red-700 dark:text-red-300">{t('發現同名衝突，請明確選擇')}</legend>
-                  <p className="mb-2 text-xs text-red-700 dark:text-red-300">{t('系統不會覆寫現有技能。若要保留兩份，請先替匯入資料夾改名，再重新選擇。')}</p>
+                  <p className="mb-2 text-xs text-red-700 dark:text-red-300">{t('系統不會覆寫現有技能。若要保留兩份，請先修改 SKILL.md 開頭的 name 欄位，再重新預覽；只改資料夾名稱不會生效。')}</p>
                   <label className="mr-4 inline-flex items-center gap-2 text-sm"><input type="radio" name="conflict-choice" checked={conflictChoice === 'cancel'} onChange={() => setConflictChoice('cancel')} />{t('取消這次匯入')}</label>
                   {installableTargetIds(preview.targets || []).length > 0 && (
                     <label className="inline-flex items-center gap-2 text-sm"><input type="radio" name="conflict-choice" checked={conflictChoice === 'available'} onChange={() => setConflictChoice('available')} />{t('只安裝到沒有衝突的 AI')}</label>

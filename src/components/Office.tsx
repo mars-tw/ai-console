@@ -5,6 +5,8 @@ import { t, useLang } from '@/i18n'
 import { useReadable } from '@/theme'
 import { isLive, look, stateOf } from '@/lib/dispatchState'
 import type { ConversationSummary, DispatchRecord, HubProject, ToolStatus } from '@/types/data'
+import type { DispatchTool } from '@/components/QuickDispatch'
+import { chatContext, nextChatModel, pickChatAnswer, retryChatHistory } from '@/lib/chatResponse'
 
 // ── 角色人設（名稱與配色統一由 SKINS 提供，這裡只放對話用的人格）──
 const PERSONAS: Record<string, string> = {
@@ -68,20 +70,13 @@ function DragonFace({ agent, size = 32 }: { agent: string; size?: number }) {
  * 第一次用的人會以為 AI 壞掉。這裡回一句明確說明，草稿另外收合放著，
  * 想看的人看得到，但它不能冒充答案。（與 AskAI 的同一份邏輯。）
  */
-function pickAnswer(content: unknown, reasoning: unknown): { text: string; reasoning?: string } {
-  const body = content == null ? '' : String(content).trim()
-  if (body) return { text: body }
-  const draft = reasoning == null ? '' : String(reasoning).trim()
-  if (draft) return { text: t('模型只回了推理過程，沒有給出答案。'), reasoning: draft }
-  return { text: t('（空回應）') }
-}
-
 interface ChatMsg {
   role: string
   text: string
   reasoning?: string   // 只回了推理過程時，收合起來的推理草稿
   retryText?: string   // 換模型重問時要重送的那句話
   retryModel?: string  // 重問改用哪個模型（目前模型的下一個可用模型）
+  excludeFromContext?: boolean
 }
 
 interface Props {
@@ -161,6 +156,18 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   }, [])
   // 中控
   const [cmdTool, setCmdTool] = useState('auto')
+  const [dispatchTools, setDispatchTools] = useState<DispatchTool[]>([])
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch('/api/dispatch/tools', { signal: controller.signal })
+      .then(response => response.ok ? response.json() : null)
+      .then(data => { if (data?.ok && Array.isArray(data.tools)) setDispatchTools(data.tools) })
+      .catch(() => {})
+    return () => controller.abort()
+  }, [])
+  const canDispatch = (tool: string) => tool === 'auto'
+    ? dispatchTools.some(item => !item.limited)
+    : dispatchTools.some(item => item.id === tool && !item.limited)
   const [cmdInput, setCmdInput] = useState('')
   const [cmdBusy, setCmdBusy] = useState(false)
   const [cmdSec, setCmdSec] = useState(0)
@@ -250,10 +257,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   // 「換個模型再問一次」要挑的模型：目前這個的下一個。
   // 只有一個可用模型時沒有「下一個」可換，回傳空字串讓按鈕不出現，
   // 別讓人按了重問卻跑同一個模型、得到同樣只有推理過程的結果。
-  const nextModelAfter = (used: string) => {
-    if (localModels.length < 2) return ''
-    return localModels[(localModels.indexOf(used) + 1) % localModels.length]
-  }
+  const nextModelAfter = (used: string) => nextChatModel(localModels, used)
 
   /**
    * 對某一隻龍送一輪話。base 是貼上使用者這句話之前的歷史；
@@ -279,7 +283,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model,
-          messages: [{ role: 'system', content: sys }, ...next.map((m) => ({ role: m.role, content: m.text }))],
+          messages: [{ role: 'system', content: sys }, ...chatContext(next).map((m) => ({ role: m.role, content: m.text }))],
         }),
         signal: abort.signal,
       })
@@ -288,9 +292,9 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
       if (!d.ok) {
         reply = { role: 'assistant', text: `⚠️ ${d.error || t('失敗')}` }
       } else {
-        const picked = pickAnswer(d.content, d.reasoning)
-        reply = picked.reasoning
-          ? { role: 'assistant', text: picked.text, reasoning: picked.reasoning, retryText: text, retryModel: nextModelAfter(model) }
+        const picked = pickChatAnswer(d.content, d.reasoning)
+        reply = picked.excludeFromContext
+          ? { role: 'assistant', ...picked, retryText: text, retryModel: nextModelAfter(model) }
           : { role: 'assistant', text: picked.text }
       }
       setAgentMsgs((m) => ({ ...m, [target]: [...next, reply] }))
@@ -325,10 +329,8 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
     const text = failed?.retryText
     const chosenModel = failed?.retryModel
     if (!text || !chosenModel) return
-    const prev = history[failedIndex - 1]
-    const base = prev && prev.role === 'user' && prev.text === text
-      ? history.slice(0, failedIndex - 1)   // 原問題會由 agentChat 重新貼上，避免同一句出現兩次
-      : history.slice(0, failedIndex)
+    const base = retryChatHistory(history, failedIndex)
+    if (!base) return
     await agentChat(target, text, base, chosenModel)
   }
 
@@ -345,7 +347,8 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
    */
   const dispatchToAgent = async () => {
     const text = agentInput.trim()
-    if (!text || !chatWith || chatBusy) return
+    if (!text || !chatWith || chatBusy || !canDispatch(chatWith)) return
+    if (!window.confirm(t('這會真的交給 AI 執行工作，可能讀寫專案檔案。確定要開始嗎？'))) return
     const target = chatWith
     const name = CHARS[target].name
     setAgentMsgs((m) => ({
@@ -392,7 +395,8 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   // ── 中控派工 ──
   const sendCommand = async () => {
     const text = cmdInput.trim()
-    if (!text || cmdBusy) return
+    if (!text || cmdBusy || !canDispatch(cmdTool)) return
+    if (!window.confirm(t('這會真的交給 AI 執行工作，可能讀寫專案檔案。確定要開始嗎？'))) return
     setCmdBusy(true)
     setCmdSec(0)
     setCmdLog((l) => [...l, `> [${cmdTool === 'auto' ? t('自動') : cmdTool}] ${text}`])
@@ -457,6 +461,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
         {/* 中控對話框 */}
         <div className="min-w-72 flex-1 rounded border border-line2 bg-elev p-3">
           <div className="mb-2 text-xs font-medium tracking-widest text-mute">{t('🎛️ 中控指揮台')}</div>
+          <p className="mb-2 text-xs text-mute2">{t('這裡會真的開始工作，不是傳送問題。請寫清楚希望 AI 完成什麼。')}</p>
           <div
             className="mb-2 max-h-36 overflow-y-auto rounded bg-app p-2 font-mono text-xs leading-5 text-ink3"
             role="log"
@@ -479,21 +484,16 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
           </div>
           <div className="flex gap-2">
             <select
+              aria-label={t('派給哪個工具')}
               className="rounded border border-line3 bg-panel px-2 py-1.5 text-xs text-ink2"
               value={cmdTool}
               onChange={(e) => setCmdTool(e.target.value)}
             >
               {/* agy/Gemini 只供無檔案的一次性推理，不從工作派工 UI 送出。 */}
               <option value="auto">{t('🤖 自動路由')}</option>
-              <option value="claude">{t('Claude（無頭）')}</option>
-              <option value="codex">{t('Codex（無頭）')}</option>
-              <option value="qwen">{t('Qwen（無頭）')}</option>
-              {/* kimi 與 grok 已改走無頭 CLI（19f1a3c），標籤要跟著改 ——
-                  寫「終端預填」會讓人以為派出去之後還要自己去按 Enter。 */}
-              <option value="kimi">{t('Kimi（無頭）')}</option>
-              <option value="grok">{t('Grok（無頭）')}</option>
-              <option value="cursor">{t('Cursor（終端預填）')}</option>
-              <option value="local">{t('地端（LM Studio）')}</option>
+              {dispatchTools.map(tool => (
+                <option key={tool.id} value={tool.id} disabled={tool.limited}>{tool.label}{tool.limited ? ` — ${t('限流中')}` : ''}</option>
+              ))}
             </select>
             <input
               className="min-w-0 flex-1 rounded border border-line3 bg-panel px-3 py-1.5 text-sm text-ink outline-none focus:border-line4"
@@ -505,7 +505,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
             />
             <button
               className="rounded bg-amber-700 px-4 py-1.5 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-60 dark:disabled:opacity-40"
-              disabled={cmdBusy}
+              disabled={cmdBusy || !cmdInput.trim() || !canDispatch(cmdTool)}
               onClick={sendCommand}
             >
               {t('派出')}
@@ -695,7 +695,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
                       <div className="mt-1 whitespace-pre-wrap break-words text-mute2">{m.reasoning}</div>
                     </details>
                   )}
-                  {m.retryModel && (
+                  {m.retryModel && i === (agentMsgs[chatWith]?.length || 0) - 1 && (
                     <button
                       type="button"
                       className="mt-1.5 rounded border border-line2 px-2 py-0.5 text-xs text-ink2 hover:bg-elev2 disabled:opacity-40"
@@ -756,7 +756,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
             </button>
             <button
               className="flex-none rounded bg-ink px-2 text-xs text-invink hover:bg-white disabled:opacity-60 dark:disabled:opacity-40"
-              disabled={chatBusy || !agentInput.trim()}
+              disabled={chatBusy || !agentInput.trim() || !canDispatch(chatWith)}
               title={t('真的派給 {tool} 執行，會掛上規範與技能，跟主控台派工同一條路徑', { tool: chatWith })}
               onClick={dispatchToAgent}
             >

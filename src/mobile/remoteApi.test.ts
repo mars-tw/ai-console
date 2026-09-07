@@ -8,6 +8,7 @@ import {
   tokenFromHash,
   TOKEN_STORAGE_KEY,
   uninstallRemoteFetch,
+  validateRemoteToken,
 } from './remoteApi'
 
 describe('remoteApi token 儲存與存取', () => {
@@ -93,10 +94,10 @@ describe('remoteApi tokenFromHash 網址解析與清理', () => {
     })
   })
 
-  it('從 hash 取出 token 並存入 localStorage，同時呼叫 replaceState 清除 hash', () => {
+  it('從 hash 取出 token 並清除網址，但驗證前不保存憑證', () => {
     const extracted = tokenFromHash()
     expect(extracted).toBe('token-from-url')
-    expect(getRemoteToken()).toBe('token-from-url')
+    expect(getRemoteToken()).toBe('')
     expect(replacedUrl).toBe('/m/')
   })
 
@@ -104,7 +105,7 @@ describe('remoteApi tokenFromHash 網址解析與清理', () => {
     window.location.hash = '#t=complex-token-456&mode=debug'
     const extracted = tokenFromHash()
     expect(extracted).toBe('complex-token-456')
-    expect(getRemoteToken()).toBe('complex-token-456')
+    expect(getRemoteToken()).toBe('')
   })
 
   it('當 hash 無 token 時回傳 null 且不覆蓋既有 token', () => {
@@ -114,6 +115,22 @@ describe('remoteApi tokenFromHash 網址解析與清理', () => {
     expect(extracted).toBeNull()
     expect(getRemoteToken()).toBe('keep-existing')
     expect(replacedUrl).toBeNull()
+  })
+
+  it('錯誤候選只驗證一次受保護端點，不保存候選或覆蓋既有憑證', async () => {
+    setRemoteToken('existing-token')
+    const request = vi.fn(async () => new Response(JSON.stringify({ ok: false, error: 'Invalid token' }), { status: 401 }))
+    await expect(validateRemoteToken('bad-candidate', request)).rejects.toThrow('Invalid token')
+    expect(request).toHaveBeenCalledExactlyOnceWith('/api/dispatch/tools', {
+      headers: { Authorization: 'Bearer bad-candidate' },
+    })
+    expect(getRemoteToken()).toBe('existing-token')
+  })
+
+  it('HTTP 200 仍須含正確工具資料才能完成驗證', async () => {
+    await expect(validateRemoteToken('candidate', async () => new Response(JSON.stringify({ ok: true })))).rejects.toThrow()
+    await expect(validateRemoteToken('candidate', async () => new Response(JSON.stringify({ ok: true, tools: [] })))).resolves.toBeUndefined()
+    expect(getRemoteToken()).toBe('')
   })
 })
 
@@ -209,6 +226,27 @@ describe('installRemoteFetch 請求攔截包裝', () => {
     expect(headers.get('Content-Type')).toBe('application/json')
     expect(headers.get('Authorization')).toBe('Bearer bearer-secret-777')
 
+    uninstallRemoteFetch(window)
+  })
+
+  it('明確配對 Authorization 優先於已保存的舊 token，包含 Request 輸入', async () => {
+    installRemoteFetch(window)
+    await window.fetch('/api/dispatch/tools', { headers: { Authorization: 'Bearer replacement' } })
+    expect(new Headers(interceptedCalls[0].init?.headers).get('Authorization')).toBe('Bearer replacement')
+    await window.fetch(new Request('http://localhost:5178/api/dispatch/tools', { headers: { Authorization: 'Bearer request-token' } }))
+    expect((interceptedCalls[1].input as Request).headers.get('Authorization')).toBe('Bearer request-token')
+    uninstallRemoteFetch(window)
+  })
+
+  it('舊 token 的延遲 401 不解除新 token 的配對', async () => {
+    let finish: ((response: Response) => void) | undefined
+    window.fetch = () => new Promise<Response>((resolve) => { finish = resolve })
+    installRemoteFetch(window)
+    const pending = window.fetch('/api/dispatches')
+    setRemoteToken('new-token')
+    finish?.(new Response('{}', { status: 401 }))
+    await pending
+    expect(window.dispatchEvent).not.toHaveBeenCalled()
     uninstallRemoteFetch(window)
   })
 

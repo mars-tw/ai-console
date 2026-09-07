@@ -2,6 +2,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { t, useLang } from '@/i18n'
 import type { Lang } from '@/i18n'
+import type { Dispatch, SetStateAction } from 'react'
+import { chatContext, nextChatModel, pickChatAnswer, retryChatHistory } from '@/lib/chatResponse'
 
 type AskMessage = {
   role: 'user' | 'assistant'
@@ -9,6 +11,7 @@ type AskMessage = {
   reasoning?: string      // 只回了推理過程時，收合起來的推理草稿
   retryText?: string      // 換模型重問時要重送的那句話
   retryModel?: string     // 重問改用哪個模型（auto 以外的下一個可用模型）
+  excludeFromContext?: boolean
 }
 
 /**
@@ -17,13 +20,7 @@ type AskMessage = {
  * 第一次用的人會以為 AI 壞掉。這裡回一句明確說明，草稿另外收合放著，
  * 想看的人看得到，但它不能冒充答案。
  */
-function pickAnswer(content: unknown, reasoning: unknown): { text: string; reasoning?: string } {
-  const body = content == null ? '' : String(content).trim()
-  if (body) return { text: body }
-  const draft = reasoning == null ? '' : String(reasoning).trim()
-  if (draft) return { text: t('模型只回了推理過程，沒有給出答案。'), reasoning: draft }
-  return { text: t('（空回應）') }
-}
+export type AskSession = { model: string; messages: AskMessage[]; input: string }
 
 export function askMessages(history: AskMessage[], text: string, lang: Lang = 'zh-TW') {
   return [
@@ -33,18 +30,19 @@ export function askMessages(history: AskMessage[], text: string, lang: Lang = 'z
         ? 'Only answer the question. Do not run commands, call tools, or modify files. Reply in clear English.'
         : '你只負責回答問題。不要執行指令、不要呼叫工具、不要修改檔案。請用繁體中文、白話回答。',
     },
-    ...history.slice(-12).map((message) => ({ role: message.role, content: message.text })),
+    ...chatContext(history).slice(-12).map((message) => ({ role: message.role, content: message.text })),
     { role: 'user', content: text },
   ]
 }
 
-export default function AskAI() {
+export default function AskAI({ session, onSessionChange }: { session: AskSession; onSessionChange: Dispatch<SetStateAction<AskSession>> }) {
   const lang = useLang()
   const [models, setModels] = useState<string[]>([])
   const [modelStatus, setModelStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading')
-  const [model, setModel] = useState('auto')
-  const [messages, setMessages] = useState<AskMessage[]>([])
-  const [input, setInput] = useState('')
+  const { model, messages, input } = session
+  const setModel = (value: string) => onSessionChange(current => ({ ...current, model: value }))
+  const setMessages = (value: AskMessage[]) => onSessionChange(current => ({ ...current, messages: value }))
+  const setInput = (value: string) => onSessionChange(current => ({ ...current, input: value }))
   const [busy, setBusy] = useState(false)
   const [seconds, setSeconds] = useState(0)
   const [routeInfo, setRouteInfo] = useState('')
@@ -84,10 +82,7 @@ export default function AskAI() {
   // 「換個模型再問一次」要挑的模型：目前這個的下一個。
   // 只有一個可用模型時沒有「下一個」可換，回傳空字串讓按鈕不出現，
   // 別讓人按了重問卻跑同一個模型、得到同樣只有推理過程的結果。
-  const nextModelAfter = (used: string) => {
-    if (models.length < 2) return ''
-    return models[(models.indexOf(used) + 1) % models.length]
-  }
+  const nextModelAfter = (used: string) => nextChatModel(models, used)
 
   const ask = async (text: string, chosenModel: string, history: AskMessage[]) => {
     if (!text || busy) return
@@ -97,6 +92,8 @@ export default function AskAI() {
     setRouteInfo('')
     const controller = new AbortController()
     abortRef.current = controller
+    const echoed = [...history, { role: 'user' as const, text }]
+    setMessages(echoed)
     try {
       let selected = chosenModel
       if (selected === 'auto') {
@@ -106,8 +103,6 @@ export default function AskAI() {
         selected = data.model
         setRouteInfo(t('自動選擇：{model} — {reason}', { model: data.model, reason: data.reason || '' }))
       }
-      const echoed = [...history, { role: 'user' as const, text }]
-      setMessages(echoed)
       const response = await fetch('/api/chat', {
         method: 'POST',
         signal: controller.signal,
@@ -115,10 +110,11 @@ export default function AskAI() {
         body: JSON.stringify({ model: selected, messages: askMessages(history, text, lang) }),
       })
       const data = await response.json()
+      if (controller.signal.aborted) return
       if (!response.ok || !data?.ok) throw new Error(data?.error || t('回答失敗'))
-      const picked = pickAnswer(data.content, data.reasoning)
-      const reply: AskMessage = picked.reasoning
-        ? { role: 'assistant', text: picked.text, reasoning: picked.reasoning, retryText: text, retryModel: nextModelAfter(selected) }
+      const picked = pickChatAnswer(data.content, data.reasoning)
+      const reply: AskMessage = picked.excludeFromContext
+        ? { role: 'assistant', ...picked, retryText: text, retryModel: nextModelAfter(selected) }
         : { role: 'assistant', text: picked.text }
       setMessages([...echoed, reply])
     } catch (failure) {
@@ -149,10 +145,8 @@ export default function AskAI() {
     const text = failed?.retryText
     const chosenModel = failed?.retryModel
     if (!text || !chosenModel || busy) return
-    const prev = messages[failedIndex - 1]
-    const base = prev && prev.role === 'user' && prev.text === text
-      ? messages.slice(0, failedIndex - 1)   // 原問題會由 ask 重新貼上，避免同一句出現兩次
-      : messages.slice(0, failedIndex)
+    const base = retryChatHistory(messages, failedIndex)
+    if (!base) return
     void ask(text, chosenModel, base)
   }
 
@@ -211,7 +205,7 @@ export default function AskAI() {
                   <div className="mt-1 whitespace-pre-wrap break-words text-mute2">{message.reasoning}</div>
                 </details>
               )}
-              {message.retryModel && (
+              {message.retryModel && index === messages.length - 1 && (
                 <button
                   type="button"
                   className="mt-2 rounded-md border border-line2 px-2.5 py-1 text-xs text-ink2 hover:bg-elev disabled:opacity-40"

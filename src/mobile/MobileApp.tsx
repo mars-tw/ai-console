@@ -2,7 +2,7 @@
 // 提供使用者在行動裝置瀏覽器上，透過 Tailscale 網路遙控操作 AI 派工。
 // 具備 401 自動轉配對、8 秒狀態輪詢、安全邊界留白與符合行動觸控標準的按鈕尺寸。
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { t } from '@/i18n'
 import QuotaStrip from '@/components/QuotaStrip'
 import { isLive, look, stateOf } from '@/lib/dispatchState'
@@ -13,6 +13,7 @@ import {
   installRemoteFetch,
   setRemoteToken,
   tokenFromHash,
+  validateRemoteToken,
 } from './remoteApi'
 
 export type ConsoleDispatch = DispatchRecord & {
@@ -92,14 +93,10 @@ export default function MobileApp({
   initialTools,
   initialAuto = '',
 }: MobileAppProps) {
-  // 配對狀態：若外部未顯式指定，則檢驗是否已有有效 token
-  const [paired, setPaired] = useState<boolean>(() => {
-    if (typeof initialPaired === 'boolean') {
-      return initialPaired
-    }
-    const tok = initialToken ?? getRemoteToken()
-    return Boolean(tok && tok.trim())
-  })
+  // 保存的 token 與 QR 都先驗證，避免無效憑證觸發多路未授權請求。
+  const [paired, setPaired] = useState(initialPaired === true)
+  const startupToken = useRef<string | null>(null)
+  const pairingAttempt = useRef(0)
 
   // 配對頁面之 token 輸入與連線中狀態
   const [tokenInput, setTokenInput] = useState('')
@@ -107,7 +104,7 @@ export default function MobileApp({
   const [pairError, setPairError] = useState('')
 
   // 連線健康與輪詢狀態
-  const [connected, setConnected] = useState(true)
+  const [connected, setConnected] = useState(initialPaired === true)
 
   // 快速派工表單狀態
   const [tools, setTools] = useState<DispatchTool[]>(initialTools ?? [])
@@ -132,11 +129,7 @@ export default function MobileApp({
   const pullDispatches = useCallback(async () => {
     try {
       const res = await fetch('/api/dispatches')
-      if (res.status === 401) {
-        setPaired(false)
-        setConnected(false)
-        return
-      }
+      if (res.status === 401) return
       if (!res.ok) {
         setConnected(false)
         return
@@ -155,10 +148,7 @@ export default function MobileApp({
   const pullTools = useCallback(async () => {
     try {
       const res = await fetch('/api/dispatch/tools')
-      if (res.status === 401) {
-        setPaired(false)
-        return
-      }
+      if (res.status === 401) return
       if (res.ok) {
         const data = await res.json()
         if (data && data.ok) {
@@ -178,9 +168,37 @@ export default function MobileApp({
   // 初始化安裝 fetch 攔截器、解析 hash、註冊 PWA 與排程輪詢
   useEffect(() => {
     installRemoteFetch()
-    const hashTok = tokenFromHash()
-    if (hashTok) {
-      setPaired(true)
+    let cancelled = false
+    if (startupToken.current === null) {
+      startupToken.current = tokenFromHash() ?? initialToken ?? getRemoteToken()
+    }
+    const validateCandidate = (candidate: string) => {
+      const attempt = ++pairingAttempt.current
+      validateRemoteToken(candidate).then(() => {
+        if (cancelled || attempt !== pairingAttempt.current) return
+        setRemoteToken(candidate)
+        setPaired(true)
+        setPairError('')
+      }).catch((error: unknown) => {
+        if (!cancelled && attempt === pairingAttempt.current) {
+          setPaired(false)
+          setPairError(error instanceof Error && error.message
+            ? error.message : t('連線失敗，請檢查 Token 或主機狀態'))
+        }
+      })
+    }
+    const candidate = startupToken.current.trim()
+    if (candidate && initialPaired !== true) validateCandidate(candidate)
+
+    // 已開啟的手機頁再點新的配對連結只會改 hash，不會重新掛載元件。
+    const handlePairingLink = () => {
+      const nextToken = tokenFromHash()?.trim()
+      if (!nextToken) return
+      startupToken.current = nextToken
+      setPaired(false)
+      setConnected(false)
+      setPairError('')
+      validateCandidate(nextToken)
     }
 
     // 註冊 Service Worker，支援離線快取
@@ -208,19 +226,24 @@ export default function MobileApp({
 
     // 監聽 401 未授權自訂事件
     const handleUnauthorized = () => {
+      clearRemoteToken()
       setPaired(false)
       setConnected(false)
+      setPairError(t('配對已失效，請重新掃 QR 或輸入新的 Token'))
     }
     if (typeof window !== 'undefined') {
       window.addEventListener('ac_remote_unauthorized', handleUnauthorized)
+      window.addEventListener('hashchange', handlePairingLink)
     }
 
     return () => {
+      cancelled = true
       if (typeof window !== 'undefined') {
         window.removeEventListener('ac_remote_unauthorized', handleUnauthorized)
+        window.removeEventListener('hashchange', handlePairingLink)
       }
     }
-  }, [])
+  }, [initialPaired, initialToken])
 
   // 當處於已配對狀態時，每 8 秒輪詢一次派工與連線狀態
   useEffect(() => {
@@ -240,25 +263,21 @@ export default function MobileApp({
   const handleConnect = async () => {
     const candidate = tokenInput.trim()
     if (!candidate || connecting) return
+    const attempt = ++pairingAttempt.current
     setConnecting(true)
     setPairError('')
 
     try {
-      // 直連 /api/health 驗證 Token 是否正確
-      const res = await fetch('/api/health', {
-        headers: { Authorization: `Bearer ${candidate}` },
-      })
-      if (res.ok) {
-        setRemoteToken(candidate)
-        setPaired(true)
-        setTokenInput('')
-        void pullDispatches()
-        void pullTools()
-      } else {
-        setPairError(t('連線失敗，請檢查 Token 或主機狀態'))
+      await validateRemoteToken(candidate)
+      if (attempt !== pairingAttempt.current) return
+      setRemoteToken(candidate)
+      setPaired(true)
+      setTokenInput('')
+    } catch (error) {
+      if (attempt === pairingAttempt.current) {
+        setPairError(error instanceof Error && error.message
+          ? error.message : t('連線失敗，請檢查 Token 或主機狀態'))
       }
-    } catch {
-      setPairError(t('連線失敗，請檢查 Token 或主機狀態'))
     } finally {
       setConnecting(false)
     }
@@ -267,8 +286,13 @@ export default function MobileApp({
   // 解除配對並清除 Token
   const handleUnpair = () => {
     if (window.confirm(t('確定要解除配對並清除 Token 嗎？'))) {
+      pairingAttempt.current += 1
       clearRemoteToken()
       setPaired(false)
+      setConnected(false)
+      setPairError('')
+      setExpandedLogId(null)
+      setLogTextMap({})
     }
   }
 
@@ -385,32 +409,51 @@ export default function MobileApp({
     }
   }
 
-  // 展開或收合單一派工的日誌輸出（讀取最後 3000 字元）
-  const toggleLog = async (id: string) => {
+  // 每次展開重新讀取；保持展開時與清單同步輪詢，關閉即取消讀取。
+  const toggleLog = (id: string) => {
     if (expandedLogId === id) {
       setExpandedLogId(null)
       return
     }
     setExpandedLogId(id)
-    if (!logTextMap[id]) {
-      setLogLoadingMap((prev) => ({ ...prev, [id]: true }))
+    setLogLoadingMap((prev) => ({ ...prev, [id]: true }))
+  }
+
+  useEffect(() => {
+    if (!paired || !expandedLogId) return
+    const id = expandedLogId
+    const controller = new AbortController()
+    let inFlight = false
+    const load = async () => {
+      if (inFlight) return
+      inFlight = true
       try {
-        const res = await fetch(`/api/dispatch/log?id=${encodeURIComponent(id)}`)
+        const res = await fetch(`/api/dispatch/log?id=${encodeURIComponent(id)}`, { signal: controller.signal })
         const data = await res.json()
-        if (data?.ok && typeof data.text === 'string') {
+        if (controller.signal.aborted) return
+        if (res.ok && data?.ok && typeof data.text === 'string') {
           // 僅保留最後 3000 字元以節省手機端渲染記憶體
           const trimmed = data.text.length > 3000 ? data.text.slice(-3000) : data.text
           setLogTextMap((prev) => ({ ...prev, [id]: trimmed }))
         } else {
-          setLogTextMap((prev) => ({ ...prev, [id]: data?.error || t('（還沒有輸出）') }))
+          setLogTextMap((prev) => ({ ...prev, [id]: data?.error || t('日誌讀取失敗，稍後會自動重試') }))
         }
       } catch {
-        setLogTextMap((prev) => ({ ...prev, [id]: t('（還沒有輸出）') }))
+        if (!controller.signal.aborted) {
+          setLogTextMap((prev) => ({ ...prev, [id]: t('日誌讀取失敗，稍後會自動重試') }))
+        }
       } finally {
-        setLogLoadingMap((prev) => ({ ...prev, [id]: false }))
+        inFlight = false
+        if (!controller.signal.aborted) setLogLoadingMap((prev) => ({ ...prev, [id]: false }))
       }
     }
-  }
+    void load()
+    const timer = setInterval(() => void load(), 8000)
+    return () => {
+      controller.abort()
+      clearInterval(timer)
+    }
+  }, [expandedLogId, paired])
 
   // ─────────────────────────────────────────────────────────────
   // 配對畫面（當未帶 Token 或 Token 錯誤 401 時顯示）
@@ -457,7 +500,7 @@ export default function MobileApp({
             </button>
 
             {pairError && (
-              <div className="text-xs text-red-700 dark:text-red-300">
+              <div role="alert" className="text-xs text-red-700 dark:text-red-300">
                 {pairError}
               </div>
             )}

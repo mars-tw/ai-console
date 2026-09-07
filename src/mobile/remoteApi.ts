@@ -48,7 +48,7 @@ export function clearRemoteToken(): void {
 
 /**
  * 從網址的 location.hash 解析 token（格式如 #t=<token>），
- * 成功取得後存入 localStorage 並使用 history.replaceState 清除 hash，
+ * 取得後使用 history.replaceState 清除 hash；通過配對驗證才另外保存，
  * 避免使用者在手機上重新整理或分享網址時洩漏憑證。
  */
 export function tokenFromHash(): string | null {
@@ -67,7 +67,6 @@ export function tokenFromHash(): string | null {
     const token = params.get('t')
 
     if (token) {
-      setRemoteToken(token)
       if (window.history && typeof window.history.replaceState === 'function') {
         const cleanUrl = (window.location.pathname || '') + (window.location.search || '')
         window.history.replaceState(null, '', cleanUrl || '/')
@@ -78,6 +77,17 @@ export function tokenFromHash(): string | null {
     // 忽略網址解析異常
   }
   return null
+}
+
+/** 驗證受保護的端點；公開 health 只能證明主機在線，不能驗證 token。 */
+export async function validateRemoteToken(candidate: string, customFetch = fetch): Promise<void> {
+  const response = await customFetch('/api/dispatch/tools', {
+    headers: { Authorization: `Bearer ${candidate}` },
+  })
+  const data = await response.json()
+  if (!response.ok || data?.ok !== true || !Array.isArray(data.tools)) {
+    throw new Error(typeof data?.error === 'string' ? data.error : '')
+  }
 }
 
 /**
@@ -137,31 +147,33 @@ export function installRemoteFetch(targetWindow: typeof window = typeof window !
   ): Promise<Response> {
     let finalInput = input
     let finalInit = init
+    let sentToken = ''
 
     if (isSameOriginApi(input, targetWindow)) {
       const token = getRemoteToken()
-      if (token) {
-        if (typeof Request !== 'undefined' && input instanceof Request) {
-          const headers = new Headers(input.headers)
-          if (init?.headers) {
-            new Headers(init.headers).forEach((value, key) => {
-              headers.set(key, value)
-            })
-          }
-          headers.set('Authorization', `Bearer ${token}`)
-          finalInput = new Request(input, { ...init, headers })
-          finalInit = undefined
-        } else {
-          const headers = new Headers(init?.headers)
-          headers.set('Authorization', `Bearer ${token}`)
-          finalInit = { ...init, headers }
+      if (typeof Request !== 'undefined' && input instanceof Request) {
+        const headers = new Headers(input.headers)
+        if (init?.headers) {
+          new Headers(init.headers).forEach((value, key) => {
+            headers.set(key, value)
+          })
         }
+        if (token && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`)
+        sentToken = (headers.get('Authorization') || '').replace(/^Bearer /, '')
+        finalInput = new Request(input, { ...init, headers })
+        finalInit = undefined
+      } else {
+        const headers = new Headers(init?.headers)
+        if (token && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`)
+        sentToken = (headers.get('Authorization') || '').replace(/^Bearer /, '')
+        finalInit = { ...init, headers }
       }
     }
 
     const response = await originalFetch(finalInput, finalInit)
 
-    if (response.status === 401 && isSameOriginApi(input, targetWindow)) {
+    // 舊請求晚回 401 不應解除剛以新 token 完成的配對。
+    if (response.status === 401 && sentToken && sentToken === getRemoteToken()) {
       if (typeof targetWindow.dispatchEvent === 'function' && typeof CustomEvent !== 'undefined') {
         targetWindow.dispatchEvent(new CustomEvent('ac_remote_unauthorized', { detail: { status: 401 } }))
       }

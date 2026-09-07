@@ -123,15 +123,59 @@ class TestRemoteServer(unittest.TestCase):
         原本這條路找不到檔就退回 index.html（text/html），瀏覽器拒絕把它當模組執行，手機頁一片白。"""
         dist = self.tmp / "dist"
         (dist / "assets").mkdir(parents=True)
-        (dist / "assets" / "probe.js").write_text("export const ok = 1\n", encoding="utf-8")
+        (dist / "assets" / "probe-a1b2c3d4.js").write_text("export const ok = 1\n", encoding="utf-8")
         (dist / "index.html").write_text("<html></html>", encoding="utf-8")
         with mock.patch.object(api, "DIST_DIR", dist):
-            req = urllib.request.Request(self.base + "/m/assets/probe.js")
+            req = urllib.request.Request(self.base + "/m/assets/probe-a1b2c3d4.js")
             with urllib.request.urlopen(req, timeout=10) as r:
                 body = r.read().decode("utf-8")
                 ctype = r.headers.get("Content-Type", "")
         self.assertIn("export const ok", body)
         self.assertIn("javascript", ctype)
+
+    def test_remote_static_never_exposes_dist_data_or_desktop_fallback(self):
+        dist = self.tmp / "dist"
+        (dist / "data").mkdir(parents=True)
+        (dist / "assets").mkdir()
+        (dist / "data" / "index.json").write_text('{"private_marker":true}', encoding="utf-8")
+        (dist / "index.html").write_text("synthetic shell", encoding="utf-8")
+        paths = (
+            "/m/data/index.json", "/mdata/index.json",
+            "/assets/../data/index.json", "/assets/%2e%2e/data/index.json",
+            "/m/assets/%2e%2e%2fdata/index.json",
+            "/m/assets/%2e%2e%5cdata%5cindex.json",
+            "/m/assets/%252e%252e/data/index.json", "/m/index.html",
+            "/assets/not-fingerprinted.js", "/assets/data-a1b2c3d4.json",
+        )
+        with mock.patch.object(api, "DIST_DIR", dist):
+            for token in (None, self.token):
+                for path in paths:
+                    with self.subTest(path=path, authenticated=bool(token)):
+                        api._AUTH_FAILS.clear()
+                        code, body = self._req(path, token=token)
+                        self.assertIn(code, (401, 403))
+                        self.assertNotIn("private_marker", body)
+                        self.assertNotIn("raw", body)
+            missing, body = self._req("/m/assets/missing-a1b2c3d4.js")
+            self.assertEqual(missing, 404)
+            self.assertNotIn("raw", body)
+
+    def test_remote_static_only_serves_known_shell_and_fingerprinted_assets(self):
+        dist = self.tmp / "dist"
+        (dist / "m").mkdir(parents=True)
+        (dist / "assets").mkdir()
+        (dist / "index.html").write_text("synthetic shell", encoding="utf-8")
+        for name in ("sw.js", "manifest.webmanifest", "icon.svg"):
+            (dist / "m" / name).write_text("synthetic mobile resource", encoding="utf-8")
+        (dist / "assets" / "index-Cdcth-fd.js").write_text("synthetic module", encoding="utf-8")
+        (dist / "favicon.png").write_bytes(b"synthetic favicon")
+        with mock.patch.object(api, "DIST_DIR", dist):
+            for path in ("/m", "/m/", "/m/sw.js", "/m/manifest.webmanifest", "/m/icon.svg",
+                         "/assets/index-Cdcth-fd.js", "/m/assets/index-Cdcth-fd.js",
+                         "/favicon.png", "/m/favicon.png"):
+                with self.subTest(path=path):
+                    code, _ = self._req(path)
+                    self.assertEqual(code, 200)
 
     # ── 鎖定 ──
     def test_猜十次就鎖(self):

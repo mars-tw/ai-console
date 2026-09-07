@@ -5,6 +5,8 @@ import QuickDispatch from '@/components/QuickDispatch'
 import officeSource from '@/components/Office.tsx?raw'
 import {
   classifyInstallResponse,
+  canCopySkillSource,
+  createPreviewSession,
   hasSkillConflict,
   installableTargetIds,
   installStatusText,
@@ -35,6 +37,41 @@ describe('Office 隱私邊界', () => {
 })
 
 describe('技能匯入安全流程', () => {
+  it('來源變更或取消後，晚到的成功與失敗都不可取代目前預覽', async () => {
+    const session = createPreviewSession()
+    const first = session.begin()
+    let finishFirst!: () => void
+    const lateResponse = new Promise<void>((resolve) => { finishFirst = resolve })
+    const adopted: string[] = []
+    const pending = lateResponse.then(() => { if (first.isCurrent()) adopted.push('old') })
+    session.cancel()
+    const next = session.begin()
+    finishFirst()
+    await pending
+    expect(first.signal.aborted).toBe(true)
+    expect(adopted).toEqual([])
+    expect(next.isCurrent()).toBe(true)
+    session.cancel()
+    expect(next.isCurrent()).toBe(false)
+    expect(session.begin().isCurrent()).toBe(true)
+  })
+
+  it('只有該來源通過格式檢查時才能複製，不借用另一個 AI 的通過結果', () => {
+    const skill = {
+      name: 'shared-skill', source: 'claude', validationStatus: 'valid-format' as const,
+      validationByTarget: {
+        claude: { status: 'valid-format' as const },
+        codex: { status: 'invalid' as const, reason: 'Missing description' },
+        qwen: { status: 'unverified' as const },
+      },
+    }
+    expect(canCopySkillSource(skill, 'claude')).toBe(true)
+    expect(canCopySkillSource(skill, 'codex')).toBe(false)
+    expect(canCopySkillSource(skill, 'qwen')).toBe(false)
+    expect(canCopySkillSource(skill, 'kimi')).toBe(false)
+    expect(canCopySkillSource({ name: 'legacy', source: 'codex' }, 'codex')).toBe(false)
+  })
+
   it('資料夾必須含 SKILL.md，並在上傳前擋下超量檔案', () => {
     expect(validateFileCandidates([
       { path: 'my-skill/SKILL.md', size: 100 },

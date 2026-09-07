@@ -15,4 +15,15 @@ describe('Ask AI request boundary', () => {
     expect(messages[0].content).toContain('Reply in clear English')
     expect(messages[0].content).not.toContain('繁體中文')
   })
+
+  it('excludes reasoning-only and error placeholders from future question context', () => {
+    const messages = askMessages([
+      { role: 'user', text: 'previous question' },
+      { role: 'assistant', text: 'no answer', reasoning: 'unfinished draft' },
+      { role: 'assistant', text: 'transport failed', excludeFromContext: true },
+    ], 'new question')
+    expect(messages.map(message => message.content)).not.toContain('no answer')
+    expect(messages.map(message => message.content)).not.toContain('transport failed')
+    expect(messages.at(-1)?.content).toBe('new question')
+  })
 })

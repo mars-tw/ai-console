@@ -6,6 +6,27 @@
 // 帶變數的句子用 {name} 佔位，兩邊的佔位符必須一致。
 
 export const EN: Record<string, string> = {
+  // v1.3.1 verified import workflow
+  "請選擇已通過格式檢查的技能來源": "Choose a skill source that passed the format checks.",
+  "預覽缺少內容驗證資料，請重新整理後再試": "The preview is missing verification data. Refresh and try again.",
+  "請重新預覽技能內容": "Preview the skill again.",
+  "技能目錄不可用": "Skill folder unavailable",
+  "個格式可匯入": "ready for format-compatible import",
+  "格式可匯入只代表檔案通過檢查，尚未驗證 AI 的實際相容性；已安裝數也包含待檢查或格式有誤的來源。": "Passing format checks does not verify how an AI will use the skill. Installed counts include sources that still need checking or have format errors.",
+  "把通過格式檢查的技能複製到另一個 AI": "Copy a skill that passed format checks to another AI",
+  "格式有誤，無法複製": "Invalid format; cannot copy",
+  "尚未完成安全檢查": "Safety checks incomplete",
+  "無法複製的來源請先修正原始 SKILL.md 或檔案問題，再按「重新整理」；也可改選 ZIP 或資料夾重新預覽。": "Fix the original SKILL.md or file issues and refresh, or choose a ZIP or folder to preview again.",
+  "取消預覽": "Cancel preview",
+  "系統不會覆寫現有技能。若要保留兩份，請先修改 SKILL.md 開頭的 name 欄位，再重新預覽；只改資料夾名稱不會生效。": "Existing skills are never overwritten. To keep both, change the name field at the start of SKILL.md and preview again. Renaming the folder alone has no effect.",
+  "請先完成安全預覽，再安裝技能。": "Complete the safety preview before installing.",
+  "返回選擇來源，重新按「安全預覽」。": "Return to source selection and run the safety preview again.",
+  "技能內容在預覽後已改變，本次沒有寫入任何檔案。": "The skill changed after the preview. No files were written.",
+  "請重新預覽最新內容，再選擇 AI 安裝。": "Preview the latest content, then choose an AI to install it for.",
+  "來源為連結，無法安全檢查或複製": "This source is a link and cannot be safely checked or copied.",
+  // v1.3.1 mobile recovery
+  "配對已失效，請重新掃 QR 或輸入新的 Token": "Pairing has expired. Scan the QR code again or enter a new token.",
+  "日誌讀取失敗，稍後會自動重試": "Could not read the log. It will retry automatically.",
   // ── 通用 ─────────────────────────────────────────
   '無': 'None',
   '你': 'You',
@@ -1041,4 +1062,3 @@ export const EN: Record<string, string> = {
   '已複製完整網址（含 token），只貼給自己的手機': 'Copied the full URL (with token). Only paste it into your own phone',
   '剪貼簿不可用；直接掃 QR': 'Clipboard unavailable; scan the QR instead',
 }
-

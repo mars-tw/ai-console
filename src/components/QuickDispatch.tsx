@@ -106,7 +106,6 @@ export default function QuickDispatch({
     const order = buildOrder(answers, {
       title: conv?.title,
       dir: conv?.projectDir,
-      recent: withCtx ? recent : undefined,
     })
     setTaskDraft(order)
     setGuiding(false)
@@ -121,7 +120,10 @@ export default function QuickDispatch({
     setSending(true)
     setResult(null)
     try {
-      const body: Record<string, unknown> = { tool, task }
+      const body: Record<string, unknown> = {
+        tool,
+        task: buildOrder({ goal: task }, { recent: withCtx ? recent : undefined }),
+      }
       // 工作目錄關係到「這件派工改了什麼」問不問得出來 ——
       // 家目錄不是 git 專案，沒給的話 diff 永遠是空的
       if (conv?.projectDir) body.cwd = conv.projectDir

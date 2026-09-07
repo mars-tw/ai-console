@@ -18,6 +18,15 @@
 > work to that provider's CLI.
 > The UI is available in Traditional Chinese and English.
 
+## 下載與開始
+
+從 [最新 Release](https://github.com/mars-tw/ai-console/releases/latest) 下載 `ai-console-win32-x64` ZIP，解壓縮後開啟 `AI控制台.exe`。
+Windows 版需要可用的 Python 3.10+；若已安裝 Kimi Desktop，也能使用它附帶的 Python。手機遙控另需在電腦與手機安裝並登入同一個 Tailscale 網路。
+
+v1.3.1 改善重點：問答切頁保留、派工確實帶上勾選的對話背景、手機配對失敗可直接修正、日誌持續更新，以及技能預覽與安裝內容一致。手機靜態資源也加上獨立路徑限制，避免繞過對話資料的存取邊界。
+
+<img src="docs/screenshot-mobile.png" width="390" alt="手機遙控示範：連線、派工與更新中的日誌">
+
 ![新手首頁：四個白話入口](docs/screenshot-home.png)
 
 ![四個 AI 的對話同步結果](docs/screenshot-sync.png)
@@ -36,6 +45,7 @@
 - **問問題與執行工作完全分開**：「💬 問 AI」只回答、不動檔案、不呼叫工具；「🎙️ 派工主控台」才會真的開始工作，送出前還會再次明說可能讀寫專案檔案
 - **四工具對話同步**：Codex、Claude、Qwen、Kimi 一次掃描，每個來源分別顯示找到幾份、失敗原因與可行修復；停止按鈕會誠實說明只是停止畫面等待，後端可能仍在完成
 - **AI 技能中心**：列出每個 AI 已安裝與相容技能，透過 ZIP、資料夾或既有技能進行三步驟匯入。匯入包一律視為不受信任資料，只檢查與複製，不執行腳本或 hook，不覆寫同名技能；全域治理技能只能作為唯讀來源，不能由新手精靈寫入
+- **預覽後才能安裝**：安裝會比對預覽時的內容指紋；來源中途改變就請你重新預覽。切換來源或取消時，過期回應不會把畫面跳回舊技能。「格式可匯入」只代表檔案檢查通過，與 AI 實際執行相容性分開表示。
 - **統一對話索引**：**掃描全機找出所有 AI 工具的對話紀錄**。判斷依據是檔案內容
   （JSONL 每行是不是帶 role 的訊息、SQLite 有沒有 thread/session/message 表），
   不是寫死的工具名單 —— 所以你裝的工具沒被寫進程式，一樣掃得到
@@ -147,12 +157,12 @@ python server/api.py       # 啟動整合伺服器 → http://127.0.0.1:5177/
 
 ```bash
 npm run verify             # 型別 + 靜態檢查 + 前後端測試，一次跑完
-npm test                   # 前後端測試一起跑（698 個）
-npm run test:web           # 只跑前端（vitest，248 個）
-npm run test:py            # 只跑後端（unittest，354 個，純標準庫）
+npm test                   # 前後端測試一起跑
+npm run test:web           # 只跑前端（vitest）
+npm run test:py            # 只跑後端（unittest，純標準庫）
 npm run typecheck          # 型別檢查（等同 tsc -b）
 npm run lint               # 靜態檢查（零警告）
-npm run pack               # 產生 Windows x64 可攜版到 release/
+npm run pack               # 從白名單暫存重打包 → release/clean/；自動洩漏檢查
 ```
 
 > **不要用 `npx tsc --noEmit`。** 根 `tsconfig.json` 是 `"files": []` 的
@@ -295,6 +305,16 @@ src/                       # React + TypeScript + Tailwind 前端
 路徑全部以 `Path.home()` 推導，無硬編碼使用者目錄。
 
 ## 隱私與安全
+
+發版使用 `scripts/package.mjs`：只複製執行所需檔案到新暫存目錄，排除 `dist/data`、個人設定、對話、快取與日誌；不會覆蓋正在使用的本地安裝。
+`scripts/audit_release.py` 能檢查資料夾或 ZIP 的版本、必要檔案、本機路徑、配對碼、私密檔名和 Windows 路徑／大小寫衝突。壓縮包通過檢查後，才把本機專屬設定放回本地安裝。
+
+```bash
+python scripts/audit_release.py release/clean/AI控制台-win32-x64 --kind windows --version 1.3.1
+python scripts/audit_release.py release/ai-console-source-v1.3.1.zip --kind source --version 1.3.1
+```
+
+發佈者可加 `--check-local-pairing`，只在記憶體中比對本機配對碼是否誤入成品；一般檢查與測試不會讀取配對設定。
 
 - 所有資料與 API 僅綁定 `127.0.0.1`，不對外開放
 - 索引器對原始對話檔**只讀不寫**

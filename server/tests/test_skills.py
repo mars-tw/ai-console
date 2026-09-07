@@ -137,11 +137,33 @@ class TestSkillInventory(SkillTempHome):
         self.assertEqual(shared["source"], "claude")
         self.assertEqual(shared["installedTargets"], ["claude", "codex"])
         self.assertEqual(set(shared["targets"]), set(api.SKILL_IMPORT_TARGETS))
+        self.assertEqual(shared["validationStatus"], "valid-format")
+        self.assertFalse(shared["compatibilityVerified"])
         target_counts = {item["id"]: item["installedCount"]
                          for item in inventory["targets"]}
         self.assertEqual(target_counts["claude"], 1)
         self.assertEqual(target_counts["codex"], 1)
         self.assertEqual(target_counts["qwen"], 1)
+
+    def test_invalid_installed_skill_is_not_claimed_format_importable(self):
+        root = self.make_installed("qwen", "invalid-source")
+        root.joinpath("SKILL.md").write_text("Missing frontmatter", encoding="utf-8")
+        inventory = api._installed_skill_inventory(self.home)
+        item = inventory["skills"][0]
+        self.assertEqual(item["installedTargets"], ["qwen"])
+        self.assertEqual(item["targets"], [])
+        self.assertEqual(item["validationStatus"], "invalid")
+        self.assertEqual(item["validationByTarget"]["qwen"]["status"], "invalid")
+        self.assertIn("frontmatter", item["validationByTarget"]["qwen"]["reason"])
+
+    def test_validation_is_specific_to_each_installed_source(self):
+        self.make_installed("claude", "shared-skill")
+        root = self.make_installed("codex", "shared-skill")
+        root.joinpath("SKILL.md").write_bytes(b"---\nname: shared-skill\n---\n")
+        item = api._installed_skill_inventory(self.home)["skills"][0]
+        self.assertEqual(item["validationByTarget"]["claude"]["status"], "valid-format")
+        self.assertEqual(item["validationByTarget"]["codex"]["status"], "invalid")
+        self.assertEqual(item["validationStatus"], "valid-format")
 
     def test_same_name_different_skill_md_is_a_visible_conflict(self):
         self.make_installed("claude", "shared-skill", "Use only for amber narwhal work.")
@@ -166,6 +188,8 @@ class TestSkillInventory(SkillTempHome):
             inventory = api._installed_skill_inventory(self.home)
             self.assertEqual(inventory["skills"][0]["name"], "escaped-skill")
             self.assertEqual(inventory["skills"][0]["digestUnavailable"], ["codex"])
+            self.assertEqual(inventory["skills"][0]["validationStatus"], "unverified")
+            self.assertEqual(inventory["skills"][0]["targets"], [])
             with self.assertRaises(api.SkillPackageError) as caught:
                 api._skill_package({"kind": "installed", "source": "codex",
                                     "name": "escaped-skill"}, home=self.home)
@@ -406,7 +430,9 @@ class TestSkillImportTransaction(SkillTempHome):
 
     def test_handler_conflict_has_novice_choices_and_no_write(self):
         self.make_installed("codex", "cactus-calibrator")
-        fake = _Fake({**_file_body(), "targets": ["codex"]})
+        body = _file_body()
+        fake = _Fake({**body, "targets": ["codex"],
+                      "previewDigest": api._skill_package(body, home=self.home)["digest"]})
         with mock.patch.object(api.Path, "home", return_value=self.home):
             fake.do_skills_import()
         code, payload = fake.sent
@@ -414,6 +440,52 @@ class TestSkillImportTransaction(SkillTempHome):
         self.assertEqual(payload["status"], "conflict")
         self.assertEqual(payload["code"], "SKILL_CONFLICT")
         self.assertTrue(payload["choices"])
+
+    def test_handler_requires_preview_digest_before_creating_target(self):
+        for digest in (None, "", "not-a-digest"):
+            with self.subTest(digest=digest):
+                fake = _Fake({**_file_body(), "targets": ["codex"], "previewDigest": digest})
+                with mock.patch.object(api.Path, "home", return_value=self.home):
+                    fake.do_skills_import()
+                self.assertEqual(fake.sent[0], 409)
+                self.assertEqual(fake.sent[1]["code"], "PREVIEW_REQUIRED")
+                self.assertFalse(api._skill_roots(self.home)["codex"].exists())
+
+    def test_changed_source_after_preview_rejects_then_fresh_preview_succeeds(self):
+        root = self.make_installed("claude", "cactus-calibrator", extra={"references/guide.md": b"original"})
+        body = {"kind": "installed", "source": "claude", "name": "cactus-calibrator"}
+        with mock.patch.object(api.Path, "home", return_value=self.home):
+            preview = _Fake(body)
+            preview.do_skills_preview()
+            first_digest = preview.sent[1]["skill"]["digest"]
+            root.joinpath("references/guide.md").write_bytes(b"updated after preview")
+            stale = _Fake({**body, "targets": ["codex"], "previewDigest": first_digest})
+            stale.do_skills_import()
+            self.assertEqual(stale.sent[0], 409)
+            self.assertEqual(stale.sent[1]["code"], "PREVIEW_STALE")
+            self.assertFalse(api._skill_roots(self.home)["codex"].exists())
+            refreshed = _Fake(body)
+            refreshed.do_skills_preview()
+            current_digest = refreshed.sent[1]["skill"]["digest"]
+            self.assertNotEqual(first_digest, current_digest)
+            accepted = _Fake({**body, "targets": ["codex"], "previewDigest": current_digest})
+            accepted.do_skills_import()
+            self.assertEqual(accepted.sent[0], 201)
+        installed = api._skill_roots(self.home)["codex"] / "cactus-calibrator"
+        self.assertEqual(installed.joinpath("references/guide.md").read_bytes(), b"updated after preview")
+
+    def test_changing_wrapper_does_not_rename_frontmatter_skill(self):
+        self.make_installed("codex", "cactus-calibrator")
+        body = {"kind": "files", "files": [{"path": "renamed-wrapper/SKILL.md",
+                "data": base64.b64encode(_skill_md()).decode("ascii")}]}
+        package = api._skill_package(body, home=self.home)
+        self.assertEqual(package["folder"], "cactus-calibrator")
+        with self.assertRaises(api.SkillPackageError):
+            api._install_skill(package, ["codex"], home=self.home)
+        body["files"][0]["data"] = base64.b64encode(_skill_md("cactus-calibrator-copy")).decode("ascii")
+        renamed = api._skill_package(body, home=self.home)
+        api._install_skill(renamed, ["codex"], home=self.home)
+        self.assertTrue((api._skill_roots(self.home)["codex"] / "cactus-calibrator-copy" / "SKILL.md").is_file())
 
 
 class TestTruthfulSkillMatching(SkillTempHome):

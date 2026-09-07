@@ -4,6 +4,8 @@ import type { ReactNode } from 'react'
 import type { ConversationDetail, ConversationSummary, IndexData } from '@/types/data'
 import Adventure from '@/components/Adventure'
 import AskAI from '@/components/AskAI'
+import type { AskSession } from '@/components/AskAI'
+import { chatContext, nextChatModel, pickChatAnswer, retryChatHistory } from '@/lib/chatResponse'
 import Console from '@/components/Console'
 import ConversationSync from '@/components/ConversationSync'
 import Office from '@/components/Office'
@@ -157,6 +159,10 @@ interface ChatMsg {
   who?: string
   /** 與 detail 的 Message.ts 同格式（字串，來源決定）；刻意不轉格式，轉換只會多出 Invalid Date 的機會 */
   ts?: string
+  reasoning?: string
+  excludeFromContext?: boolean
+  retryText?: string
+  retryModel?: string
 }
 
 /** 讀某個對話的本機聊天暫存。壞掉就當成空的，不要讓整頁炸掉 */
@@ -276,6 +282,7 @@ export default function Home() {
   const [routedModel, setRoutedModel] = useState('')
   const [chatMsgs, setChatMsgs] = useState<ChatMsg[]>([])
   const [chatInput, setChatInput] = useState('')
+  const chatDrafts = useRef<Record<string, string>>({})
   const [chatBusy, setChatBusy] = useState(false)
   /** 地端推論已經等了幾秒。沒有這個數字，畫面只有一行不會動的「思考中…」 */
   const [chatSecs, setChatSecs] = useState(0)
@@ -313,6 +320,7 @@ export default function Home() {
     [index],
   )
   const [viewMode, setViewMode] = useState<'list' | 'ask' | 'console' | 'office' | 'rpg' | 'skills'>('list')
+  const [askSession, setAskSession] = useState<AskSession>({ model: 'auto', messages: [], input: '' })
   const [syncOpen, setSyncOpen] = useState(false)
   /**
    * 側欄開合。
@@ -345,6 +353,8 @@ export default function Home() {
   /** 換對話要當下中止地端請求，並讓任何已經在回程上的舊結果失效。 */
   const selectConversation = (id: string | null) => {
     if (id === selectedIdRef.current) return
+    if (selectedIdRef.current) chatDrafts.current[selectedIdRef.current] = chatInput
+    setChatInput(id ? chatDrafts.current[id] || '' : '')
     selectedIdRef.current = id
     chatRequestSeq.current += 1
     chatAbort.current?.abort()
@@ -667,9 +677,8 @@ export default function Home() {
     return () => cancelAnimationFrame(id)
   }, [detail, detailLoading])
 
-  const sendChat = async () => {
-    const text = chatInput.trim()
-    if (!text || chatBusy || !chatModel) return
+  const runChat = async (text: string, chosenModel: string, history: ChatMsg[]) => {
+    if (!text || chatBusy || !chosenModel) return
     const conversationId = selected?.id ?? null
     const requestId = chatRequestSeq.current + 1
     chatRequestSeq.current = requestId
@@ -678,7 +687,6 @@ export default function Home() {
     )
     const ac = new AbortController()
     chatAbort.current = ac
-    const history = chatMsgs.length ? chatMsgs : recentContextMsgs()
     const next = [...history, { role: 'user', text }]
     setChatMsgs(next)
     setChatInput('')
@@ -686,8 +694,8 @@ export default function Home() {
     setChatSecs(0)
     try {
       // 自動路由也是這一次請求的一部分；換對話時要能一起中止。
-      let useModel = chatModel
-      if (chatModel === 'auto') {
+      let useModel = chosenModel
+      if (chosenModel === 'auto') {
         const rr = await fetch('/api/route?task=' + inferTask(), { signal: ac.signal })
         const rd = await rr.json()
         if (!isCurrent()) return
@@ -710,14 +718,20 @@ export default function Home() {
           model: useModel,
           messages: [
             { role: 'system', content: t('你正在接續一段來自其他 AI 工具的對話。以下是對話的近期內容，請直接延續脈絡，用繁體中文回答。') },
-            ...next.map((m) => ({ role: m.role, content: m.text })),
+            ...chatContext(next).map((m) => ({ role: m.role, content: m.text })),
           ],
         }),
       })
       const d = await r.json()
       if (!isCurrent()) return
-      const reply = d.ok ? (d.content || d.reasoning || t('（空回應）')) : `⚠️ ${d.error || t('呼叫失敗')}`
-      const finalMsgs = [...next, { role: 'assistant', text: reply }]
+      const picked = r.ok && d.ok ? pickChatAnswer(d.content, d.reasoning)
+        : { text: `⚠️ ${d.error || t('呼叫失敗')}`, excludeFromContext: true }
+      const reply: ChatMsg = { role: 'assistant', ...picked, who: useModel }
+      if (picked.excludeFromContext) {
+        reply.retryText = text
+        reply.retryModel = nextChatModel(models, useModel)
+      }
+      const finalMsgs = [...next, reply]
       setChatMsgs(finalMsgs)
       if (conversationId) localStorage.setItem('ac_chat_' + conversationId, JSON.stringify(finalMsgs.slice(-30)))
     } catch (e) {
@@ -726,9 +740,9 @@ export default function Home() {
       // 自己按「不等了」不是錯誤，不能報成「控制 API 無回應」——
       // 那會讓人以為是後端掛了，然後去重開伺服器找一個不存在的問題。
       if ((e as Error)?.name === 'AbortError') {
-        setChatMsgs([...next, { role: 'assistant', text: t('（已取消，沒有等這一次的回覆）') }])
+        setChatMsgs([...next, { role: 'assistant', text: t('（已取消，沒有等這一次的回覆）'), excludeFromContext: true }])
       } else {
-        setChatMsgs([...next, { role: 'assistant', text: t('⚠️ 控制 API 無回應') }])
+        setChatMsgs([...next, { role: 'assistant', text: t('⚠️ 控制 API 無回應'), excludeFromContext: true }])
       }
     } finally {
       if (isCurrent()) {
@@ -736,6 +750,26 @@ export default function Home() {
         setChatBusy(false)
       }
     }
+  }
+
+  const sendChat = () => runChat(chatInput.trim(), chatModel, chatMsgs.length ? chatMsgs : recentContextMsgs())
+
+  const retryChat = (index: number) => {
+    const failed = chatMsgs[index]
+    const history = retryChatHistory(chatMsgs, index)
+    if (!history || !failed.retryText || !failed.retryModel) return
+    void runChat(failed.retryText, failed.retryModel, history)
+  }
+
+  const clearChat = () => {
+    chatRequestSeq.current += 1
+    chatAbort.current?.abort()
+    chatAbort.current = null
+    setChatBusy(false)
+    setChatSecs(0)
+    setRouteInfo('')
+    setChatMsgs([])
+    if (selected) localStorage.removeItem('ac_chat_' + selected.id)
   }
 
   /**
@@ -1020,7 +1054,7 @@ export default function Home() {
       <main className="flex min-w-0 flex-1 flex-col">
         {tabs}
         {viewMode === 'ask' ? (
-          <AskAI />
+          <AskAI session={askSession} onSessionChange={setAskSession} />
         ) : viewMode === 'console' ? (
           <Console />
         ) : viewMode === 'office' ? (
@@ -1416,7 +1450,7 @@ export default function Home() {
         <main className="relative flex min-w-0 flex-1 flex-col">
           {tabs}
           {viewMode === 'ask' ? (
-            <AskAI />
+            <AskAI session={askSession} onSessionChange={setAskSession} />
           ) : viewMode === 'console' ? (
             <Console />
           ) : viewMode === 'office' ? (
@@ -1635,10 +1669,10 @@ export default function Home() {
                           {t('載入近期訊息當上下文')}
                         </button>
                       ) : chatMsgs.length > 0 && (
-                        <span className="text-xs text-mute3">{t('上下文 {n} 則', { n: chatMsgs.length })}</span>
+                        <span className="text-xs text-mute3">{t('上下文 {n} 則', { n: chatContext(chatMsgs).length })}</span>
                       )}
                       {chatMsgs.length > 0 && (
-                        <button className="rounded px-2 py-1 text-xs text-mute3 hover:text-ink3" onClick={() => { setChatMsgs([]); if (selected) localStorage.removeItem('ac_chat_' + selected.id) }}>
+                        <button className="rounded px-2 py-1 text-xs text-mute3 hover:text-ink3" onClick={clearChat}>
                           {t('清空')}
                         </button>
                       )}
@@ -1672,6 +1706,17 @@ export default function Home() {
                                 {m.ts ? ` · ${new Date(m.ts).toLocaleString('zh-TW')}` : ''}
                               </div>
                               <div className="whitespace-pre-wrap break-words">{clean}</div>
+                              {m.reasoning && (
+                                <details className="mt-2 text-xs">
+                                  <summary className="cursor-pointer text-mute3">{t('看它的推理過程')}</summary>
+                                  <div className="mt-1 whitespace-pre-wrap break-words text-mute2">{m.reasoning}</div>
+                                </details>
+                              )}
+                              {m.retryModel && i === chatMsgs.length - 1 && (
+                                <button type="button" className="mt-2 rounded border border-line2 px-2.5 py-1 text-xs disabled:opacity-40" disabled={chatBusy} onClick={() => retryChat(i)}>
+                                  {t('換個模型再問一次')}
+                                </button>
+                              )}
                             </div>
                           )
                         })}
