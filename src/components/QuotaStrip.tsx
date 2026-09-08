@@ -5,6 +5,13 @@
 
 import { useEffect, useState } from 'react'
 import { t } from '@/i18n'
+import {
+  canDispatch,
+  parseDispatchReadiness,
+  toolReadinessLabel,
+  toolReadinessTone,
+  type ReadinessTool,
+} from '@/lib/aiReadiness'
 
 /**
  * 本地元件與後端契約之型別宣告。
@@ -21,12 +28,8 @@ export interface ToolUsagePeriod {
 }
 
 
-export interface ToolUsageInfo {
-  id: string
-  label: string
-  mode?: string
-  limited: boolean
-  reason?: string
+// 用量列＝就緒度契約（ready/limited/state…）＋本元件專屬的計量欄位
+export interface ToolUsageInfo extends ReadinessTool {
   today: ToolUsagePeriod
   week?: ToolUsagePeriod
 }
@@ -34,7 +37,7 @@ export interface ToolUsageInfo {
 export interface QuotaUsageResponse {
   ok: boolean
   day?: string
-  auto?: string
+  auto?: string | null
   tools?: ToolUsageInfo[]
   error?: string
 }
@@ -96,9 +99,32 @@ export function setStoredOpenState(open: boolean): void {
   }
 }
 
+const USAGE_FAIL_REASON = '用量數據格式不正確'
+
+// 計量值必須是有限且非負的真數字；缺漏或型別不符一律拒收，絕不臆測補 0
+function isCount(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0
+}
+
+/** 驗證單一期間（今日／本週）的計量欄位，形狀不合回 null。 */
+function normalizeUsagePeriod(raw: unknown): ToolUsagePeriod | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const p = raw as Record<string, unknown>
+  if (!isCount(p.jobs) || !isCount(p.in) || !isCount(p.out) || !isCount(p.usd)) return null
+  const period: ToolUsagePeriod = { jobs: p.jobs, in: p.in, out: p.out, usd: p.usd }
+  for (const key of ['ok', 'failed', 'stopped'] as const) {
+    const v = p[key]
+    if (v === undefined) continue
+    if (!isCount(v)) return null
+    period[key] = v
+  }
+  return period
+}
+
 /**
  * 取得後端額度用量資料。
  * 提供獨立函式以利單元測試抽換 fetch 實作。
+ * 失敗的請求不讀取內容；成功回應仍須通過就緒度形狀驗證才採用。
  */
 export async function fetchQuotaUsage(customFetch = fetch, signal?: AbortSignal): Promise<QuotaUsageResponse> {
   const res = await customFetch('/api/dispatch/usage', { signal })
@@ -106,10 +132,48 @@ export async function fetchQuotaUsage(customFetch = fetch, signal?: AbortSignal)
     throw new Error(`HTTP ${res.status}`)
   }
   const data = (await res.json()) as QuotaUsageResponse
-  if (!data || !data.ok) {
+  if (!data || data.ok !== true) {
     throw new Error(data?.error || 'API returned ok=false')
   }
-  return data
+  const snapshot = parseDispatchReadiness(data)
+  if (!snapshot.ok) {
+    throw new Error(snapshot.reason)
+  }
+  // 顯示欄位一律取自解析後的安全列（物件型 reason 已被剔除），
+  // 只從 id／順序對得上的原始列補回通過驗證的計量欄位
+  const rawTools: unknown[] = Array.isArray(data.tools) ? (data.tools as unknown[]) : []
+  const tools: ToolUsageInfo[] = snapshot.tools.map((tool, i) => {
+    const item = rawTools[i]
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error(USAGE_FAIL_REASON)
+    const rawRow = item as Record<string, unknown>
+    if (typeof rawRow.id !== 'string' || rawRow.id.trim() !== tool.id) throw new Error(USAGE_FAIL_REASON)
+    const today = normalizeUsagePeriod(rawRow.today)
+    if (!today) throw new Error(USAGE_FAIL_REASON)
+    const merged: ToolUsageInfo = { ...tool, today }
+    if (rawRow.week !== undefined) {
+      const week = normalizeUsagePeriod(rawRow.week)
+      if (!week) throw new Error(USAGE_FAIL_REASON)
+      merged.week = week
+    }
+    return merged
+  })
+  // 只把 auto 正規化成可信任值（不可派工時為 null）
+  return { ...data, auto: snapshot.auto, tools }
+}
+
+// 狀態點色調對應：只有真正就緒才是綠色，其餘為中性灰或琥珀
+const TONE_DOT: Record<ReturnType<typeof toolReadinessTone>, string> = {
+  ready: 'bg-emerald-500 dark:bg-emerald-400',
+  neutral: 'bg-slate-400 dark:bg-slate-500',
+  blocked: 'bg-amber-500 dark:bg-amber-400',
+  unknown: 'bg-slate-300 dark:bg-slate-600',
+}
+
+const TONE_TEXT: Record<ReturnType<typeof toolReadinessTone>, string> = {
+  ready: 'text-mute3',
+  neutral: 'text-mute3',
+  blocked: 'text-amber-700 dark:text-amber-300',
+  unknown: 'text-mute3',
 }
 
 interface QuotaStripProps {
@@ -121,6 +185,11 @@ export default function QuotaStrip({ compact, initialData }: QuotaStripProps) {
   const [open, setOpen] = useState<boolean>(getStoredOpenState)
   const [data, setData] = useState<QuotaUsageResponse | null>(initialData ?? null)
   const [hasError, setHasError] = useState<boolean>(false)
+
+  // 顯示用衍生值：auto 只有在共用判讀認為真的可派工時才成立（純顯示，不觸發任何派工）
+  const tools = data?.tools ?? []
+  const autoId = data?.auto ?? null
+  const autoUsable = canDispatch('auto', tools, autoId)
 
   // 點擊標題列切換展開或收合狀態，並持久化到本地儲存
   const toggleOpen = () => {
@@ -191,10 +260,19 @@ export default function QuotaStrip({ compact, initialData }: QuotaStripProps) {
             <div className="text-mute3">
               {t('額度資訊拿不到（控制 API 無回應）')}
             </div>
-          ) : data && data.tools && data.tools.length > 0 ? (
+          ) : tools.length > 0 ? (
             <div className="flex flex-col divide-y divide-line">
-              {data.tools.map((tool) => {
-                const isAuto = Boolean(data.auto && tool.id === data.auto)
+              {tools.map((tool) => {
+                // 只有伺服器 auto 真的可派工時，才在對應那列掛徽章（不猜、不 fallback）
+                const isAuto = autoUsable && tool.id === autoId
+                const tone = toolReadinessTone(tool)
+                const statusText = t(toolReadinessLabel(tool))
+                const reasonText =
+                  tool.reason && tool.reason.trim()
+                    ? t(tool.reason.trim())
+                    : tool.limited === true
+                      ? t('額度狀態無法確認')
+                      : ''
                 const hasJobs = tool.today.jobs > 0
                 const usdText = formatUsd(tool.today.usd)
 
@@ -210,26 +288,20 @@ export default function QuotaStrip({ compact, initialData }: QuotaStripProps) {
                       </span>
                     )}
 
-                    {/* 狀態點：可用＝綠、限流＝琥珀；提供 title 與 aria-label 供輔助科技使用 */}
+                    {/* 狀態點：色調來自就緒度判讀（額度與就緒分開描述，不宣稱 CLI 已登入） */}
                     <span
-                      className={`inline-block h-2 w-2 flex-none rounded-full ${
-                        tool.limited
-                          ? 'bg-amber-500 dark:bg-amber-400'
-                          : 'bg-emerald-500 dark:bg-emerald-400'
-                      }`}
-                      title={tool.limited ? t('限流') : t('可用')}
-                      aria-label={tool.limited ? t('限流') : t('可用')}
+                      className={`inline-block h-2 w-2 flex-none rounded-full ${TONE_DOT[tone]}`}
+                      title={statusText}
+                      aria-label={statusText}
                     />
 
                     {/* 工具名稱 */}
-                    <span className="font-medium text-ink2">{tool.label}</span>
+                    <span className="font-medium text-ink2">{t(tool.label)}</span>
 
-                    {/* 限流時顯示 reason，若無 reason 則顯示預設說明 */}
-                    {tool.limited && (
-                      <span className="text-[10px] text-amber-700 dark:text-amber-300">
-                        {tool.reason && tool.reason.trim()
-                          ? tool.reason
-                          : t('額度狀態無法確認')}
+                    {/* 非就緒列一律說明狀態，並附上後端理由（額度、缺設定、待確認皆適用） */}
+                    {tone !== 'ready' && (
+                      <span className={`text-[10px] ${TONE_TEXT[tone]}`}>
+                        {reasonText ? `${statusText} · ${reasonText}` : statusText}
                       </span>
                     )}
 
@@ -252,7 +324,10 @@ export default function QuotaStrip({ compact, initialData }: QuotaStripProps) {
                 )
               })}
             </div>
-          ) : null}
+          ) : (
+            // 沒有任何工具列時給中性提示，避免整片空白讓人以為壞掉
+            <div className="text-mute3">{t('還沒有可用的工具，請先完成安裝或設定')}</div>
+          )}
         </div>
       )}
     </div>

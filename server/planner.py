@@ -54,7 +54,7 @@ CHEAP_ORDER: tuple[str, ...] = ("gemini", "qwen", "kimi", "grok", "codex", "clau
 
 def default_tool(allowed: set[str]) -> str:
     return next((t for t in CHEAP_ORDER if t in allowed),
-                sorted(allowed)[0] if allowed else "local")
+                sorted(allowed)[0] if allowed else "")
 
 
 # 指名的講法：用 X / 叫 X / 請 X / 派 X / 交給 X / 讓 X / use X …
@@ -66,6 +66,8 @@ def named_tool(text: str, allowed: set[str] | None = None) -> str:
 
     只認「動詞 + 工具名」或句首指名。不然「幫我修 codex 的設定檔」
     這種把工具名當受詞的句子會被誤判成指名。
+    allowed 僅在呼叫端主動傳入時過濾；plan() 先不帶過濾找出指名，
+    再決定是執行還是回 setup（不可用時不重派）。
     """
     low = (text or "").lower()
     best = ""
@@ -184,13 +186,22 @@ def plan(instruction: str, model: str, skills: dict[str, str] | None = None,
         return {"ok": False, "steps": [], "note": "沒有輸入"}
 
     sk = dict(skills or DEFAULT_SKILLS)
-    allowed = set(available) if available else set(sk)
+    # available=None → 全部 skill keys；顯式 available=[] → 沒有可執行者。
+    allowed = set(available) if available is not None else set(sk)
     allowed &= set(sk) or allowed
+
+    # 指名先不帶 allowed 過濾：點名了但不能用 → setup，不可改派別人。
+    want = named_tool(instruction)
+    if want and want not in allowed:
+        return {"ok": False, "steps": [], "nextAction": "setup", "model": "",
+                "note": f"你指名了 {want}，但目前沒有可用的執行者"}
+    if not allowed:
+        return {"ok": False, "steps": [], "nextAction": "setup", "model": "",
+                "note": "目前沒有可用的執行者"}
     fallback = default_tool(allowed)
 
     # 使用者指名了誰，就照他講的。這比任何自動判斷都優先 ——
     # 明明講了「用 codex」卻派給別人，會讓人完全不敢再用這個介面。
-    want = named_tool(instruction, allowed)
     if want:
         return {"ok": True, "model": "", "note": f"你指名了 {want}，直接交給它",
                 "steps": [{"tool": want, "task": instruction, "why": "你指名的執行者"}]}

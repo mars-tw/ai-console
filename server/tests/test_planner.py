@@ -140,6 +140,14 @@ class TestParseLines(unittest.TestCase):
         self.assertEqual(planner._parse_lines("這只是一段說明文字", ALL, "claude"), [])
 
 
+class TestDefaultTool(unittest.TestCase):
+    def test_空集合回空字串而不是_local(self):
+        self.assertEqual(planner.default_tool(set()), "")
+
+    def test_依便宜順序挑選(self):
+        self.assertEqual(planner.default_tool({"claude", "qwen", "local"}), "qwen")
+
+
 class TestPlanShortCircuits(unittest.TestCase):
     """不需要打模型就能決定的路徑"""
 
@@ -147,6 +155,24 @@ class TestPlanShortCircuits(unittest.TestCase):
         got = planner.plan("", "some-model")
         self.assertFalse(got["ok"])
         self.assertEqual(got["steps"], [])
+
+    def test_available_為_None_時預設全部_skill_keys(self):
+        got = planner.plan("用 codex 把測試修好", "不存在的模型", available=None)
+        self.assertTrue(got["ok"])
+        self.assertEqual(got["steps"][0]["tool"], "codex")
+
+    def test_顯式空_available_表示沒有可執行者(self):
+        got = planner.plan("把測試跑一遍", "some-model", available=[])
+        self.assertFalse(got["ok"])
+        self.assertEqual(got["steps"], [])
+        self.assertEqual(got["nextAction"], "setup")
+
+    def test_指名但不在可用清單時回_setup_不改派(self):
+        got = planner.plan("用 codex 修一下", "some-model", available=["claude", "local"])
+        self.assertFalse(got["ok"])
+        self.assertEqual(got["steps"], [])
+        self.assertEqual(got["nextAction"], "setup")
+        self.assertIn("codex", got["note"])
 
     def test_指名時直接回傳不打模型(self):
         got = planner.plan("用 codex 把測試修好", "不存在的模型", available=sorted(ALL))
@@ -164,6 +190,11 @@ class TestPlanShortCircuits(unittest.TestCase):
     def test_可用清單只剩地端時退路也要跟著換(self):
         got = planner.plan("把測試跑一遍", "", available=["local"])
         self.assertEqual(got["steps"][0]["tool"], "local")
+
+    def test_單一_CLI_後援仍可用(self):
+        got = planner.plan("把測試跑一遍", "", available=["gemini"])
+        self.assertFalse(got["ok"])
+        self.assertEqual(got["steps"][0]["tool"], "gemini")
 
     def test_地端拆解第一發關閉_reasoning(self):
         captured = {}

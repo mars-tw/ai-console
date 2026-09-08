@@ -193,3 +193,127 @@ export function uninstallRemoteFetch(targetWindow: typeof window = typeof window
     delete win[ORIGINAL_FETCH_SYM]
   }
 }
+
+// ─────────────────────────────────────────────────────────────
+// 工單級配對快照（intent-scoped pairing snapshot）
+//
+// 為什麼只有「配對代次」不夠：原生 confirm() 會同步卡住 JS，這段期間別的分頁或
+// 新的配對連結可以把 localStorage 裡的 token 由 A 換成 B，而代次一動也沒動。
+// 若送出時讓攔截器「當下重讀」token，就會拿新配對的 B，去送使用者在 A 那份配對下
+// 才同意的那一件舊工單。
+//
+// 作法是兩層，缺一不可：
+//   1) 工單一開始就把 token 與代次一起釘住，之後每個非同步邊界（含 confirm 之後、
+//      POST 之前）都重驗一次，不一致就整件中止。
+//   2) 傳輸層一律帶「當初那把 token」的明確 Authorization，永遠不重讀較新的 token。
+//
+// localStorage 沒有跨分頁的原子性保證，這裡也不宣稱做得到：就算本頁讀到的是過期
+// 的快取值，被保證的仍然是「絕不用 B 去送 A 的工單」——第 (2) 層獨力守住這條線。
+// ─────────────────────────────────────────────────────────────
+
+/** 中止原因；只記錄原因代碼，絕不記錄或回傳任何 token 內容。 */
+export type StalePairingReason = 'missing_token' | 'pairing_changed' | 'token_rotated' | 'no_transport'
+
+export interface StalePairingError extends Error {
+  readonly acStalePairing: true
+  readonly reason: StalePairingReason
+}
+
+/** 配對已經不是當初那一份：這是「中止」，不是「派工失敗」。 */
+export function stalePairingError(reason: StalePairingReason = 'pairing_changed'): StalePairingError {
+  const error = new Error(`stale_pairing:${reason}`) as Error & { acStalePairing: true; reason: StalePairingReason }
+  error.name = 'StalePairingError'
+  error.acStalePairing = true
+  error.reason = reason
+  return error
+}
+
+export function isStalePairingError(value: unknown): value is StalePairingError {
+  return !!value && typeof value === 'object'
+    && (value as { acStalePairing?: unknown }).acStalePairing === true
+}
+
+export interface PairingSnapshot {
+  /** 這件工單當初綁定的 token：只在傳輸層當作 Authorization 用，不進畫面、訊息或日誌 */
+  readonly token: string
+  /** 這件工單當初的配對代次 */
+  readonly epoch: number
+}
+
+/** 工單起手式：把「現在這把 token」與「現在這一代配對」一起釘住。 */
+export function capturePairing(epoch: number, readToken: () => string = getRemoteToken): PairingSnapshot {
+  return { token: readToken() || '', epoch }
+}
+
+/**
+ * 這件工單綁的配對還在嗎？三個條件都要成立：
+ * 有 token（空的／被清掉一律安全地失敗）、代次沒換、而且 token 還是同一把。
+ */
+export function isPairingIntact(
+  snapshot: PairingSnapshot | null | undefined,
+  currentEpoch: number,
+  readToken: () => string = getRemoteToken,
+): boolean {
+  if (!snapshot || !snapshot.token) return false
+  if (snapshot.epoch !== currentEpoch) return false
+  return (readToken() || '') === snapshot.token
+}
+
+export interface SnapshotFetchOptions {
+  /** 底層傳輸（預設用全域 fetch，也就是已安裝的攔截器） */
+  fetch?: typeof fetch
+  /** 同源判定所依據的 window（測試可注入） */
+  win?: typeof window
+  /** 送出前的外部存活判定（掛載中、同一代配對…） */
+  isCurrent?: () => boolean
+  /** 讀取目前 token 的方式（測試可注入，用來模擬送出當下才換 token） */
+  readToken?: () => string
+}
+
+/**
+ * 產生「只屬於這一件工單」的 fetch：
+ * - 送出前再驗一次快照（token 空掉、代次換了、token 被換掉都直接中止，不送）。
+ * - 同源 /api/ 請求一律帶當初那把 token 的明確 Authorization；因為標頭已經明確設定，
+ *   外層 installRemoteFetch 不會（也不該）拿較新的 token 覆蓋它。
+ * - 跨域與靜態資源原樣放行，絕不附上這件工單的憑證。
+ */
+export function createSnapshotFetch(
+  snapshot: PairingSnapshot,
+  options: SnapshotFetchOptions = {},
+): typeof fetch {
+  const readToken = options.readToken ?? getRemoteToken
+  const fallbackWin = { location: { origin: 'http://localhost' } } as unknown as typeof window
+  const win = options.win ?? (typeof window !== 'undefined' ? window : fallbackWin)
+
+  const snapshotFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const send = options.fetch ?? (typeof fetch === 'function' ? fetch : undefined)
+    if (typeof send !== 'function') throw stalePairingError('no_transport')
+
+    // 送出前的最後一道閘（每一次請求都走這裡，含 confirm 之後那一次）
+    if (!snapshot || !snapshot.token) throw stalePairingError('missing_token')
+    if (options.isCurrent && !options.isCurrent()) throw stalePairingError('pairing_changed')
+    if ((readToken() || '') !== snapshot.token) throw stalePairingError('token_rotated')
+
+    if (!isSameOriginApi(input, win)) {
+      return send(input, init)
+    }
+
+    if (typeof Request !== 'undefined' && input instanceof Request) {
+      const headers = new Headers(input.headers)
+      if (init?.headers) {
+        new Headers(init.headers).forEach((value, key) => {
+          headers.set(key, value)
+        })
+      }
+      // 明確用「當初那把」：不重讀 localStorage，race 也拿不到較新的 token
+      headers.set('Authorization', `Bearer ${snapshot.token}`)
+      return send(new Request(input, { ...init, headers }))
+    }
+
+    const headers = new Headers(init?.headers)
+    headers.set('Authorization', `Bearer ${snapshot.token}`)
+    return send(input, { ...init, headers })
+  }
+
+  return snapshotFetch as unknown as typeof fetch
+}

@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- 派工資格與後端回覆判讀需要無 DOM 的聚焦測試 */
 // 對話主控台：一個輸入框指揮全部 AI
 //
 // 流程刻意做成三段，而不是一句話直接開跑：
@@ -9,6 +10,12 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { t, useLang } from '@/i18n'
+import {
+  canDispatch,
+  parseDispatchReadiness,
+  toolReadinessLabel,
+  type ReadinessSnapshot,
+} from '@/lib/aiReadiness'
 import {
   ensureStepIds,
   mapStepsById,
@@ -220,8 +227,63 @@ function PatchLines({ patch }: { patch: string }) {
   )
 }
 
-/** 斷線時的保守 fallback；連上後以 /api/dispatch/tools 的真實可用清單為準。 */
-const TOOLS = ['auto', 'claude', 'codex', 'qwen', 'grok', 'kimi', 'cursor', 'local'] as const
+/**
+ * 還沒問到後端之前一律當成「不知道」。
+ *
+ * 原本這裡有一份寫死的 CLI 清單當 fallback：後端讀不到工具狀態時，
+ * 選單照樣列出八個工具、按鈕照樣亮著 —— 那是在對使用者宣稱
+ * 「這些都能用」，而實際上一件都派不出去。缺資料就是不可派工。
+ */
+const EMPTY_READINESS: ReadinessSnapshot = { ok: false, tools: [], auto: null, ready: false, reason: '' }
+
+/**
+ * 這一批的目標全部都要在同一份快照裡明確可派工。
+ * 任何一個不確定就整批擋下 —— 部分送出會留下「一半做了一半沒做」的狀態，
+ * 而那一半動到的是真的檔案。
+ */
+export function canDispatchAll(
+  targets: readonly string[],
+  snapshot: ReadinessSnapshot | null | undefined,
+): boolean {
+  if (!snapshot?.ok || !Array.isArray(targets) || targets.length === 0) return false
+  return targets.every((id) => canDispatch(id, snapshot.tools, snapshot.auto))
+}
+
+/**
+ * 本機問答紀錄（tool==='local' 或 mode==='sync'）。
+ *
+ * 這種紀錄只回答、沒有檔案工具，也沒有可以續談的後端工作 ——
+ * 後端現在對它的補話直接回 409，免得一句「再幫我改一下」被升級成雲端或檔案操作。
+ * 前端要跟後端講同一件事：不給補話的入口，也不給「看改了什麼」（它沒改過任何檔案）。
+ */
+export function isLocalAnswerRecord(d: { tool?: string; mode?: string } | null | undefined): boolean {
+  if (!d || typeof d !== 'object') return false
+  return d.tool === 'local' || d.mode === 'sync'
+}
+
+/** 本機問答為什麼不能補話。要講出口在哪，不是只給一顆按不動的鈕。 */
+const LOCAL_FOLLOWUP_NOTE = () =>
+  t('本機問答請回原對話接續（這筆只回答、沒有可續談的工作）')
+
+/** 地端工具只回答、不改檔；用來決定確認視窗要不要講「讀寫檔案」。查不到模式就只認 id。 */
+function isAnswerOnlyTool(id: string, tools: ReadinessSnapshot['tools']): boolean {
+  const row = tools.find((x) => x.id === id) as { mode?: unknown } | undefined
+  if (row && typeof row.mode === 'string') return row.mode === 'local'
+  return id === 'local'
+}
+
+/**
+ * 後端就算回非 2xx，body 裡常常還帶著唯一有用的那句話（error／note／nextAction）。
+ * 丟掉它、只顯示 HTTP 代碼的話，使用者拿不到任何可以行動的資訊。
+ * 沒有可行動訊息時回空字串，由呼叫端補上 HTTP 代碼。
+ */
+export function planReplyMessage(body: unknown): string {
+  const reply = body && typeof body === 'object' ? body as Record<string, unknown> : {}
+  return [reply.error, reply.note, reply.nextAction]
+    .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+    .map((x) => x.trim())
+    .join('・')
+}
 
 /** 已結束派工每次露出的筆數。按「再顯示」一次多露這麼多筆，按到底為止 */
 const DONE_PAGE = 8
@@ -264,33 +326,118 @@ function whenNext(ts: number): string {
   return `${Math.round(mins / 1440)} 天後（${clock}）`
 }
 
-export default function Console() {
+interface ConsoleProps {
+  /** 去「接入 AI」。沒給就不畫那顆 CTA —— 給一顆按了沒反應的鈕更糟 */
+  onSetup?: () => void
+  /** 受控的輸入草稿。由 Home 存在記憶體，去設定頁再回來不會把打好的字吃掉 */
+  draft?: string
+  onDraftChange?: (value: string) => void
+}
+
+export default function Console({ onSetup, draft: inputDraft, onDraftChange }: ConsoleProps = {}) {
   useLang()
   // 工具名稱用的是照深底挑的顏色，亮色主題下要壓過才讀得清楚
   // （辦公室早就這樣做了，這裡一直漏掉：codex 在白底只有 3.20:1）
   const tone = useReadable()
-  const [input, setInput] = useState('')
-  const [toolOptions, setToolOptions] = useState<string[]>([...TOOLS])
-  // 限流中的工具。跟 QuickDispatch 用同一個來源（/api/dispatch/tools 回應裡的
-  // limited 旗標）—— 計畫裡的選單若不跟對話頁一樣把它們灰掉，
-  // 使用者選了限流的工具、按下派工才吃 503，白等一次派工往返。
-  const [limitedTools, setLimitedTools] = useState<Set<string>>(new Set())
+  /**
+   * 輸入框：父層有給草稿就受控，沒給就自己存。
+   * 兩條路都不寫 localStorage —— 工單常含專案路徑與內部細節，不該留在磁碟上。
+   */
+  const [ownInput, setOwnInput] = useState('')
+  const controlledInput = typeof inputDraft === 'string' && !!onDraftChange
+  const input = controlledInput ? inputDraft : ownInput
+  const setInput = (value: string) => {
+    if (controlledInput && onDraftChange) onDraftChange(value)
+    else setOwnInput(value)
+  }
+  /**
+   * 工具就緒度。唯一來源是 /api/dispatch/tools，判讀交給共用的 aiReadiness ——
+   * 讀不到、格式不對、欄位缺漏一律是這份空快照，也就是「一件都不能派」。
+   */
+  const [readiness, setReadiness] = useState<ReadinessSnapshot>(EMPTY_READINESS)
+  const [readinessLoading, setReadinessLoading] = useState(true)
+  const mounted = useRef(true)
+  const readyAbort = useRef<AbortController | null>(null)
+  /** 重讀一次工具狀態，並把解析結果回傳給「送出前複查」用。 */
+  const refreshReadiness = async (): Promise<ReadinessSnapshot> => {
+    readyAbort.current?.abort()
+    const ac = new AbortController()
+    readyAbort.current = ac
+    if (mounted.current) setReadinessLoading(true)
+    let snapshot = EMPTY_READINESS
+    try {
+      const response = await fetch('/api/dispatch/tools', { signal: ac.signal })
+      snapshot = response.ok ? parseDispatchReadiness(await response.json()) : EMPTY_READINESS
+    } catch {
+      snapshot = EMPTY_READINESS
+    }
+    if (readyAbort.current === ac) readyAbort.current = null
+    if (ac.signal.aborted) return EMPTY_READINESS
+    if (mounted.current) {
+      setReadiness(snapshot)
+      setReadinessLoading(false)
+    }
+    return snapshot
+  }
   useEffect(() => {
-    const controller = new AbortController()
-    fetch('/api/dispatch/tools', { signal: controller.signal })
-      .then((response) => response.ok ? response.json() : null)
-      .then((data) => {
-        if (!Array.isArray(data?.tools)) return
-        setToolOptions(['auto', ...data.tools.map((item: { id?: unknown }) => String(item.id || ''))
-          .filter((id: string) => id && id !== 'auto')])
-        setLimitedTools(new Set(data.tools
-          .filter((item: { limited?: unknown }) => item.limited === true)
-          .map((item: { id?: unknown }) => String(item.id || ''))
-          .filter((id: string) => id)))
-      })
-      .catch(() => {})
-    return () => controller.abort()
+    mounted.current = true
+    void refreshReadiness()
+    return () => {
+      mounted.current = false
+      // 只中止「查狀態」這個查詢。已經被後端接受的派工不會、也不該被前端收回。
+      readyAbort.current?.abort()
+      readyAbort.current = null
+    }
+    // 掛載時問一次；之後由「重新檢查」與每次送出前的複查觸發
   }, [])
+  /** 明確就緒、可以真的執行的工具。終端機模式也算 —— 那是伺服器明講的狀態，不是猜的 */
+  const executors = readiness.ok
+    ? readiness.tools.filter((row) => canDispatch(row.id, readiness.tools, readiness.auto))
+    : []
+  const hasExecutor = executors.length > 0
+  /** 同步的送出鎖：setState 是非同步的，擋不住連點兩下變成兩次真的派工 */
+  const dispatchLock = useRef(false)
+  const [dispatchBusy, setDispatchBusy] = useState(false)
+  const blockedNote = () =>
+    t('這些 AI 現在不是確認可以執行的狀態，沒有送出任何工作。請先接入或重新檢查。')
+  /**
+   * 送出前的最後一道門：先看手上的快照，再重問一次後端，兩邊都放行才送。
+   * 任一目標不合格就整批擋下，而且是在確認視窗與任何狀態變更之前。
+   */
+  const ensureDispatchable = async (targets: string[]): Promise<ReadinessSnapshot | null> => {
+    if (!canDispatchAll(targets, readiness)) {
+      setNote(`⚠️ ${blockedNote()}`, true)
+      return null
+    }
+    const fresh = await refreshReadiness()
+    if (!mounted.current) return null
+    if (!canDispatchAll(targets, fresh)) {
+      setNote(`⚠️ ${blockedNote()}`, true)
+      return null
+    }
+    return fresh
+  }
+  /** 選單要列出全部工具（看得到才知道為什麼不能選），不能用的一律停用並標狀態。 */
+  const toolChoices = (current: string) => {
+    const rows = readiness.tools.map((row) => ({
+      id: row.id,
+      label: isAnswerOnlyTool(row.id, readiness.tools)
+        ? `${row.label}【${t('只回答，不改檔')}】（${t(toolReadinessLabel(row))}）`
+        : `${row.label}（${t(toolReadinessLabel(row))}）`,
+      disabled: !canDispatch(row.id, readiness.tools, readiness.auto),
+    }))
+    const list = [{
+      id: 'auto',
+      label: readiness.auto
+        ? t('自動選擇（目前是 {id}）', { id: readiness.auto })
+        : t('自動選擇（目前沒有可自動派工的工具）'),
+      disabled: !readiness.auto,
+    }, ...rows]
+    if (current && !list.some((row) => row.id === current)) {
+      list.push({ id: current, label: `${current}（${t('狀態未確認')}）`, disabled: true })
+    }
+    return list
+  }
   // 計畫存在 localStorage：切分頁時這個元件會 unmount，
   // 但 runAll 的迴圈還在背景把後續工單派出去。使用者回來看到空白，
   // 會以為沒派成功而重新拆解再派一次 —— 派出去的是會改檔案的 agent，
@@ -455,6 +602,13 @@ export default function Console() {
   const makePlan = async () => {
     const instruction = input.trim()
     if (!instruction || planning) return
+    // 沒有任何確認可執行的 AI 就不要開始：不清計畫、不清輸入、也不打 API。
+    // 拆解出來的工單沒有人能執行，那只是替使用者製造一批假的工作。
+    // Ctrl + Enter 走的是同一個函式，所以擋門只需要這一處。
+    if (!hasExecutor) {
+      setNote(`⚠️ ${t('還沒有確認可以執行工作的 AI，所以沒有拆解、也沒有送出任何工作。你打的內容留著。')}`, true)
+      return
+    }
     setPlanning(true)
     setPlanSec(0)
     setNote('')
@@ -472,7 +626,11 @@ export default function Console() {
       // steps 變空陣列、note 是空字串 —— 按鈕轉一下就沒反應，
       // 使用者只會覺得程式壞了
       if (!r.ok) {
-        setNote(t('拆解失敗（HTTP {code}）', { code: r.status }), true)
+        // 非 2xx 的 body 常常帶著唯一有用的那句話（例如「地端模型沒有啟動」）。
+        // 只顯示 HTTP 代碼等於把可行動的訊息丟掉。
+        const body = await r.json().catch(() => null)
+        setNote(planReplyMessage(body) || t('拆解失敗（HTTP {code}）', { code: r.status }), true)
+        planAbort.current = null
         setPlanning(false)
         return
       }
@@ -543,26 +701,55 @@ export default function Console() {
     const inBatch = new Set(stepIdsForDispatch(list, mode))
     const selected = list.filter((step) => inBatch.has(step.id))
     if (!selected.length) return
-    if (!window.confirm(t('這會真的交給 AI 執行工作，可能讀寫專案檔案。確定要開始嗎？'))) return
-    const only = (fn: (x: Step) => Step) =>
-      setSteps((s) => mapStepsById(s, inBatch, fn))
-
-    only((x) => ({ ...x, state: 'sending' }))
+    // 全部派出／只派這件／只重派失敗的／拆完自動送出，四條路都走這裡，
+    // 所以擋門與送出鎖只需要這一份。
+    if (dispatchLock.current) return
+    dispatchLock.current = true
+    setDispatchBusy(true)
     try {
-      const d = await fetch('/api/dispatch/batch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          steps: selected.map((x) => ({ tool: x.tool, task: x.task })),
-          serial,
-          cwd: workDir.trim(),
-        }),
-      }).then((r) => r.json())
-      only((x) => ({ ...x, state: d.ok ? 'sent' : 'failed', note: d.note || d.error || '' }))
-      setNote(d.ok ? (d.note || '') : `⚠️ ${d.error}`, !d.ok)
-    } catch {
-      only((x) => ({ ...x, state: 'failed', note: t('控制 API 無回應') }))
-      setNote(t('⚠️ 控制 API 無回應'), true)
+      // 複查在確認視窗與任何狀態變更之前：不合格的話畫面上什麼都不該動過。
+      const fresh = await ensureDispatchable(selected.map((x) => x.tool))
+      if (!fresh) return
+      // auto 在這一刻就釘死成快照裡的那一個：使用者同意的是「這幾個工具」，
+      // 不是「送出當下伺服器剛好選到誰」。晚點不能用就由後端擋下，不會偷偷換人。
+      const pinned = selected.map((x) => ({ ...x, tool: x.tool === 'auto' ? (fresh.auto || '') : x.tool }))
+      if (!canDispatchAll(pinned.map((x) => x.tool), fresh)) {
+        setNote(`⚠️ ${blockedNote()}`, true)
+        return
+      }
+      const answerOnly = pinned.every((x) => isAnswerOnlyTool(x.tool, fresh.tools))
+      if (!mounted.current) return
+      if (!window.confirm(answerOnly
+        ? t('這一批只交給地端工具：只回答，不改檔。確定要開始嗎？')
+        : t('這會真的交給 AI 執行工作，可能讀寫專案檔案。確定要開始嗎？'))) return
+      if (!mounted.current) return
+      const only = (fn: (x: Step) => Step) =>
+        setSteps((s) => mapStepsById(s, inBatch, fn))
+
+      only((x) => ({ ...x, state: 'sending' }))
+      try {
+        const response = await fetch('/api/dispatch/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            steps: pinned.map((x) => ({ tool: x.tool, task: x.task })),
+            serial,
+            cwd: workDir.trim(),
+          }),
+        })
+        const d = await response.json().catch(() => ({})) as { ok?: boolean; note?: string; error?: string }
+        // HTTP 狀態與 ok 兩個都要成立才算送出去了。少看一個就會把 500 顯示成「已派出」。
+        const ok = response.ok && d.ok === true
+        const failure = planReplyMessage(d) || t('派工失敗（HTTP {code}）', { code: response.status })
+        only((x) => ({ ...x, state: ok ? 'sent' : 'failed', note: ok ? (d.note || '') : failure }))
+        setNote(ok ? (d.note || '') : `⚠️ ${failure}`, !ok)
+      } catch {
+        only((x) => ({ ...x, state: 'failed', note: t('控制 API 無回應') }))
+        setNote(t('⚠️ 控制 API 無回應'), true)
+      }
+    } finally {
+      dispatchLock.current = false
+      setDispatchBusy(false)
     }
   }
 
@@ -580,42 +767,59 @@ export default function Console() {
    * 續談上一輪，所以這裡是「用續談旗標再派一次」。還在跑的話伺服器會先排隊，
    * 等它結束再送，不然兩個行程會搶同一段對話。
    */
-  const sendFollowup = async (id: string) => {
+  const sendFollowup = async (target: ConsoleDispatch) => {
     const text = replyText.trim()
-    if (!text) return
+    if (!text || replyBusy || dispatchLock.current) return
+    // 本機問答沒有可續談的工作，後端會回 409。打好的字留著，只是不往外送。
+    if (isLocalAnswerRecord(target)) {
+      setNote(`⚠️ ${LOCAL_FOLLOWUP_NOTE()}`, true)
+      return
+    }
+    dispatchLock.current = true
     setReplyBusy(true)
     try {
-      const r = await fetch('/api/dispatch/followup', {
+      // 還在跑的那件：補一句是排進後端已經接受的那份工作，佇列是後端管的，
+      // 不需要「現在有沒有新的可派工工具」。已經結束的才是真的要再派一次，
+      // 那就得先確認原本那個工具此刻真的能執行。
+      if (!isLive(target) && !(await ensureDispatchable([target.tool]))) return
+      const response = await fetch('/api/dispatch/followup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, text }),
-      }).then((x) => x.json()) as FollowupReply
+        body: JSON.stringify({ id: target.id, text }),
+      })
+      const r = await response.json().catch(() => ({})) as FollowupReply
+      const ok = response.ok && r.ok === true
       setNote(
-        r.ok
+        ok
           ? (r.handoff
             ? t('🤝 {why} —— 已把工單與進度交給 {to} 接手', { why: r.handoff.why, to: r.handoff.to })
             : (r.note || t('已送出')))
-          : `⚠️ ${r.error || t('送出失敗')}`,
-        !r.ok,
+          : `⚠️ ${planReplyMessage(r) || t('送出失敗（HTTP {code}）', { code: response.status })}`,
+        !ok,
       )
-      if (r.ok) {
+      if (ok) {
         setReplyText('')
         setReplyTo(null)
         // 立刻拉一次，不要等下一個輪詢週期 —— 送出後畫面沒反應會以為沒送出去
         fetch('/api/dispatches').then((x) => (x.ok ? x.json() : null))
           .then((x) => x?.dispatches && setDispatches(x.dispatches)).catch(() => {})
       }
+      // 被擋下或失敗時 replyText 原封不動留著：那句話是使用者打的，不能替他丟掉。
     } catch {
       setNote(t('⚠️ 控制 API 無回應'), true)
+    } finally {
+      dispatchLock.current = false
+      setReplyBusy(false)
     }
-    setReplyBusy(false)
   }
 
   const saveJob = async (j: SchedJob) => {
     const r = await fetch('/api/schedule/save', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(j),
     }).then((x) => x.json()).catch(() => ({ ok: false, error: t('控制 API 無回應') }))
-    setNote(r.ok ? t('已存好，到時間就會自己跑') : `⚠️ ${r.error}`, !r.ok)
+    // 存檔本身不需要現在就有可用的 AI —— 到時候的狀態跟現在不一樣。
+    // 但也不能承諾「一定會跑」：那是到時候才知道的事。
+    setNote(r.ok ? t('已存好。到時間會嘗試執行，實際跑不跑得起來要看當下的 AI 狀態') : `⚠️ ${r.error}`, !r.ok)
     if (r.ok) setDraft(null)
     pullSched()
   }
@@ -629,12 +833,25 @@ export default function Console() {
   }
 
   /** 立刻跑一次。設定完馬上驗證得到，不用等到明天早上 */
-  const runJobNow = async (id: string) => {
-    const r = await fetch('/api/schedule/run', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }),
-    }).then((x) => x.json()).catch(() => ({ ok: false, error: t('控制 API 無回應') }))
-    setNote(r.ok ? (r.note || t('已派出')) : `⚠️ ${r.error}`, !r.ok)
-    pullSched()
+  const runJobNow = async (job: SchedJob) => {
+    if (dispatchLock.current) return
+    dispatchLock.current = true
+    try {
+      // 「立刻跑」跟派工是同一件事，所以要用這個定時工作指名的工具做即時複查。
+      if (!(await ensureDispatchable([job.tool]))) return
+      const response = await fetch('/api/schedule/run', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: job.id }),
+      })
+      const r = await response.json().catch(() => ({})) as { ok?: boolean; note?: string; error?: string }
+      const ok = response.ok && r.ok === true
+      setNote(ok ? (r.note || t('已派出'))
+        : `⚠️ ${planReplyMessage(r) || t('執行失敗（HTTP {code}）', { code: response.status })}`, !ok)
+      pullSched()
+    } catch {
+      setNote(t('⚠️ 控制 API 無回應'), true)
+    } finally {
+      dispatchLock.current = false
+    }
   }
 
   const pullSched = () => {
@@ -667,31 +884,38 @@ export default function Console() {
    * 重派會產生一筆新紀錄而不是覆蓋舊的：「這件重試過幾次、每次結果是什麼」
    * 本身就是要看得到的資訊。
    */
-  const retry = async (id: string) => {
-    if (retryBusy) return
-    setRetryBusy(id)
+  const retry = async (target: ConsoleDispatch) => {
+    if (retryBusy || dispatchLock.current) return
+    dispatchLock.current = true
+    setRetryBusy(target.id)
     try {
-      const r = await fetch('/api/dispatch/retry', {
+      // 重派用的是原本那一筆的工具，所以複查的對象也是它 —— 不是「隨便一個現在能用的」。
+      if (!(await ensureDispatchable([target.tool]))) return
+      const response = await fetch('/api/dispatch/retry', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
-      }).then((x) => x.json()) as DispatchReply
+        body: JSON.stringify({ id: target.id }),
+      })
+      const r = await response.json().catch(() => ({})) as DispatchReply
+      const ok = response.ok && r.ok === true
       setNote(
-        r.ok
+        ok
           ? (r.rerouted
             ? t('🔀 {why}，已改派給 {to}', { why: r.rerouted.why, to: r.rerouted.to })
             : (r.note || t('已重派')))
-          : `⚠️ ${r.error || t('重派失敗')}`,
-        !r.ok,
+          : `⚠️ ${planReplyMessage(r) || t('重派失敗（HTTP {code}）', { code: response.status })}`,
+        !ok,
       )
-      if (r.ok) {
+      if (ok) {
         fetch('/api/dispatches').then((x) => (x.ok ? x.json() : null))
           .then((x) => x?.dispatches && setDispatches(x.dispatches)).catch(() => {})
       }
     } catch {
       setNote(t('⚠️ 控制 API 無回應'), true)
+    } finally {
+      dispatchLock.current = false
+      setRetryBusy('')
     }
-    setRetryBusy('')
   }
 
   /**
@@ -809,9 +1033,17 @@ export default function Console() {
   const editStep = (id: string, patch: Partial<Step>) =>
     setSteps((s) => mapStepsById(s, new Set([id]), (step) => ({ ...step, ...patch })))
 
-  const pending = stepIdsForDispatch(steps).length > 0
+  // 按鈕的可用狀態要跟「按下去真的會送出哪幾件」用同一份 id 選取結果，
+  // 不然畫面上亮著的那顆按鈕跟實際會發生的事對不起來。
+  const toolsOf = (mode: StepDispatchMode) => {
+    const ids = new Set(stepIdsForDispatch(steps, mode))
+    return steps.filter((s) => ids.has(s.id)).map((s) => s.tool)
+  }
+  const pendingTools = toolsOf('pending')
+  const failedTools = toolsOf('failed')
+  const pending = pendingTools.length > 0
   const running = steps.some((s) => s.state === 'sending')
-  const failed = steps.some((s) => s.state === 'failed')
+  const failed = failedTools.length > 0
 
   /** 只重派 failed 步驟；尚未送的 idle 與已成功步驟都保持原狀 */
   const retryFailed = () => {
@@ -825,9 +1057,14 @@ export default function Console() {
         <div className="mb-2 flex items-center gap-2">
           <span className="text-xs font-medium tracking-widest text-mute">{t('🎙️ 主控台')}</span>
           <span className="text-[11px] text-mute3">{t('說一句話，自動決定誰做、怎麼做')}</span>
-          <label className="ml-auto flex items-center gap-1 text-[11px] text-mute2">
+          {/* 標籤不能寫「省略確認」：執行前那個確認視窗一直都在，而且不該拿掉。
+              這個開關真正做的事是「拆解成功就自動按下派工」。 */}
+          <label
+            className="ml-auto flex items-center gap-1 text-[11px] text-mute2"
+            title={t('拆解成功才會自動送出；拆解失敗那一件仍要你自己按。執行前的確認視窗照樣會出現')}
+          >
             <input type="checkbox" checked={autoRun} onChange={(e) => setAutoRun(e.target.checked)} />
-            {t('省略確認，拆完直接派')}
+            {t('拆完自動送出（執行前仍會確認）')}
           </label>
           <label
             className="flex cursor-pointer items-center gap-1.5 text-[11px] text-mute2"
@@ -837,6 +1074,37 @@ export default function Console() {
             {t('一件一件跑')}
           </label>
         </div>
+        {/* 沒有可執行的 AI 時，把原因、出口與「你的字還在」一次講完。
+            按鈕自己灰掉但不解釋的話，使用者只會覺得程式壞了。 */}
+        {!hasExecutor && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="mb-2 flex flex-wrap items-center gap-2 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-200"
+          >
+            <span>
+              {readinessLoading
+                ? t('正在確認哪些 AI 可以執行工作…')
+                : t('目前沒有確認可以執行工作的 AI，所以不會拆解也不會派工。你打好的內容會留著。')}
+            </span>
+            {!readinessLoading && readiness.reason && <span className="text-mute2">{readiness.reason}</span>}
+            <button
+              className="rounded border border-amber-400 px-2 py-0.5 hover:bg-amber-100 dark:hover:bg-amber-900"
+              disabled={readinessLoading}
+              onClick={() => void refreshReadiness()}
+            >
+              {t('重新檢查')}
+            </button>
+            {onSetup && (
+              <button
+                className="rounded border border-amber-400 px-2 py-0.5 hover:bg-amber-100 dark:hover:bg-amber-900"
+                onClick={onSetup}
+              >
+                {t('去接入 AI')}
+              </button>
+            )}
+          </div>
+        )}
         {/* 工作目錄。空的就照舊從家目錄跑，所以不填也不會壞掉。
             填了才有意義的是：agent 不用自己 cd，而且「📝 看改了什麼」
             才問得到 git 差異 —— 家目錄不是 git 專案，那裡永遠沒東西可看。 */}
@@ -863,8 +1131,9 @@ export default function Console() {
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <button
             className="rounded bg-ink px-3 py-1 text-xs font-medium text-invink disabled:opacity-60 dark:disabled:opacity-40"
-            disabled={!input.trim() || planning}
+            disabled={!input.trim() || planning || !hasExecutor}
             aria-busy={planning}
+            title={hasExecutor ? undefined : t('還沒有確認可以執行工作的 AI；先接入或按「重新檢查」')}
             onClick={makePlan}
           >
             {planning ? t('拆解中… {n} 秒', { n: planSec }) : t('分析並排程')}
@@ -925,7 +1194,9 @@ export default function Console() {
             <div className="ml-auto flex items-center gap-1.5">
               {failed && !running && (
                 <button
-                  className="rounded border border-amber-300 dark:border-amber-600 px-2 py-1 text-xs text-amber-700 dark:text-amber-300"
+                  className="rounded border border-amber-300 dark:border-amber-600 px-2 py-1 text-xs text-amber-700 dark:text-amber-300 disabled:opacity-60 dark:disabled:opacity-40"
+                  disabled={dispatchBusy || !canDispatchAll(failedTools, readiness)}
+                  title={canDispatchAll(failedTools, readiness) ? undefined : t('這幾件指名的 AI 現在不是確認可以執行的狀態')}
                   onClick={retryFailed}
                 >
                   {t('↻ 只重派失敗的')}
@@ -933,7 +1204,10 @@ export default function Console() {
               )}
               <button
                 className="rounded bg-emerald-700 px-3 py-1 text-xs font-medium text-white disabled:opacity-60 dark:disabled:opacity-40"
-                disabled={!pending || running}
+                disabled={!pending || running || dispatchBusy || !canDispatchAll(pendingTools, readiness)}
+                title={!pending || canDispatchAll(pendingTools, readiness)
+                  ? undefined
+                  : t('這幾件指名的 AI 現在不是確認可以執行的狀態')}
                 onClick={() => runAll(steps)}
               >
                 {running ? t('派工中…') : t('▶ 全部派出')}
@@ -951,9 +1225,10 @@ export default function Console() {
                     disabled={s.state !== 'idle'}
                     onChange={(e) => editStep(s.id, { tool: e.target.value })}
                   >
-                    {[...new Set([...toolOptions, s.tool])].map((tl) => (
-                      <option key={tl} value={tl} disabled={limitedTools.has(tl)}>
-                        {tl}{limitedTools.has(tl) ? t('（額度用完）') : ''}
+                    {/* 不能用的照樣列出來（看得到才知道為什麼不能選），但停用並標明狀態 */}
+                    {toolChoices(s.tool).map((choice) => (
+                      <option key={choice.id} value={choice.id} disabled={choice.disabled}>
+                        {choice.label}
                       </option>
                     ))}
                   </select>
@@ -969,8 +1244,11 @@ export default function Console() {
                   </span>
                   {s.state === 'idle' && (
                     <button
-                      className="text-[11px] text-sky-700 hover:text-sky-500 dark:text-sky-400"
-                      title={t('只派這一件，其他留著。想先確認一件跑得對再放行其餘的時候用')}
+                      className="text-[11px] text-sky-700 hover:text-sky-500 disabled:opacity-50 dark:text-sky-400"
+                      disabled={dispatchBusy || !canDispatchAll([s.tool], readiness)}
+                      title={canDispatchAll([s.tool], readiness)
+                        ? t('只派這一件，其他留著。想先確認一件跑得對再放行其餘的時候用')
+                        : t('這個 AI 現在不是確認可以執行的狀態')}
                       onClick={() => void runAll([s])}
                     >
                       {t('▶ 只派這件')}
@@ -1066,7 +1344,15 @@ export default function Console() {
             <span className="flex-none text-mute2">
               {j.enabled ? whenNext(j.nextRun) : t('已暫停')}
             </span>
-            <button className="flex-none text-mute2 hover:text-ink3" title={t('立刻跑一次')} onClick={() => void runJobNow(j.id)}>▶</button>
+            {/* 「立刻跑」＝現在就派工，所以照 AI 狀態擋。刪除／暫停不擋 —— 那兩件事跟 AI 能不能跑無關 */}
+            <button
+              className="flex-none text-mute2 hover:text-ink3 disabled:opacity-40"
+              disabled={!canDispatchAll([j.tool], readiness)}
+              title={canDispatchAll([j.tool], readiness)
+                ? t('立刻跑一次')
+                : t('{tool} 現在不是確認可以執行的狀態', { tool: j.tool })}
+              onClick={() => void runJobNow(j)}
+            >▶</button>
             <button className="flex-none text-mute2 hover:text-ink3" title={t('編輯')} onClick={() => setDraft(j)}>✎</button>
             <button className="flex-none text-mute3 hover:text-red-500" title={t('刪除')} onClick={() => void deleteJob(j.id)}>✕</button>
           </div>
@@ -1093,7 +1379,11 @@ export default function Console() {
                 value={draft.tool}
                 onChange={(e) => setDraft({ ...draft, tool: e.target.value })}
               >
-                {[...new Set([...toolOptions, draft.tool])].map((tl) => <option key={tl} value={tl}>{tl}</option>)}
+                {/* 定時工作可以指名現在還沒就緒的工具：到時候的狀態跟現在不一樣。
+                    所以這裡只標狀態、不停用，存檔的提示會說清楚不保證跑得起來。 */}
+                {toolChoices(draft.tool).map((choice) => (
+                  <option key={choice.id} value={choice.id}>{choice.label}</option>
+                ))}
               </select>
               <select
                 className="rounded border border-line2 bg-panel px-1 py-0.5"
@@ -1331,9 +1621,11 @@ export default function Console() {
               {!isLive(d) && !d.handedOffTo && (d.outcome === 'error' || d.outcome === 'no_changes') && (
                 <button
                   className="ml-6 rounded px-1 py-1.5 text-[10px] text-mute2 hover:bg-elev hover:text-ink3 disabled:opacity-50"
-                  disabled={!!retryBusy}
-                  title={t('用同一份工單、同一個工具再派一次')}
-                  onClick={() => void retry(d.id)}
+                  disabled={!!retryBusy || dispatchBusy || !canDispatchAll([d.tool], readiness)}
+                  title={canDispatchAll([d.tool], readiness)
+                    ? t('用同一份工單、同一個工具再派一次')
+                    : t('{tool} 現在不是確認可以執行的狀態', { tool: d.tool })}
+                  onClick={() => void retry(d)}
                 >
                   {retryBusy === d.id ? t('重派中…') : t('↻ 重派')}
                 </button>
@@ -1341,7 +1633,8 @@ export default function Console() {
               {/* 只有工作目錄在 git 裡才給這顆按鈕。
                   否則按十次有九次得到「這裡不是 git 專案」，
                   使用者會學會不按它 —— 然後真的有改動的那一次也不會去看。 */}
-              {!isLive(d) && d.canDiff && (
+              {/* 本機問答不會動到檔案，「看改了什麼」按了永遠是空的 —— 那顆鈕本身就是誤導 */}
+              {!isLive(d) && d.canDiff && !isLocalAnswerRecord(d) && (
                 <button
                   className="ml-6 rounded px-1 py-1.5 text-[10px] text-mute2 hover:bg-elev hover:text-ink3"
                   aria-expanded={diffOpen}
@@ -1350,14 +1643,20 @@ export default function Console() {
                   {diffOpen ? t('收起改動') : t('📝 看改了什麼')}
                 </button>
               )}
-              <button
-                className={`${isLive(d) ? 'ml-6' : 'ml-2'} rounded px-1 py-1.5 text-[10px] text-mute2 hover:bg-elev hover:text-ink3`}
-                title={t('工作跑歪了可以在這裡補一句。還在跑的話會排隊，結束後自動送出。'
-                  + '原本那個 AI 沒有續談模式或額度用完時，會自動把工單與進度交給別的 AI 接手')}
-                onClick={() => { setReplyTo(replyTo === d.id ? null : d.id); setReplyText('') }}
-              >
-                {replyTo === d.id ? t('取消') : t('💬 補一句')}
-              </button>
+              {isLocalAnswerRecord(d) ? (
+                <span className={`${isLive(d) ? 'ml-6' : 'ml-2'} text-[10px] text-mute3`}>
+                  {LOCAL_FOLLOWUP_NOTE()}
+                </span>
+              ) : (
+                <button
+                  className={`${isLive(d) ? 'ml-6' : 'ml-2'} rounded px-1 py-1.5 text-[10px] text-mute2 hover:bg-elev hover:text-ink3`}
+                  title={t('工作跑歪了可以在這裡補一句。還在跑的話會排隊，結束後自動送出。'
+                    + '原本那個 AI 沒有續談模式或額度用完時，會自動把工單與進度交給別的 AI 接手')}
+                  onClick={() => { setReplyTo(replyTo === d.id ? null : d.id); setReplyText('') }}
+                >
+                  {replyTo === d.id ? t('取消') : t('💬 補一句')}
+                </button>
+              )}
               {/* 只有「等你執行」才給取消。執行中的要停下來得殺行程，
                   而中途砍掉一個正在改檔案的 agent 比讓它跑完更危險。 */}
               {stateOf(d) === 'waiting' && (
@@ -1402,12 +1701,18 @@ export default function Console() {
                     placeholder={t('例如：路徑錯了，改用 tools/ 底下那份')}
                     value={replyText}
                     onChange={(e) => setReplyText(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') void sendFollowup(d.id) }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') void sendFollowup(d) }}
                   />
                   <button
                     className="flex-none rounded bg-ink px-2 py-1 text-[11px] text-invink hover:bg-white disabled:opacity-60 dark:disabled:opacity-40"
-                    disabled={replyBusy || !replyText.trim()}
-                    onClick={() => void sendFollowup(d.id)}
+                    disabled={replyBusy || !replyText.trim() || isLocalAnswerRecord(d)
+                      || (!isLive(d) && !canDispatchAll([d.tool], readiness))}
+                    title={isLocalAnswerRecord(d)
+                      ? LOCAL_FOLLOWUP_NOTE()
+                      : isLive(d) || canDispatchAll([d.tool], readiness)
+                        ? undefined
+                        : t('這件已經結束，補一句等於重新派工；{tool} 現在不是確認可以執行的狀態', { tool: d.tool })}
+                    onClick={() => void sendFollowup(d)}
                   >
                     {replyBusy ? t('送出中…') : t('送出')}
                   </button>

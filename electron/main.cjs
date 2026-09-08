@@ -28,7 +28,7 @@ function log(msg) {
   try { fs.appendFileSync(LOG, line) } catch { /* 日誌寫不了也不能影響啟動 */ }
 }
 
-// Python 探測（環境變數 → 專案 venv → Kimi 桌面版 runtime → PATH）。
+// Python 探測（環境變數 → Windows 隨附 runtime → 專案 venv → Kimi runtime → PATH）。
 // 與 scripts/dev.mjs 共用同一份，見 scripts/find-python.cjs。
 const { findPython } = require('../scripts/find-python.cjs')
 
@@ -57,7 +57,7 @@ async function ensureServer() {
   let child
   try {
     // stderr 收進日誌：Python 掛掉時才知道為什麼，不然只會看到白視窗
-    child = spawn(py, [API], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+    child = spawn(py, ['-B', '-X', 'utf8', API], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
   } catch (e) {
     log(`spawn 直接拋錯：${e.message}`)
     return false
@@ -79,6 +79,9 @@ async function ensureServer() {
 }
 
 function errorPage(reason) {
+  const recovery = app.isPackaged
+    ? '<p>Windows 版已內附 Python。請重新下載並完整解壓縮 Windows ZIP，再從解壓縮後的資料夾開啟控制台。</p><p><a href="https://github.com/mars-tw/ai-console/releases/latest" target="_blank" style="color:#7dd3fc">開啟 AI 控制台官方下載頁</a></p>'
+    : '<p>原始碼開發版需要 Python 3.10 以上版本。請使用可用的 Python，或以 <code>AI_CONSOLE_PYTHON</code> 指定直譯器。</p><p><a href="https://www.python.org/downloads/" target="_blank" style="color:#7dd3fc">開啟 Python 官方下載頁</a></p>'
   const html = `<!doctype html><meta charset="utf-8">
 <style>
   body{background:#09090b;color:#e4e4e7;font:14px/1.7 system-ui,"Noto Sans TC",sans-serif;
@@ -91,12 +94,11 @@ function errorPage(reason) {
 <div class="box">
   <h1>完成一個準備步驟，就能開始使用</h1>
   <p>${reason}</p>
-  <p>AI 控制台需要 Python 3.10 以上版本。請先安裝 Python，安裝時勾選加入 PATH，完成後重新開啟控制台。</p>
-  <p><a href="https://www.python.org/downloads/" target="_blank" style="color:#7dd3fc">開啟 Python 官方下載頁</a></p>
-  <p>如果已經安裝 Python，可從下方日誌查看啟動失敗原因：</p>
+  ${recovery}
+  <p>可從下方日誌查看啟動失敗原因：</p>
   <ul>
     <li>啟動日誌：<code>${LOG}</code></li>
-    <li>手動啟動看錯誤訊息：<code>python server/api.py</code></li>
+    ${app.isPackaged ? '' : '<li>手動啟動看錯誤訊息：<code>python server/api.py</code></li>'}
     <li>指定 Python：設環境變數 <code>AI_CONSOLE_PYTHON</code> 指向可用的直譯器</li>
   </ul>
 </div>`

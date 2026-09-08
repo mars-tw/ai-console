@@ -223,7 +223,7 @@ class ConnectionsTest(unittest.TestCase):
         self.assertEqual(len(self.server.requests), 1)
 
     def test_errors_are_distinct_and_actionable(self):
-        for status, expected in ((403, "authentication_failed"), (404, "not_supported"), (429, "rate_limited"), (500, "provider_error")):
+        for status, expected in ((403, "authentication_failed"), (429, "rate_limited"), (500, "provider_error"), (503, "provider_error")):
             with self.subTest(status=status):
                 self.server.response_status = status
                 result = self.connections.probe(self.draft())
@@ -231,6 +231,30 @@ class ConnectionsTest(unittest.TestCase):
                 self.assertFalse(result["ok"])
                 self.assertTrue(result["error"])
                 self.assertTrue(result["nextAction"])
+                self.assertNotIn("manualModelAllowed", result)
+
+    def test_probe_models_404_and_405_allow_manual_model(self):
+        for status in (404, 405):
+            with self.subTest(status=status):
+                self.server.requests = []
+                self.server.response_status = status
+                result = self.connections.probe(self.draft())
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["status"], "model_list_unavailable")
+                self.assertEqual(result["models"], [])
+                self.assertTrue(result["manualModelAllowed"])
+                self.assertFalse(result["verified"])
+                self.assertIn("手動", result["nextAction"])
+                self.assertIn("儲存", result["nextAction"])
+                self.assertEqual([(r[0], r[1]) for r in self.server.requests], [("GET", "/v1/models")])
+
+    def test_chat_404_stays_not_supported_without_manual_model(self):
+        self.save()
+        self.server.response_status = 404
+        result = self.connections.test({"id": "fixture"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "not_supported")
+        self.assertNotIn("manualModelAllowed", result)
 
     def test_invalid_json_and_large_body_are_rejected(self):
         self.server.models = b"not-json"
@@ -422,6 +446,8 @@ class UrlBoundaryTest(unittest.TestCase):
         for raw, expected in (("https://api.example.com", "https://api.example.com/v1"),
                               ("https://api.example.com/v1/", "https://api.example.com/v1"),
                               ("https://api.example.com/service", "https://api.example.com/service/v1"),
+                              ("https://open.bigmodel.cn/api/paas/v4", "https://open.bigmodel.cn/api/paas/v4"),
+                              ("https://api.example.com/v2", "https://api.example.com/v2"),
                               ("http://localhost:11434", "http://localhost:11434/v1"),
                               ("http://[::1]:11434", "http://[::1]:11434/v1")):
             self.assertEqual(ac.normalize_base_url(raw), expected)

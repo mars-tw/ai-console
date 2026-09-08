@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { t, useLang } from '@/i18n'
 
-type SourceKind = 'zip' | 'files' | 'installed' | 'url'
+type SourceKind = 'starter' | 'zip' | 'files' | 'installed' | 'url'
 type WizardStep = 1 | 2 | 3
 type TargetPreviewStatus = 'available' | 'installed' | 'conflict' | 'unavailable'
 
@@ -18,6 +18,7 @@ export interface SkillRecord {
 }
 
 export interface SkillTarget {
+  toolInstalled?: boolean
   id: string
   label: string
   available?: boolean
@@ -49,6 +50,7 @@ interface SkillsResponse {
 }
 
 export interface PreviewTarget {
+  toolInstalled?: boolean
   id: string
   label: string
   status: TargetPreviewStatus
@@ -99,6 +101,54 @@ type PackagePayload =
   | { kind: 'files'; files: { path: string; data: string }[] }
   | { kind: 'installed'; source: string; name: string }
 
+export interface StarterSkill {
+  id: string
+  name: string
+  title: string
+  description: string
+  testPrompt: string
+  package: { kind: 'zip'; data: string }
+}
+
+export function parseStarterCatalog(value: unknown): StarterSkill[] {
+  const data = value as { ok?: unknown; starters?: unknown } | null
+  if (!data || data.ok !== true || !Array.isArray(data.starters) || data.starters.length !== 2) throw new Error('入門技能目前無法載入，可改用 ZIP 或技能資料夾。')
+  const ids = new Set<string>()
+  return data.starters.map((entry: unknown) => {
+    const item = entry as StarterSkill | null
+    if (!item || ['id', 'name', 'title', 'description', 'testPrompt'].some((key) => typeof item[key as keyof StarterSkill] !== 'string' || !(item[key as keyof StarterSkill] as string).trim())
+      || !/^[a-z0-9-]{1,64}$/.test(item.name) || ids.has(item.id)
+      || item.package?.kind !== 'zip' || typeof item.package.data !== 'string' || !item.package.data.length || item.package.data.length > 7_000_000
+      || !/^[A-Za-z0-9+/]+={0,2}$/.test(item.package.data)) throw new Error('入門技能目前無法載入，可改用 ZIP 或技能資料夾。')
+    ids.add(item.id)
+    return { id: item.id, name: item.name, title: item.title, description: item.description, testPrompt: item.testPrompt, package: { kind: 'zip', data: item.package.data } }
+  })
+}
+
+export function toolEvidenceText(installed?: boolean): string {
+  return installed === true ? '已找到 AI 工具，登入與實際執行仍待驗證' : 'AI 尚未安裝：可先存放技能，安裝並登入後才能測試'
+}
+
+export async function copySkillPrompt(prompt: string, write: (text: string) => Promise<void>): Promise<string> {
+  try { await write(prompt); return '已複製測試提示詞；尚未執行 AI。' } catch { return '無法複製，請直接選取下方文字並手動複製。' }
+}
+
+export function SkillUseGuide({ prompt, onOpenSetup }: { prompt: string; onOpenSetup?: () => void }) {
+  const [notice, setNotice] = useState('')
+  return <section className="mt-4 rounded-lg border border-line p-4">
+    <h3 className="font-semibold">{t('下一步：讓 AI 實際使用技能')}</h3>
+    <ol className="my-3 list-decimal space-y-2 pl-5 text-sm">
+      <li>{t('到「接入 AI」安裝或設定所選 AI，並完成登入。')}</li>
+      <li>{t('開啟該 AI 的新對話；使用 CLI 時請重新啟動，讓它重新讀取技能。')}</li>
+      <li>{t('貼上下方提示詞，確認 AI 已載入這個技能，並檢查它實際回答的內容。')}</li>
+    </ol>
+    {onOpenSetup && <button type="button" className="mb-3 rounded border border-line px-3 py-2 text-sm" onClick={onOpenSetup}>{t('接入 AI')}</button>}
+    <textarea aria-label={t('技能測試提示詞')} readOnly value={prompt} rows={4} className="block w-full rounded border border-line bg-panel p-3 text-sm" />
+    <button type="button" className="mt-2 rounded border border-line px-3 py-2 text-sm" onClick={() => { void copySkillPrompt(prompt, (text) => navigator.clipboard.writeText(text)).then(setNotice) }}>{t('複製測試提示詞')}</button>
+    {notice && <p role="status" className="mt-2 text-xs">{t(notice)}</p>}
+  </section>
+}
+
 const HARD_MAX_FILES = 100
 const HARD_MAX_TOTAL_BYTES = 5 * 1024 * 1024
 const HARD_MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -146,7 +196,7 @@ export function classifyInstallResponse(data: InstallResponse): {
   success: InstallResponse | null
   failure: InstallResponse | null
 } {
-  return data.ok
+  return data.ok === true && Array.isArray(data.results) && data.results.length === 1 && data.results[0]?.status === 'installed'
     ? { success: data, failure: null }
     : { success: null, failure: data }
 }
@@ -231,8 +281,8 @@ async function fileToBase64(file: File): Promise<string> {
 
 async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init)
-  const data = await response.json().catch(() => null) as (T & { error?: string; help?: string }) | null
-  if (!data) {
+  const data = await response.json().catch(() => null) as (T & { ok?: boolean; error?: string; help?: string }) | null
+  if (!data || (!response.ok && data.ok !== false)) {
     throw new Error(`操作失敗（HTTP ${response.status}）`)
   }
   return data
@@ -256,13 +306,18 @@ function StepBadge({ number, current, done, children }: {
   )
 }
 
-export default function SkillCenter() {
+export default function SkillCenter({ onOpenSetup }: { onOpenSetup?: () => void } = {}) {
   useLang()
   const [catalog, setCatalog] = useState<SkillsResponse | null>(null)
   const [catalogBusy, setCatalogBusy] = useState(true)
   const [catalogError, setCatalogError] = useState('')
   const [step, setStep] = useState<WizardStep>(1)
-  const [sourceKind, setSourceKind] = useState<SourceKind>('zip')
+  const [sourceKind, setSourceKind] = useState<SourceKind>('starter')
+  const [starters, setStarters] = useState<StarterSkill[]>([])
+  const [starterError, setStarterError] = useState('')
+  const [starterChoice, setStarterChoice] = useState('')
+  const [testPrompt, setTestPrompt] = useState('')
+  const operation = useRef<'preview' | 'install' | null>(null)
   const [pickedFiles, setPickedFiles] = useState<File[]>([])
   const [installedChoice, setInstalledChoice] = useState('')
   const [preview, setPreview] = useState<PreviewResponse | null>(null)
@@ -292,6 +347,13 @@ export default function SkillCenter() {
 
   useEffect(() => { void loadCatalog() }, [])
   useEffect(() => {
+    const controller = new AbortController()
+    void apiJson<unknown>('/api/skills/starters', { signal: controller.signal })
+      .then(parseStarterCatalog).then((items) => { if (!controller.signal.aborted) setStarters(items) })
+      .catch(() => { if (!controller.signal.aborted) setStarterError('入門技能目前無法載入，可改用 ZIP 或技能資料夾。') })
+    return () => controller.abort()
+  }, [])
+  useEffect(() => {
     const session = previewSession.current
     return () => session.cancel()
   }, [])
@@ -313,10 +375,13 @@ export default function SkillCenter() {
   }, [catalog])
 
   const clearAfterSource = () => {
+    if (operation.current === 'install') return
+    operation.current = null
     previewSession.current.cancel()
     setBusy(false)
     setPreview(null)
     setPackagePayload(null)
+    setTestPrompt('')
     setSelectedTargets([])
     setConflictChoice('')
     setInstallResult(null)
@@ -326,6 +391,7 @@ export default function SkillCenter() {
   }
 
   const chooseSource = (kind: SourceKind) => {
+    if (operation.current === 'install') return
     setSourceKind(kind)
     setPickedFiles([])
     setInstalledChoice('')
@@ -333,6 +399,11 @@ export default function SkillCenter() {
   }
 
   const buildPackage = async (): Promise<PackagePayload> => {
+    if (sourceKind === 'starter') {
+      const chosen = starters.find((item) => item.id === starterChoice)
+      if (!chosen) throw new Error('請先選擇一個入門技能')
+      return chosen.package
+    }
     if (sourceKind === 'installed') {
       const chosen = installedOptions.find((option) => option.key === installedChoice)
       if (!chosen?.copyable) throw new Error('請選擇已通過格式檢查的技能來源')
@@ -362,7 +433,8 @@ export default function SkillCenter() {
   }
 
   const runPreview = async () => {
-    if (busy) return
+    if (operation.current) return
+    operation.current = 'preview'
     const request = previewSession.current.begin()
     setBusy(true)
     setError('')
@@ -377,9 +449,12 @@ export default function SkillCenter() {
       })
       if (!request.isCurrent()) return
       if (!data.ok || !data.skill) throw new Error([data.error, data.help].filter(Boolean).join('；') || '無法預覽這個技能')
+      if (typeof data.skill.name !== 'string' || !data.skill.name.trim() || !Array.isArray(data.targets)
+        || data.targets.some((target) => !target || typeof target.id !== 'string' || typeof target.label !== 'string' || !['available', 'installed', 'conflict', 'unavailable'].includes(target.status))) throw new Error('無法預覽這個技能')
       if (!data.skill.digest || !/^[0-9a-f]{64}$/.test(data.skill.digest)) throw new Error('預覽缺少內容驗證資料，請重新整理後再試')
       setPackagePayload(payload)
       setPreview(data)
+      setTestPrompt(sourceKind === 'starter' ? starters.find((item) => item.id === starterChoice)!.testPrompt : `請先確認是否已載入 ${data.skill.name} 技能，再使用這個技能處理我接下來提供的範例。`)
       // 安裝是外部寫入：不替使用者預選，更不一次灑到全部工具。
       setSelectedTargets([])
       setConflictChoice(hasSkillConflict(data.targets || []) ? '' : 'available')
@@ -387,7 +462,7 @@ export default function SkillCenter() {
     } catch (previewError) {
       if (request.isCurrent()) setError(previewError instanceof Error ? previewError.message : '無法預覽這個技能')
     } finally {
-      if (request.isCurrent()) setBusy(false)
+      if (request.isCurrent()) { operation.current = null; setBusy(false) }
     }
   }
 
@@ -405,7 +480,8 @@ export default function SkillCenter() {
   }
 
   const install = async () => {
-    if (!packagePayload || !preview?.skill?.digest || busy || !selectedTargets.length) return
+    if (!packagePayload || !preview?.skill?.digest || operation.current || installResult || selectedTargets.length !== 1) return
+    operation.current = 'install'
     setBusy(true)
     setError('')
     setInstallResult(null)
@@ -417,19 +493,21 @@ export default function SkillCenter() {
         body: JSON.stringify({ ...packagePayload, targets: selectedTargets, previewDigest: preview.skill.digest }),
       })
       if (!data.ok && (data.code === 'PREVIEW_STALE' || data.code === 'PREVIEW_REQUIRED')) {
+        operation.current = null
         clearAfterSource()
         throw new Error([data.error, data.help].filter(Boolean).join('；') || '請重新預覽技能內容')
       }
       const outcome = classifyInstallResponse(data)
       setInstallResult(outcome.success)
       setInstallFailure(outcome.failure)
-      if (!data.ok) {
+      if (!outcome.success) {
         throw new Error([data.error, data.help].filter(Boolean).join('；') || '技能未安裝')
       }
       await loadCatalog()
     } catch (installError) {
       setError(installError instanceof Error ? installError.message : '技能未安裝')
     } finally {
+      operation.current = null
       setBusy(false)
     }
   }
@@ -476,10 +554,11 @@ export default function SkillCenter() {
                   <article key={target.id} className="rounded-lg border border-line bg-panel p-3">
                     <div className="flex items-center justify-between gap-2">
                       <h3 className="font-medium">{targetLabel(target.id, target.label)}</h3>
-                      <span className={`rounded-full px-2 py-0.5 text-[11px] ${target.readOnly ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : targetAvailable(target) ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300' : 'bg-elev text-mute2'}`}>
-                        {target.readOnly ? t('唯讀來源') : targetAvailable(target) ? t('可接收技能') : t('技能目錄不可用')}
+                      <span className={`rounded-full px-2 py-0.5 text-[11px] ${target.readOnly ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'bg-elev text-mute2'}`}>
+                        {target.readOnly ? t('唯讀來源') : targetAvailable(target) ? t('技能目錄可寫入') : t('技能目錄不可用')}
                       </span>
                     </div>
+                    {!target.readOnly && <p className="mt-2 text-xs text-mute2">{t(toolEvidenceText(target.toolInstalled))}</p>}
                     <p className="mt-2 text-xs text-mute2">
                       <span className="font-semibold text-ink2">{installed}</span> {t('個已安裝')}
                       <span className="mx-2 text-line3">·</span>
@@ -518,6 +597,7 @@ export default function SkillCenter() {
                 <legend className="mb-2 text-sm font-medium">{t('技能放在哪裡？')}</legend>
                 <div className="grid gap-2 sm:grid-cols-2">
                   {([
+                    ['starter', '入門技能', '不用下載，先試一個簡單技能'],
                     ['zip', 'ZIP 技能包', '選擇一個已下載的 .zip 檔'],
                     ['files', '技能資料夾', '直接選擇含 SKILL.md 的資料夾'],
                     ['installed', '從現有技能複製', '把通過格式檢查的技能複製到另一個 AI'],
@@ -535,6 +615,16 @@ export default function SkillCenter() {
               </fieldset>
 
               <div className="mt-4 rounded-lg border border-line bg-elev/30 p-4">
+                {sourceKind === 'starter' && <div>
+                  {starterError ? <p role="alert">{t(starterError)}</p> : !starters.length ? <p role="status">{t('正在載入入門技能…')}</p> : <div className="grid gap-3 sm:grid-cols-2">
+                    {starters.map((item) => <label key={item.id} className="cursor-pointer rounded-lg border border-line bg-panel p-3">
+                      <input type="radio" name="starter-skill" checked={starterChoice === item.id} onChange={() => { clearAfterSource(); setStarterChoice(item.id) }} />
+                      <span className="ml-2 font-medium">{t(item.title)}</span>
+                      <span className="mt-2 block text-sm">{t(item.description)}</span>
+                      <span className="mt-2 block text-xs text-mute2">{t(item.testPrompt)}</span>
+                    </label>)}
+                  </div>}
+                </div>}
                 {sourceKind === 'zip' && (
                   <label className="block text-sm font-medium">
                     {t('選擇 ZIP')}
@@ -610,7 +700,8 @@ export default function SkillCenter() {
                             onChange={() => setSelectedTargets([target.id])}
                           />
                           <span className="min-w-0"><span className="block text-sm font-medium">{targetLabel(target.id, target.label)}</span><span className={`block text-xs ${target.status === 'conflict' ? 'text-red-600 dark:text-red-400' : 'text-mute2'}`}>
-                            {target.status === 'available' ? t('可以安裝') : target.status === 'installed' ? t('相同版本已安裝') : target.status === 'conflict' ? t('同名但內容不同，禁止覆寫') : t('這個工具目前不可用')}
+                            {target.status === 'available' ? t('技能目錄可寫入') : target.status === 'installed' ? t('相同版本已安裝') : target.status === 'conflict' ? t('同名但內容不同，禁止覆寫') : t('技能目錄不可用')}
+                            <span className="mt-1 block">{t(toolEvidenceText(target.toolInstalled))}</span>
                             {target.reason && <span className="mt-1 block">{skillErrorText(target.reason)}</span>}
                           </span></span>
                         </label>
@@ -649,6 +740,7 @@ export default function SkillCenter() {
                 <p className="mt-1 text-sm">{t('技能：')}<strong>{preview.skill.name}</strong></p>
                 <p className="mt-1 text-sm text-mute2">{t('目標 AI：{targets}', { targets: (preview.targets || []).filter((target) => selectedTargets.includes(target.id)).map((target) => targetLabel(target.id, target.label)).join('、') })}</p>
                 <p className="mt-3 text-xs text-mute2">{t('按下後只會複製已預覽的檔案，不會覆寫同名技能，也不會執行技能內容。')}</p>
+                {(preview.targets || []).some((target) => selectedTargets.includes(target.id) && target.toolInstalled !== true) && <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">{t('這次只準備技能檔案；AI 尚未安裝，安裝並登入後才能測試。')}</p>}
               </div>
 
               {installResult?.results && (
@@ -663,8 +755,9 @@ export default function SkillCenter() {
                     ))}
                   </div>
                   <p className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/20 dark:text-amber-300">
-                    {t('「已安裝」不等於「已驗證可用」。等這個 AI 真正執行過一次並回報使用證據後，才會標示為可用。')}
+                    {t('技能檔案已安裝；這不代表 AI 已安裝、已登入或已成功執行。請依下方步驟實際測試。')}
                   </p>
+                  <SkillUseGuide prompt={testPrompt} onOpenSetup={onOpenSetup} />
                 </div>
               )}
 

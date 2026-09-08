@@ -46,12 +46,17 @@ APP_ROOT = Path(__file__).resolve().parent.parent
 
 # 機器專屬設定（server/config.json，可被打包版指向工作區的即時資料）
 _CFG = {}
+_CFG_LOAD_ERROR = ""
 _cfg_path = Path(__file__).resolve().parent / "config.json"
 if _cfg_path.exists():
     try:
-        _CFG = json.loads(_cfg_path.read_text(encoding="utf-8"))
+        _cfg_value = json.loads(_cfg_path.read_text(encoding="utf-8"))
+        if not isinstance(_cfg_value, dict):
+            _CFG_LOAD_ERROR = "設定檔格式無法確認，地端安全把關已停止。"
+        else:
+            _CFG = _cfg_value
     except Exception:
-        pass
+        _CFG_LOAD_ERROR = "設定檔無法讀取，地端安全把關已停止。"
 
 DIST_DIR = APP_ROOT / "dist"
 DATA_DIR = Path(_CFG.get("data_dir", str(APP_ROOT / "public" / "data")))
@@ -60,14 +65,19 @@ INDEXER = Path(_CFG.get("indexer", str(APP_ROOT / "tools" / "indexer.py")))
 STATUS_JSON = Path(_CFG.get("status_json", str(Path.home() / "ai-hub" / "status.json")))
 LMS_MODELS_DIR = Path.home() / ".lmstudio" / "models"
 LMS_BIN = Path.home() / ".lmstudio" / "bin" / "lms.exe"
-# 地端模型的把關腳本（載入前 / 載入後各問一次），路徑可由 config.json 覆蓋
-LOCAL_GATE = Path(_CFG.get("local_gate", str(Path.home() / "ai-hub" / "tools" / "local_gate.py")))
+_DEFAULT_MACHINE_GATE = Path.home() / "ai-hub" / "tools" / "local_gate.py"
+# Kept for existing tests and configured/machine gate callers. Gate authority is
+# resolved by _gate_spec() so malformed config values cannot crash startup or
+# accidentally fall through to a bundled gate.
+LOCAL_GATE = _DEFAULT_MACHINE_GATE
+PORTABLE_LOCAL_GATE = APP_ROOT / "tools" / "console_local_gate.py"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(APP_ROOT / "tools"))
 from index_lock import conversation_index_lock  # noqa: E402
 import planner   # noqa: E402
 import rules     # noqa: E402
 import schedule  # noqa: E402
+import runtime_readiness  # noqa: E402
 from conversation_tail import ConversationTailError, load_indexed_tail  # noqa: E402
 from setup_catalog import setup_catalog  # noqa: E402
 
@@ -96,7 +106,9 @@ def refresh_arguments(body: dict) -> list[str]:
     roots = body.get('extraRoots', [])
     if not isinstance(roots, list) or len(roots) > 8:
         raise ValueError('最多指定 8 個額外對話資料夾。')
-    argv = [sys.executable, str(INDEXER), '--rescan']
+    # Bundle Python can otherwise inherit a legacy CP950 console and corrupt
+    # non-ASCII conversation paths while the indexer is parsing arguments.
+    argv = [sys.executable, '-B', '-X', 'utf8', str(INDEXER), '--rescan']
     if deep:
         argv.append('--deep-scan')
     for root in roots:
@@ -583,7 +595,10 @@ def _skill_target_states(package: dict, home: Path | None = None) -> list[dict]:
         root = roots[target]
         existing = _existing_skill_dir(root, package["folder"])
         state = {"id": target, "label": SKILL_TARGETS[target]["label"],
-                 "location": f"{_relative_skill_root(target)}/{package['folder']}"}
+                 "location": f"{_relative_skill_root(target)}/{package['folder']}",
+                 # Filesystem target safety and a runnable CLI are separate
+                 # facts. Do not turn an absent CLI into an unsafe filesystem.
+                 "toolInstalled": bool(_bin_available(target))}
         try:
             _assert_safe_skill_target(root, home_path)
             target_safe = not root.exists() or (root.is_dir() and not _skill_link_like(root))
@@ -841,6 +856,7 @@ def _installed_skill_inventory(home: Path | None = None) -> dict:
             # 目錄尚未建立時匯入會建立它；若路徑經過 symlink/junction
             # 或被非目錄佔用，則一律回報不可用。
             "available": available,
+            "toolInstalled": bool(_bin_available(target)),
         })
     return {"skills": sorted(skills, key=lambda s: s["name"].casefold()),
             "targets": target_info}
@@ -1951,7 +1967,7 @@ def _search_conversations(q: str) -> dict:
 
 
 def _conversation_source_health(index_data: dict, home: Path | None = None) -> list[dict]:
-    """回報四個同步來源的可讀狀態；不把讀取失敗偽裝成 0 份。"""
+    """Report source health without treating an unused integration as broken."""
     home_path = home or Path.home()
     conversations = index_data.get("conversations")
     if not isinstance(conversations, list):
@@ -1963,11 +1979,18 @@ def _conversation_source_health(index_data: dict, home: Path | None = None) -> l
             if isinstance(item, dict) and item.get("tool") == source
             and item.get("inApp") and not item.get("subagent") and not item.get("dup")
         )
+        # ``count`` intentionally ignores archive/duplicate metadata; ``seen``
+        # does not.  A source that has ever contributed an authoritative row is
+        # different from a new user's uninstalled/empty source.
+        seen = any(
+            isinstance(item, dict) and item.get("tool") == source
+            and item.get("sourceKind") != "discovered"
+            for item in conversations
+        )
         metadata_errors = sum(
             1 for item in conversations
             if isinstance(item, dict) and item.get("tool") == source
-            and item.get("metadataErrors") and not item.get("trashed")
-            and not item.get("archived") and not item.get("subagent") and not item.get("dup")
+            and item.get("metadataErrors") and item.get("sourceKind") != "discovered"
         )
         found = False
         probe_errors = []
@@ -1991,24 +2014,36 @@ def _conversation_source_health(index_data: dict, home: Path | None = None) -> l
             except OSError as exc:
                 probe_errors.append(type(exc).__name__)
 
+        optional = False
+        needs_attention = False
         if probe_errors:
             status = "error"
             reason = "對話來源無法讀取；原對話沒有被修改。"
-        elif not found:
-            status = "missing"
-            reason = "找不到這個 AI 的對話資料夾。"
+            needs_attention = True
         elif metadata_errors:
             status = "warning" if count else "error"
             reason = "部分側欄資料無法確認。"
+            needs_attention = True
+        elif not found and seen:
+            status = "warning"
+            reason = "先前已同步的對話來源目前找不到，原對話沒有被修改。"
+            needs_attention = True
+        elif not found:
+            status = "optional"
+            reason = "尚未使用這個 AI；可略過。"
+            optional = True
         elif count:
             status = "ok"
             reason = ""
         else:
-            status = "empty"
-            reason = "來源可讀，但尚未找到可在原 AI 開啟的主對話。"
+            status = "empty" if seen else "optional"
+            reason = ("來源可讀，但尚未找到可在原 AI 開啟的主對話。"
+                      if seen else "尚未使用這個 AI；可略過。")
+            optional = not seen
         rows.append({"id": source, "label": CONVERSATION_SOURCE_LABELS[source],
                      "status": status, "count": count, "reason": reason,
-                     "errorCount": len(probe_errors) or metadata_errors})
+                     "errorCount": len(probe_errors) or metadata_errors,
+                     "optional": optional, "needsAttention": needs_attention})
     return rows
 
 
@@ -2736,6 +2771,9 @@ _LIFECYCLE_MUTEX = "Local" + chr(92) + "CodexLocalModelLifecycleV1"
 _LIFECYCLE_WAIT_S = 5.0
 _LIFECYCLE_FALLBACK = threading.Lock()
 _IDENT_BAD_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_OWNED_IDENTIFIER_NONCE = uuid.uuid4().hex[:10]
+_OWNED_LMS_LOCK = threading.Lock()
+_OWNED_LMS_INSTANCES: dict[str, str] = {}
 
 
 @contextlib.contextmanager
@@ -2762,20 +2800,27 @@ def _lifecycle_lock():
             k32.ReleaseMutex.argtypes = (ctypes.c_void_p,)
             k32.CloseHandle.argtypes = (ctypes.c_void_p,)
             handle = k32.CreateMutexW(None, 0, _LIFECYCLE_MUTEX)
-        except Exception:
-            handle = None                # 建不起來就退回行程內的鎖，至少擋住自己
-        if handle:
-            # 0 = 拿到；0x80（WAIT_ABANDONED）= 上一個持有者沒釋放就結束了，這裡接手
+        except Exception as exc:
+            raise RuntimeError("無法取得跨程序地端模型鎖，已停止操作。") from exc
+        if not handle:
+            raise RuntimeError("無法取得跨程序地端模型鎖，已停止操作。")
+        # 0 = 拿到；0x80（WAIT_ABANDONED）= 上一個持有者沒釋放就結束了，這裡接手
+        try:
             rc = k32.WaitForSingleObject(handle, int(_LIFECYCLE_WAIT_S * 1000))
-            if rc not in (0, 0x80):
-                k32.CloseHandle(handle)
-                raise RuntimeError("另一個流程正在處理地端模型，等 5 秒仍未輪到")
+        except Exception as exc:
+            k32.CloseHandle(handle)
+            raise RuntimeError("無法取得跨程序地端模型鎖，已停止操作。") from exc
+        if rc not in (0, 0x80):
+            k32.CloseHandle(handle)
+            raise RuntimeError("另一個流程正在處理地端模型，等 5 秒仍未輪到")
+        try:
+            yield
+        finally:
             try:
-                yield
-            finally:
                 k32.ReleaseMutex(handle)
+            finally:
                 k32.CloseHandle(handle)
-            return
+        return
     if not _LIFECYCLE_FALLBACK.acquire(timeout=_LIFECYCLE_WAIT_S):
         raise RuntimeError("另一個流程正在處理地端模型，等 5 秒仍未輪到")
     try:
@@ -2828,6 +2873,59 @@ def _lms_server_start() -> None:
         raise RuntimeError("LM Studio API 啟動後未在 127.0.0.1:1234 就緒")
 
 
+def _lms_cpu_runtime_status() -> tuple[bool, str]:
+    """Passively verify the selected LM Studio runtime is the pinned CPU engine.
+
+    ``lms runtime ls`` is intentionally used without an invented JSON flag.  A
+    successful ``runtime select`` is not proof that the selected runtime stayed
+    in effect, and an existing loaded model must never be trusted merely because
+    its modelKey matches the requested model.
+    """
+    if not LMS_BIN.exists():
+        return False, f"找不到 lms 執行檔（{LMS_BIN}）"
+    try:
+        result = _lms_run([str(LMS_BIN), "runtime", "ls"], capture_output=True,
+                          timeout=30)
+    except Exception as exc:
+        return False, f"無法讀取 LM Studio CPU runtime：{exc}"
+    if result.returncode != 0:
+        detail = ((result.stderr or result.stdout) or "").strip()[-300:]
+        return False, f"無法讀取 LM Studio CPU runtime（rc={result.returncode}）：{detail or '非零退出'}"
+    # stderr is diagnostics, never runtime-state authority.
+    text = _ANSI_RE.sub("", result.stdout or "").strip()
+    if not text:
+        return False, "LM Studio runtime 清單為空白，無法確認 CPU runtime"
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if not lines or not re.fullmatch(
+            r"\s*LLM ENGINE\s+SELECTED\s+MODEL FORMAT\s*", lines[0]):
+        return False, "LM Studio runtime 清單格式未知，無法確認 CPU runtime"
+    # Actual ``lms runtime ls`` rows have exactly an engine, an optional selected
+    # checkmark, and GGUF.  Do not accept a mere substring, a header word, or a
+    # speculative yes/true marker as proof of the selected engine.
+    row_re = re.compile(
+        r"\s*(?P<engine>[^\s]+)(?:\s+(?P<selected>✓))?\s+(?P<format>GGUF)\s*"
+    )
+    selected: list[tuple[str, str]] = []
+    for line in lines[1:]:
+        match = row_re.fullmatch(line)
+        if not match:
+            return False, "LM Studio runtime 清單含未知列，無法確認 CPU runtime"
+        if match.group("selected"):
+            selected.append((match.group("engine"), match.group("format")))
+    if len(selected) != 1:
+        return False, "LM Studio runtime 未有唯一可驗證的選用引擎"
+    engine, model_format = selected[0]
+    if engine != LMS_RUNTIME or model_format != "GGUF":
+        return False, f"LM Studio 未確認選用 CPU runtime：{LMS_RUNTIME}"
+    return True, f"已確認 CPU runtime：{LMS_RUNTIME}"
+
+
+def _require_lms_cpu_runtime() -> None:
+    ok, note = _lms_cpu_runtime_status()
+    if not ok:
+        raise RuntimeError(note)
+
+
 def _lms_runtime_select() -> None:
     """指定 CPU 推論環境；失敗就停止，不以 --gpu off 當成唯一保險。"""
     try:
@@ -2838,36 +2936,220 @@ def _lms_runtime_select() -> None:
     if r.returncode != 0:
         raise RuntimeError("選擇 CPU 推論環境失敗："
                            + ((r.stderr or r.stdout) or "").strip()[-300:])
+    _require_lms_cpu_runtime()
 
 
-def _run_gate(*extra):
-    """跑地端把關腳本，回傳 (是否放行, 說明)
-
-    退出碼沿用 ai-hub 的約定：0 / 1 放行（1 是「有意見但不擋」），2 是擋下。
-    其他退出碼一律當成擋下 —— 把關腳本自己壞掉的時候，
-    「先不要載」比「當作沒事照樣載」安全。找不到腳本同理。
-    """
-    if not LOCAL_GATE.exists():
-        return False, (f"找不到把關腳本 {LOCAL_GATE}"
-                       "（可在 server/config.json 以 local_gate 指定路徑）")
+def _gate_file_spec(kind: str, raw: object, unavailable: str) -> dict:
+    """Validate a selected gate without publishing its private filesystem path."""
+    if not isinstance(raw, str) or not raw.strip() or any(ord(ch) < 32 for ch in raw):
+        return {"kind": kind, "path": None, "ready": False,
+                "code": unavailable, "reason": "地端安全把關設定不可用。"}
+    path = Path(raw)
+    if not path.is_absolute():
+        return {"kind": kind, "path": None, "ready": False,
+                "code": unavailable, "reason": "地端安全把關必須使用絕對路徑。"}
     try:
-        r = _run([sys.executable, str(LOCAL_GATE), *extra],
-                 capture_output=True, text=True, encoding="utf-8", errors="replace",
-                 timeout=120)
-    except Exception as e:
-        return False, f"把關腳本執行失敗：{e}"
-    msg = ((r.stdout or "") + (r.stderr or "")).strip()[-400:]
-    if r.returncode in (0, 1):
-        return True, msg
-    if r.returncode == 2:
-        return False, msg or "把關腳本擋下這次載入"
-    return False, f"把關腳本以非預期的退出碼 {r.returncode} 結束：{msg}"
+        if not path.is_file():
+            raise OSError("not a file")
+        with path.open("rb") as handle:
+            handle.read(1)
+    except OSError:
+        return {"kind": kind, "path": None, "ready": False,
+                "code": unavailable, "reason": "地端安全把關檔案無法使用。"}
+    return {"kind": kind, "path": path, "ready": True,
+            "code": "GATE_READY", "reason": "地端安全把關已設定。"}
+
+
+def _gate_spec() -> dict:
+    """Resolve configured, machine, or bundled gate authority on every check."""
+    if _CFG_LOAD_ERROR:
+        return {"kind": "configured", "path": None, "ready": False,
+                "code": "CONFIGURED_GATE_UNAVAILABLE", "reason": _CFG_LOAD_ERROR}
+    if "local_gate" in _CFG:
+        return _gate_file_spec("configured", _CFG.get("local_gate"),
+                               "CONFIGURED_GATE_UNAVAILABLE")
+    # Compatibility for isolated tests and previous callers which patch the
+    # legacy variable. A different value is still an explicit authority.
+    if LOCAL_GATE != _DEFAULT_MACHINE_GATE:
+        return _gate_file_spec("configured", str(LOCAL_GATE),
+                               "CONFIGURED_GATE_UNAVAILABLE")
+    default = _DEFAULT_MACHINE_GATE
+    if os.path.lexists(str(default)):
+        return _gate_file_spec("machine", str(default), "MACHINE_GATE_UNAVAILABLE")
+    return _gate_file_spec("portable", str(PORTABLE_LOCAL_GATE),
+                           "PORTABLE_GATE_UNAVAILABLE")
+
+
+def _portable_gate_result(spec: dict, extra: tuple, phase: str, model_key: str | None) -> dict:
+    """Run the bundled gate with a closed schema and no caller-controlled argv."""
+    if phase not in {"pre", "post", "reuse"}:
+        return {"ok": False, "code": "PORTABLE_ARGUMENT_INVALID", "reason": "地端安全把關參數無效。"}
+    identifier = None
+    if phase == "pre":
+        if extra or model_key is not None:
+            return {"ok": False, "code": "PORTABLE_ARGUMENT_INVALID", "reason": "地端安全把關參數無效。"}
+    else:
+        if (len(extra) != 2 or extra[0] != "--post-load-identifier"
+                or not isinstance(extra[1], str) or not isinstance(model_key, str)
+                or len(extra[1]) > 160 or len(model_key) > 512
+                or any(ord(ch) < 32 for ch in extra[1] + model_key)
+                or extra[1] != _owned_identifier(model_key)):
+            return {"ok": False, "code": "PORTABLE_OWNERSHIP_INVALID", "reason": "本機模型所有權無法確認。"}
+        identifier = extra[1]
+    if (not LMS_BIN.is_absolute() or not LMS_BIN.is_file() or LMS_BIN.name.casefold() != "lms.exe"
+            or any(ord(ch) < 32 for ch in str(LMS_BIN))):
+        return {"ok": False, "code": "LMS_EXECUTABLE_UNAVAILABLE", "reason": "找不到可驗證的 LM Studio 執行檔。"}
+    argv = [sys.executable, "-B", "-X", "utf8", str(spec["path"]), "--json",
+            "--lms-bin", str(LMS_BIN), "--runtime", LMS_RUNTIME, "--phase", phase,
+            "--owner-nonce", _OWNED_IDENTIFIER_NONCE]
+    if identifier is not None:
+        argv += ["--identifier", identifier, "--model-key", model_key]
+    try:
+        result = _run(argv, capture_output=True, text=True, encoding="utf-8",
+                      errors="replace", timeout=120)
+    except Exception:
+        return {"ok": False, "code": "PORTABLE_GATE_EXECUTION_FAILED", "reason": "地端安全把關無法執行。"}
+    raw = (result.stdout or "").strip()
+    if len(raw) > 16384:
+        return {"ok": False, "code": "PORTABLE_GATE_INVALID_RESPONSE", "reason": "地端安全把關回應無法確認。"}
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        payload = None
+    valid_ok = (isinstance(payload, dict) and payload.get("ok") is True
+                and payload.get("verdict") == "CPU_ONLY" and payload.get("phase") == phase
+                and isinstance(payload.get("code"), str))
+    if result.returncode == 0 and valid_ok:
+        return {"ok": True, "code": payload["code"],
+                "reason": str(payload.get("reason") or "地端安全把關通過。"), "payload": payload}
+    if result.returncode == 2 and isinstance(payload, dict) and payload.get("ok") is False:
+        return {"ok": False, "code": str(payload.get("code") or "PORTABLE_GATE_BLOCKED"),
+                "reason": str(payload.get("reason") or "地端安全把關擋下這次操作。"), "payload": payload}
+    return {"ok": False, "code": "PORTABLE_GATE_INVALID_RESPONSE",
+            "reason": "地端安全把關回應無法確認。"}
+
+
+_LEGACY_GATE_MAX_OUTPUT = 8192
+_LEGACY_GATE_EXIT = {"CPU_ONLY": 0, "GPU1_OK": 1, "BLOCKED": 2}
+_LEGACY_DECISION_RE = re.compile(r"^裁決\s*[:：]\s*(CPU_ONLY|GPU1_OK|BLOCKED)\s*$")
+_LEGACY_DECISION_ANY_RE = re.compile(r"裁決\s*[:：]\s*(CPU_ONLY|GPU1_OK|BLOCKED)")
+_LEGACY_ERROR_RE = re.compile(
+    r"Traceback \(most recent call last\)|^[A-Za-z_][\w.]*(?:Error|Exception)\b", re.M)
+
+
+def _legacy_json_verdict(text: str) -> str | None:
+    """Whole JSON object with exactly one non-contradictory verdict, or nothing."""
+    duplicated: list[bool] = []
+
+    def _pairs(pairs):
+        keys = [k for k, _ in pairs]
+        if len(set(keys)) != len(keys):
+            duplicated.append(True)
+        return dict(pairs)
+
+    try:
+        payload = json.loads(text, object_pairs_hook=_pairs)
+    except (TypeError, ValueError, RecursionError):
+        return None
+    if duplicated or not isinstance(payload, dict):
+        return None
+    signals = [payload[k] for k in ("verdict", "decision", "裁決") if k in payload]
+    if len(signals) != 1 and len(set(map(repr, signals))) != 1:
+        return None
+    if not signals or not all(isinstance(v, str) for v in signals):
+        return None
+    verdict = signals[0]
+    if verdict not in _LEGACY_GATE_EXIT:
+        return None
+    if verdict != "BLOCKED" and (payload.get("blocked") is True or payload.get("ok") is False):
+        return None
+    if verdict == "BLOCKED" and (payload.get("blocked") is False or payload.get("ok") is True):
+        return None
+    return verdict
+
+
+def _legacy_gate_verdict(stdout, stderr) -> str | None:
+    """Fail closed unless bounded stdout carries exactly one clean legacy verdict."""
+    if stdout is None:
+        stdout = ""
+    if stderr is None:
+        stderr = ""
+    if not isinstance(stdout, str) or not isinstance(stderr, str):
+        return None
+    if len(stdout) > _LEGACY_GATE_MAX_OUTPUT or len(stderr) > _LEGACY_GATE_MAX_OUTPUT:
+        return None
+    if _LEGACY_ERROR_RE.search(stdout) or _LEGACY_ERROR_RE.search(stderr):
+        return None
+    text = stdout.strip()
+    if not text:
+        return None
+    if text.startswith("{"):
+        return _legacy_json_verdict(text)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    head = _LEGACY_DECISION_RE.match(lines[0])
+    if not head or any(_LEGACY_DECISION_ANY_RE.search(ln) for ln in lines[1:]):
+        return None
+    return head.group(1)
+
+
+def _gate_result(*extra, phase: str = "pre", model_key: str | None = None) -> dict:
+    spec = _gate_spec()
+    if not spec["ready"]:
+        return {"ok": False, "code": spec["code"], "reason": spec["reason"], "spec": spec}
+    if spec["kind"] == "portable":
+        out = _portable_gate_result(spec, extra, phase, model_key)
+        out["spec"] = spec
+        return out
+    # Legacy configured/machine gates keep their exact public argv contract.
+    argv = [sys.executable, "-B", "-X", "utf8", str(spec["path"]), *extra]
+    try:
+        result = _run(argv, capture_output=True, text=True, encoding="utf-8",
+                      errors="replace", timeout=120)
+    except Exception:
+        return {"ok": False, "code": "LEGACY_GATE_EXECUTION_FAILED",
+                "reason": "地端安全把關無法執行。", "spec": spec}
+    verdict = _legacy_gate_verdict(getattr(result, "stdout", None), getattr(result, "stderr", None))
+    code = getattr(result, "returncode", None)
+    if (verdict is None or isinstance(code, bool) or not isinstance(code, int)
+            or _LEGACY_GATE_EXIT[verdict] != code):
+        return {"ok": False, "code": "LEGACY_GATE_INVALID_RESPONSE",
+                "reason": "地端安全把關回應無法確認。", "spec": spec}
+    if verdict == "BLOCKED":
+        return {"ok": False, "code": "LEGACY_GATE_BLOCKED",
+                "reason": "地端安全把關擋下這次操作。", "spec": spec}
+    return {"ok": True, "code": "LEGACY_GATE_ALLOWED",
+            "reason": "地端安全把關通過。", "spec": spec}
+
+
+def _run_gate(*extra, phase: str = "pre", model_key: str | None = None):
+    """Compatibility wrapper returning ``(allowed, note)`` for existing callers."""
+    result = _gate_result(*extra, phase=phase, model_key=model_key)
+    return bool(result.get("ok")), str(result.get("reason") or "地端安全把關不可用。")
 
 
 def _owned_identifier(model: str) -> str:
-    """自己載入的實例取一個看得出來源的名字 —— 之後只卸載這一個"""
+    """Name only this server's cold-load instance; never collide by model key."""
     key = _IDENT_BAD_RE.sub("-", model).strip("-")[:48] or "model"
-    return f"ai-console-{key}"
+    return f"ai-console-{_OWNED_IDENTIFIER_NONCE}-{key}"
+
+
+def _remember_owned_lms_instance(model: str, identifier: str) -> None:
+    if identifier != _owned_identifier(model):
+        raise RuntimeError("本機模型所有權識別碼不一致。")
+    with _OWNED_LMS_LOCK:
+        _OWNED_LMS_INSTANCES[identifier] = model
+
+
+def _is_current_owned_lms_instance(model: str, identifier: str) -> bool:
+    if identifier != _owned_identifier(model):
+        return False
+    with _OWNED_LMS_LOCK:
+        return _OWNED_LMS_INSTANCES.get(identifier) == model
+
+
+def _forget_owned_lms_instance(identifier: str) -> None:
+    with _OWNED_LMS_LOCK:
+        _OWNED_LMS_INSTANCES.pop(identifier, None)
 
 
 def available_physical_ram_bytes() -> int | None:
@@ -3057,15 +3339,29 @@ def ensure_lms_chat_model(model: str) -> str:
             raise RuntimeError(
                 f"LM Studio 目前是混合或其他模型狀態（{names}）。這裡不會卸載或取代它")
         if len(mine) == 1:
+            identifier = mine[0].get("identifier") or model
+            # Reuse is not a safety bypass.  A matching modelKey may have been
+            # loaded by another process with another runtime; do not select a
+            # new runtime or unload anything here, only verify the existing
+            # CPU instance and authoritative post-load gate before HTTP use.
+            if not _is_current_owned_lms_instance(model, identifier):
+                raise RuntimeError("LM Studio 的同名模型不是本次控制台擁有的實例，不會接管它")
+            # Verify every reuse before starting even the loopback server. A
+            # rejected/foreign reuse must not mutate runtime or server state.
+            _require_lms_cpu_runtime()
+            ok, note = _run_gate("--post-load-identifier", identifier,
+                                 phase="reuse", model_key=model)
+            if not ok:
+                raise RuntimeError(f"既有本機模型未通過載入後把關：{note}")
             _lms_server_start()
             # 識別碼優先：載入時可以用 --identifier 取任意名字，
             # 拿模型名去打 /v1 會找不到那個實例。
-            return mine[0].get("identifier") or model
+            return identifier
         # 要放在 gate/runtime/server 之前：RAM 明顯不足時不能先產生任何載入
         # 相關寫入。之後在真正 lms load 前還會再量一次，避免等待把關期間
         # 記憶體已被其他工作吃掉。
         _require_cold_load_admission(record)
-        ok, note = _run_gate()
+        ok, note = _run_gate(phase="pre")
         if not ok:
             raise RuntimeError(f"地端把關未放行：{note}")
 
@@ -3073,6 +3369,8 @@ def ensure_lms_chat_model(model: str) -> str:
         _lms_server_start()
         ident = _owned_identifier(model)
         _require_cold_load_admission(record)
+        if _lms_ps_strict():
+            raise RuntimeError("LM Studio 載入狀態在準備期間改變，未嘗試載入或取代其他模型")
         try:
             # --ttl 300：閒置五分鐘自動釋放，不會讓這次對話永久佔住記憶體
             r = _lms_run([str(LMS_BIN), "load", model, "-y", "--gpu", "off",
@@ -3087,10 +3385,18 @@ def ensure_lms_chat_model(model: str) -> str:
                                + ((r.stderr or r.stdout) or "").strip()[-300:]
                                + f"；{cleanup}")
 
-        ok, note = _run_gate("--post-load-identifier", ident)
+        try:
+            # runtime select 的成功不夠；載入後重新讀 runtime 清單與 gate。
+            _require_lms_cpu_runtime()
+            ok, note = _run_gate("--post-load-identifier", ident,
+                                 phase="post", model_key=model)
+        except Exception as exc:
+            cleanup = _cleanup_owned_lms_load(ident)
+            raise RuntimeError(f"載入後 CPU runtime 驗證失敗：{exc}；{cleanup}")
         if not ok:
             cleanup = _cleanup_owned_lms_load(ident)
             raise RuntimeError(f"載入後把關未放行：{note}；{cleanup}")
+        _remember_owned_lms_instance(model, ident)
         return ident
 
 
@@ -3104,6 +3410,131 @@ def model_complete(model_id: str) -> bool:
                     total += f.stat().st_size
             return total >= t["min_gb"] * (1024 ** 3) * 0.9
     return True  # 不在表內的模型不設限
+
+
+_LOCAL_GENERAL_PREFERENCES = (
+    "qwen3.6-35b", "qwen3.5-4b", "qwen3-coder-next", "qwen3.8-27b",
+)
+
+
+def _local_candidate_record(records: list[dict]) -> dict | None:
+    """Pick a known installed key for a possible cold *attempt*, never load it."""
+    for wanted in _LOCAL_GENERAL_PREFERENCES:
+        hit = next((row for row in records
+                    if wanted in str(row.get("modelKey") or "").casefold()), None)
+        if hit is not None:
+            return hit
+    return records[0] if records else None
+
+
+def _passive_cpu_runtime_metadata() -> dict:
+    """Read only immutable bundled-runtime metadata; never execute a gate."""
+    fallback = {"id": LMS_RUNTIME, "installed": False, "selected": False,
+                "verified": False,
+                "displayName": "CPU llama.cpp (Windows)",
+                "minimumLMStudioVersion": "0.4.0+15",
+                "helpUrl": "https://lmstudio.ai/docs/app"}
+    try:
+        from console_local_gate import runtime_metadata
+        return runtime_metadata()
+    except Exception:
+        return fallback
+
+
+def local_runtime_readiness() -> dict:
+    """Collect passive LM Studio facts for the shared readiness contract.
+
+    This function must remain side-effect free: it only reads ``lms ls``,
+    ``lms ps`` and, for an already loaded instance, ``lms runtime ls``.  The
+    actual gate is still run by ``ensure_lms_chat_model`` immediately before a
+    lifecycle mutation; a missing configured gate is nevertheless a hard false
+    state so a packaged app cannot advertise a safe local route it lacks.
+    """
+    spec = _gate_spec()
+    runtime = _passive_cpu_runtime_metadata()
+    common = {"gateSource": spec["kind"], "runtime": runtime}
+    if not LMS_BIN.is_file():
+        return {
+            "models": [], "available": False, "installed": False,
+            "ready": False, "model": None, "loaded": [],
+            "state": runtime_readiness.STATE_MISSING_TOOL,
+            "reason": "找不到 LM Studio 執行檔。", "reasonCode": "LMS_EXECUTABLE_UNAVAILABLE",
+            "setupStep": "runtime", **common,
+        }
+    try:
+        records = lms_installed_model_records()
+    except Exception:
+        records = []
+    models = [str(row.get("modelKey")) for row in records
+              if isinstance(row, dict) and isinstance(row.get("modelKey"), str)
+              and row.get("modelKey")]
+    base = {"models": models, "available": bool(models), "installed": True,
+            "ready": False, "model": None, "loaded": [], **common}
+    if not models:
+        return {**base, "state": runtime_readiness.STATE_NEEDS_MODEL,
+                "reason": "LM Studio 尚未找到完整的支援模型", "reasonCode": "MODEL_NOT_FOUND",
+                "setupStep": "model"}
+    if not spec["ready"]:
+        return {**base, "state": runtime_readiness.STATE_UNKNOWN,
+                "reason": spec["reason"], "reasonCode": spec["code"], "setupStep": "gate"}
+    if runtime.get("installed") is not True or runtime.get("verified") is not True:
+        return {**base, "state": runtime_readiness.STATE_UNKNOWN,
+                "reason": "找不到指定的 CPU runtime 2.24.0。請在 LM Studio 按 Ctrl+Shift+R 安裝並選擇 CPU llama.cpp (Windows)。",
+                "reasonCode": "CPU_RUNTIME_METADATA_INVALID", "setupStep": "runtime"}
+    try:
+        loaded_rows = _lms_ps_strict()
+    except Exception as exc:
+        return {**base, "state": runtime_readiness.STATE_UNKNOWN,
+                "reason": "無法確認 LM Studio 載入狀態。", "reasonCode": "MODEL_STATE_UNKNOWN",
+                "setupStep": "model"}
+    # Public readiness exposes installed model keys, not per-instance aliases.
+    # The alias remains private to ensure_lms_chat_model and is only used for
+    # the actual /v1 request after a fresh lifecycle recheck.
+    loaded = [str(row.get("modelKey")) for row in loaded_rows
+              if isinstance(row, dict) and isinstance(row.get("modelKey"), str)
+              and row.get("modelKey")]
+    if len(loaded_rows) > 1:
+        return {**base, "loaded": loaded, "state": runtime_readiness.STATE_BUSY,
+                "reason": "LM Studio 目前載入多個或混合模型，控制台不會取代它們",
+                "reasonCode": "MODEL_STATE_BUSY", "setupStep": "model"}
+    if len(loaded_rows) == 1:
+        current = loaded_rows[0]
+        key = current.get("modelKey")
+        identifier = current.get("identifier")
+        if key not in models or not isinstance(identifier, str) or not identifier:
+            return {**base, "loaded": loaded, "state": runtime_readiness.STATE_BUSY,
+                    "reason": "LM Studio 載入的是外來或不受支援模型，控制台不會取代它",
+                    "reasonCode": "MODEL_OWNERSHIP_UNVERIFIED", "setupStep": "model"}
+        runtime_ok, runtime_note = _lms_cpu_runtime_status()
+        if not runtime_ok:
+            return {**base, "loaded": loaded, "model": key,
+                    "state": runtime_readiness.STATE_UNKNOWN, "reason": runtime_note,
+                    "reasonCode": "RUNTIME_READBACK_UNKNOWN", "setupStep": "runtime"}
+        if not _is_current_owned_lms_instance(key, identifier):
+            return {**base, "loaded": loaded, "model": key,
+                    "state": runtime_readiness.STATE_BUSY,
+                    "reason": "已載入模型不是本次控制台擁有的實例。",
+                    "reasonCode": "MODEL_OWNERSHIP_UNVERIFIED", "setupStep": "model"}
+        runtime["selected"] = True
+        return {**base, "loaded": loaded, "model": key, "ready": True,
+                "state": runtime_readiness.STATE_READY,
+                "reason": f"已安全讀到載入中的本機模型：{key}",
+                "reasonCode": "LOCAL_READY"}
+
+    candidate = _local_candidate_record(records)
+    if candidate is None:
+        return {**base, "state": runtime_readiness.STATE_NEEDS_MODEL,
+                "reason": "尚未找到可安全準備的本機模型"}
+    admission = cold_load_admission(candidate)
+    if not admission.get("admitted"):
+        return {**base, "model": candidate["modelKey"],
+                "state": runtime_readiness.STATE_NEEDS_MEMORY,
+                "reason": admission.get("reason") or "本機模型未通過記憶體准入",
+                "reasonCode": "RAM_ADMISSION_FAILED", "setupStep": "model"}
+    return {**base, "model": candidate["modelKey"], "ready": True,
+            "state": runtime_readiness.STATE_NEEDS_START,
+            "reason": "完整模型與記憶體准入已確認；送出時會先通過地端安全把關再準備",
+            "reasonCode": "PREPARE_ON_SEND", "setupStep": "runtime"}
 
 
 def detect_heavy_job():
@@ -3157,22 +3588,29 @@ def planner_model():
     實測踩到：note 回「地端模型呼叫失敗：timed out」。
     所以先看 lms ps，已經載入的又夠格就直接用它。
     """
-    available = [m for m in lms_models() if model_complete(m)]
-    # 一般結構化工作依 ai-hub/ROUTER.md：3.6 → 4B。Kimi 只屬於
-    # long 路徑，不再因為曾經跑得快就被一般拆解冷載入。
-    capable = ("qwen3.6-35b", "qwen3.5-4b", "qwen3-coder-next", "qwen3.8-27b")
-    loaded = [m for m in lms_loaded_keys() if m]
-    for m in loaded:
-        if any(c in m for c in capable):
-            return m
-    if loaded:
-        return loaded[0]  # 有外來常駐模型時不另挑冷模型去互踢
-    for want in capable:
-        for m in available:
-            if want in m:
-                return m
-    # 偏好清單全落空時，已載入的還是比要重新載的好
-    return (loaded[0] if loaded else (available[0] if available else ""))
+    try:
+        records = lms_installed_model_records()
+        known = {str(row.get("modelKey")) for row in records
+                 if isinstance(row, dict) and isinstance(row.get("modelKey"), str)}
+        loaded = _lms_ps_strict()
+    except Exception:
+        return ""
+    # A planning request may use one already loaded, supported instance.  It
+    # must never choose a disk-only key (which would trigger implicit autoload)
+    # or a foreign/mixed instance.
+    if len(loaded) != 1:
+        return ""
+    row = loaded[0]
+    key, identifier = row.get("modelKey"), row.get("identifier")
+    if (key not in known or not isinstance(identifier, str) or not identifier
+            or not _is_current_owned_lms_instance(key, identifier)):
+        return ""
+    runtime_ok, _ = _lms_cpu_runtime_status()
+    if not runtime_ok:
+        return ""
+    gate_ok, _ = _run_gate("--post-load-identifier", identifier,
+                           phase="reuse", model_key=key)
+    return identifier if gate_ok else ""
 
 
 # 任務鏈以 ai-hub/ROUTER.md §5 為準；Kimi 僅在 long 路徑。
@@ -3576,12 +4014,14 @@ class Handler(BaseHTTPRequestHandler):
                 # stays running; recheck on the explicit setup refresh.
                 for tool in _BIN_CANDIDATES:
                     BIN[tool] = _find_bin(tool)
-                models = [model for model in lms_models() if model_complete(model)]
+                readiness = self._readiness_snapshot()
+                models = list(readiness["local"].get("models") or [])
                 tailscale = bool(shutil.which('tailscale')) or (
                     Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'Tailscale' / 'tailscale.exe'
                 ).is_file()
                 result = setup_catalog(_bin_available, models, catalog.get('connections', []),
-                                       lmstudio_installed=LMS_BIN.is_file(), tailscale_available=tailscale)
+                                       lmstudio_installed=readiness["local"].get("installed") is True,
+                                       tailscale_available=tailscale, readiness=readiness)
                 if catalog.get('loadError'):
                     result['connectionError'] = catalog['loadError']
                 return self._json(result)
@@ -3689,6 +4129,34 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 "privacy": "只掃描 SKILL.md 與技能資料夾；不讀取帳號、憑證或 token。",
             })
+        if self.path == "/api/skills/starters":
+            # Starter content is optional and supplied separately. Keep it
+            # desktop/same-origin only; the mobile remote allowlist never opens
+            # this discovery surface.
+            if not self._same_origin():
+                return self._json({"ok": False, "error": "跨來源請求已拒絕"}, 403)
+            try:
+                from skill_starters import starter_catalog
+                catalog = starter_catalog()
+                if not isinstance(catalog, dict) or catalog.get("ok") is not True:
+                    raise ValueError("starter catalog format")
+                starters = catalog.get("starters")
+                if not isinstance(starters, list) or len(starters) != 2:
+                    raise ValueError("starter catalog entries")
+                for entry in starters:
+                    if not isinstance(entry, dict) or any(
+                        not isinstance(entry.get(key), str) or not entry[key].strip()
+                        for key in ("id", "name", "title", "description", "testPrompt")
+                    ):
+                        raise ValueError("starter metadata")
+                    package = entry.get("package")
+                    if not isinstance(package, dict) or package.get("kind") != "zip" or not isinstance(package.get("data"), str):
+                        raise ValueError("starter package")
+                    if _skill_package(package)["name"] != entry["name"]:
+                        raise ValueError("starter name")
+            except Exception:
+                return self._json({"ok": False, "error": "入門技能目前無法載入，請稍後再試。"}, 503)
+            return self._json({"ok": True, "starters": starters})
         if self.path == "/api/dispatch/batch":
             return self._json({"ok": True, **type(self).BATCH})
         if self.path == "/api/schedules":
@@ -4558,25 +5026,23 @@ class Handler(BaseHTTPRequestHandler):
         if not instruction:
             return self._json({"ok": False, "error": "需要 instruction"}, 400)
 
-        # 拆解用地端模型：不燒雲端額度，雲端全限流時主控台也還能用
+        # Plan only against the same eligible rows that the send endpoints use.
+        # An empty list is meaningful: planner.plan() then returns no fake step.
+        readiness = self._readiness_snapshot()
+        usable = [row["id"] for row in readiness["tools"]
+                  if row.get("ready") is True and row.get("limited") is not True]
+        limited = [row["id"] for row in readiness["tools"]
+                   if row.get("limited") is True]
+        # Planning never cold-loads. This is either a strict loaded identifier
+        # or an empty string, in which case a truly eligible executor receives
+        # one explicit fallback task.
         model = planner_model()
-
-        # 只把「現在真的能用」的工具給拆解器選。限流中的排掉，
-        # 否則計畫做出來全是派不出去的工單。
-        try:
-            status = json.loads(STATUS_JSON.read_text(encoding="utf-8"))
-            limited = {k for k, v in status.get("tools", {}).items() if v.get("rate_limited")}
-        except Exception:
-            limited = set()
-        usable = [t for t in list(self.DISPATCH_TOOLS) + ["grok", "local"]
-                  if t not in limited and (t == "local" or _bin_available(t))]
-        if not usable:
-            usable = ["local"]
 
         skills = _CFG.get("tool_skills") or None
         result = planner.plan(instruction, model, skills=skills, available=usable)
         result["usable"] = usable
         result["limited"] = sorted(limited)
+        result["readiness"] = readiness
 
         # 拆解失敗時，如果磁碟上有更適合的模型就直接講出來。
         #
@@ -4618,36 +5084,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False,
                                "error": f"不認得的工具：{tool[:40]}"}, 400)
         raw_task = task
-
-        # ── 選一個現在真的有額度的工具 ──
-        #
-        # 原本只有 tool == "auto" 會查限流。指名的話一律照派 ——
-        # 於是指名一個正在限流的工具，等於把工單丟進牆裡：
-        # 派得出去、log 裡一行「usage limit」、然後就沒了。
-        # 使用者的原話是「不會自動切換有額度的模型」。
-        #
-        # 「你指名誰就是誰」仍然是這個程式的原則，所以改派不是安靜做掉的：
-        # 回傳 rerouted，畫面要明講換了誰、為什麼。
-        # 指名的深層意圖是「這件事要做完」，不是「就算做不成也要給他」。
-        limited = self._limited_tools()
-        rerouted = None
-        if tool == "auto":
-            tool = next((t for t in self.CLOUD_CHAIN
-                         if t not in limited and _bin_available(t)), "local")
-        elif tool in limited:
-            alt = next((t for t in self.CLOUD_CHAIN
-                        if t != tool and t not in limited
-                        and t in self.DISPATCH_TOOLS and _bin_available(t)), None)
-            if alt:
-                rerouted = {"from": tool, "to": alt, "why": f"{tool} 的額度已經用完"}
-                tool = alt
-            else:
-                return self._json({"ok": False, "error":
-                                   f"{tool} 的額度已經用完，而其他工具現在也都不能用"
-                                   "（限流或沒安裝）。等額度恢復，或改用地端"}, 503)
-
-        if tool != "local" and not _bin_available(tool):
-            return self._json({"ok": False, "error": f"{tool} 尚未安裝或執行檔不可用"}, 503)
+        # Fresh authoritative validation comes before wrapping a work order,
+        # creating a log, or spawning anything. Explicit unavailable/limited
+        # requests fail here; only an explicit ``auto`` row may select a target.
+        _, resolved_tool, readiness_row, readiness_error = self._resolve_ready_dispatch(tool)
+        if readiness_error:
+            return self._json(readiness_error, 503)
+        tool = resolved_tool
+        mode_error = self._validate_expected_mode(body, tool)
+        if mode_error is not None:
+            payload, code = mode_error
+            return self._json(payload, code)
 
         # 掛上規範與技能。派出去的 agent 不會自己知道這台機器的不可違反條款，
         # 也不會知道有現成技能可用 —— 工單裸奔的代價太高，所以一律加。
@@ -4725,22 +5172,25 @@ class Handler(BaseHTTPRequestHandler):
                                   "mode": "headless", "cwd": cwd})
                 note = f"已派出 {tool} 無頭執行" + (
                     f"（已掛技能：{'、'.join(applied_skills)}）" if applied_skills else "")
-                if rerouted:
-                    note = f"{rerouted['why']}，已改派給 {tool}。" + note
                 return self._json({"ok": True, "tool": tool, "mode": "headless",
                                    "log": str(log_file), "id": stamp, "skills": applied_skills,
-                                   "rerouted": rerouted, "note": note})
+                                   "note": note})
             except Exception as e:
                 return self._json({"ok": False, "error": str(e)}, 500)
 
         if tool == "local":
-            # 地端兜底：直接叫 LM Studio 回答（同步回覆）
+            # The readiness row selects a complete installed key. ensure() then
+            # re-reads under the lifecycle lock and returns the real instance
+            # identifier; never send the disk modelKey straight to /v1.
             try:
-                model, _, _ = route_model("general")
-                if not model:
-                    return self._json({"ok": False, "error": "地端無可用模型"}, 502)
+                model = readiness_row.get("model") if isinstance(readiness_row, dict) else None
+                if not isinstance(model, str) or not model:
+                    return self._json({"ok": False, "error": "地端模型尚未安全就緒",
+                                       "ready": False,
+                                       "nextAction": runtime_readiness.NEXT_ACTION_SETUP}, 503)
+                resolved = ensure_lms_chat_model(model)
                 import urllib.request
-                payload = json.dumps({"model": model, "messages": [
+                payload = json.dumps({"model": resolved, "messages": [
                     {"role": "system", "content": "你是 AI 辦公室的地端值班夥伴，雲端工具都在休息。直接、簡潔地用繁體中文執行使用者的指令或回答。"},
                     {"role": "user", "content": task},
                 ], "max_tokens": 2048, "reasoning": "off"},
@@ -4749,21 +5199,15 @@ class Handler(BaseHTTPRequestHandler):
                                              data=payload, headers={"Content-Type": "application/json; charset=utf-8"})
                 resp = json.loads(urllib.request.urlopen(req, timeout=280).read())
                 msg = (resp.get("choices") or [{}])[0].get("message", {}) or {}
-                # 推理型模型會把答案留在 reasoning_content，content 反而空的。
-                # 拆解器早就兩邊都看了，這條漏掉 —— 結果是畫面顯示「完成」
-                # 但回覆一個字都沒有，使用者也看不出發生什麼事。
-                content = msg.get("content") or msg.get("reasoning_content") or ""
+                content = msg.get("content") if isinstance(msg.get("content"), str) else ""
                 if not content.strip():
-                    finish = (resp.get("choices") or [{}])[0].get("finish_reason") or ""
-                    content = (f"（{model} 沒有回出內容"
-                               + (f"，finish_reason={finish}" if finish else "")
-                               + "。推理型模型可能把額度用在推理上，"
-                               "換一個模型或把問題講得更短會好一些）")
-                log_file.write_text(f"[{stamp}] local({model})\n指令：{task}\n\n{content}", encoding="utf-8")
+                    return self._json({"ok": False,
+                                       "error": "地端模型只有推理過程或空回覆，沒有完成回答。"}, 502)
+                log_file.write_text(f"[{stamp}] local({resolved})\n指令：{task}\n\n{content}", encoding="utf-8")
                 self._reg_append({"id": stamp, "tool": "local", "task": raw_task[:120],
                                   "started": stamp, "pid": None, "log": str(log_file),
                                   "mode": "sync", "reply": content[:300]})
-                return self._json({"ok": True, "tool": "local", "model": model, "mode": "sync",
+                return self._json({"ok": True, "tool": "local", "model": resolved, "mode": "sync",
                                    "id": stamp, "reply": content, "log": str(log_file)})
             except Exception as e:
                 return self._json({"ok": False, "error": f"地端呼叫失敗：{e}"}, 502)
@@ -4805,10 +5249,8 @@ class Handler(BaseHTTPRequestHandler):
                               "started": stamp, "pid": None, "log": str(log_file),
                               "mode": "terminal", "echo_size": echo_size})
             note = f"{tool} 已開終端並帶入指令（指令已帶進去，但**還沒有人按下去**）"
-            if rerouted:
-                note = f"{rerouted['why']}，已改派給 {tool}。" + note
             return self._json({"ok": True, "tool": tool, "mode": "terminal",
-                               "id": stamp, "note": note, "rerouted": rerouted,
+                               "id": stamp, "note": note,
                                "log": str(log_file)})
         except Exception as e:
             return self._json({"ok": False, "error": str(e)}, 500)
@@ -4864,6 +5306,12 @@ class Handler(BaseHTTPRequestHandler):
         make = self.FOLLOWUP_TOOLS.get(tool)
         if not make:
             return {"error": f"{tool} 沒有續談模式"}
+        # A follow-up starts a new process, so it gets the same fresh explicit
+        # eligibility check as a new work order. It never silently changes tool.
+        _, resolved, _, readiness_error = self._resolve_ready_dispatch(tool)
+        if readiness_error or resolved != tool:
+            return {"error": (readiness_error or {}).get("error", runtime_readiness.NO_TOOL_REASON),
+                    "nextAction": runtime_readiness.NEXT_ACTION_SETUP}
         # 續談不重掛執行前置：那段規範上一輪已經給過了，再貼一次只是雜訊。
         # 但控制標記還是要中和，不然補的這句話可以偽裝成系統指示。
         safe = rules._neutralize(text)
@@ -4917,6 +5365,9 @@ class Handler(BaseHTTPRequestHandler):
         這裡把同一段邏輯用 HTTP 打回自己，確保行為完全一致
         （包含掛規範、寫 log、進派工登錄、自動路由）。
         """
+        _, _, _, readiness_error = self._resolve_ready_dispatch(tool or "auto")
+        if readiness_error:
+            return str(readiness_error.get("error") or runtime_readiness.NO_TOOL_REASON)
         payload = json.dumps({"task": task, "tool": tool or "auto"},
                              ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
@@ -4948,6 +5399,9 @@ class Handler(BaseHTTPRequestHandler):
         job = next((j for j in schedule.load() if j.get("id") == jid), None)
         if not job:
             return self._json({"ok": False, "error": "找不到這個定時工作"}, 404)
+        _, _, _, readiness_error = self._resolve_ready_dispatch(job.get("tool", "auto"))
+        if readiness_error:
+            return self._json(readiness_error, 503)
         try:
             note = self._dispatch_now(job.get("task", ""), job.get("tool", "auto"))
         except Exception as e:
@@ -5081,9 +5535,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error":
                                "找不到原始工單內容，無法原樣重派"}, 404)
 
-        # 原樣重派，但工具本身撞牆的話就不要再撞一次 ——
-        # 使用者按重派是想「把這件做完」，不是「再看它失敗一次」。
-        # do_dispatch 會自己處理改派並回報 rerouted，這裡照原樣送就好。
+        _, _, _, readiness_error = self._resolve_ready_dispatch(rec.get("tool") or "auto")
+        if readiness_error:
+            return self._json(readiness_error, 503)
+
+        # 原樣重派；實際 POST 還會再次 fresh-preflight，避免這個
+        # readback 和真正送出之間的狀態變化繞過防線。
         payload = {"tool": rec.get("tool") or "auto", "task": task}
         if rec.get("cwd"):
             payload["cwd"] = rec["cwd"]
@@ -5123,18 +5580,26 @@ class Handler(BaseHTTPRequestHandler):
                                "error": f"一批最多 {self.MAX_STEPS} 件"}, 400)
 
         jobs = []
-        for x in steps:
+        for index, x in enumerate(steps, start=1):
             if not isinstance(x, dict):
-                continue            # [null] 這種進來不該讓整個請求執行緒死掉
+                return self._json({"ok": False, "error": "批次工單格式不正確",
+                                   "failedStep": index,
+                                   "nextAction": runtime_readiness.NEXT_ACTION_SETUP}, 400)
             task = str(x.get("task") or "").strip()
-            if task:
-                job = {"tool": str(x.get("tool") or "auto"),
-                       "task": task[:self.MAX_TASK]}
-                if batch_cwd:
-                    job["cwd"] = batch_cwd
-                jobs.append(job)
-        if not jobs:
-            return self._json({"ok": False, "error": "工單內容都是空的"}, 400)
+            if not task:
+                return self._json({"ok": False, "error": "批次工單缺少工作內容",
+                                   "failedStep": index,
+                                   "nextAction": runtime_readiness.NEXT_ACTION_SETUP}, 400)
+            requested = str(x.get("tool") or "auto").strip()
+            _, _, _, readiness_error = self._resolve_ready_dispatch(requested)
+            if readiness_error:
+                return self._json({**readiness_error, "failedStep": index}, 503)
+            # Keep the caller's selection (including auto) so the worker's
+            # actual dispatch makes another fresh decision at execution time.
+            job = {"tool": requested, "task": task[:self.MAX_TASK]}
+            if batch_cwd:
+                job["cwd"] = batch_cwd
+            jobs.append(job)
 
         cls = type(self)
         # 「看有沒有在跑」跟「標記成在跑」必須是同一個不可分割的動作。
@@ -5204,6 +5669,69 @@ class Handler(BaseHTTPRequestHandler):
                    "qwen": "Qwen", "grok": "Grok", "kimi": "Kimi",
                    "cursor": "Cursor", "local": "地端模型"}
 
+    def _readiness_snapshot(self) -> dict:
+        """Read one passive shared snapshot; callers never reuse it for a write."""
+        limited = self._limited_tools()
+        reasons = self._tool_reasons(limited)
+        return runtime_readiness.build_snapshot(
+            cloud_chain=self.CLOUD_CHAIN,
+            terminal_tools=self.TERMINAL_TOOLS,
+            labels=self.TOOL_LABELS,
+            available=_bin_available,
+            limited=limited,
+            reasons=reasons,
+            local=local_runtime_readiness,
+        )
+
+    def _resolve_ready_dispatch(self, requested: object):
+        """Fresh server-authoritative preflight for every actual dispatch."""
+        snapshot = self._readiness_snapshot()
+        tool, error = runtime_readiness.resolve_dispatch(snapshot, requested)
+        if error:
+            return snapshot, None, None, error
+        row = next((item for item in snapshot.get("tools", [])
+                    if isinstance(item, dict) and item.get("id") == tool), None)
+        if row is None:
+            return snapshot, None, None, {
+                "ok": False, "error": runtime_readiness.NO_TOOL_REASON,
+                "ready": False, "nextAction": runtime_readiness.NEXT_ACTION_SETUP,
+            }
+        return snapshot, tool, row, None
+
+    def _actual_dispatch_mode(self, tool: str) -> str:
+        """派工實際會走哪條分支（與 do_dispatch 主流程一致，供 expectedMode 複查）。"""
+        if tool in self.DISPATCH_TOOLS:
+            return "headless"
+        if tool == "local":
+            return "local"
+        return "terminal"
+
+    def _validate_expected_mode(self, body: dict, tool: str):
+        """可選 expectedMode：未知 400，與實際分支不符 409。須在副作用之前呼叫。
+
+        回傳 (payload, status) 或 None；不可在此呼叫 _json（真實 Handler._json 不回傳值）。
+        """
+        expected = body.get("expectedMode")
+        if expected is None:
+            return None
+        if expected not in ("headless", "terminal", "local"):
+            return ({
+                "ok": False,
+                "error": f"不支援的執行模式：{expected}",
+            }, 400)
+        actual = self._actual_dispatch_mode(tool)
+        if expected != actual:
+            labels = {"headless": "無頭自動執行", "terminal": "開終端機", "local": "地端只回答"}
+            return ({
+                "ok": False,
+                "error": (
+                    f"工具 {tool} 目前會以「{labels.get(actual, actual)}」執行，"
+                    f"不符合要求的「{labels.get(expected, expected)}」模式。"
+                    "請重新檢查工具狀態，或改選其他可不用操作英文視窗的工具。"
+                ),
+            }, 409)
+        return None
+
     def do_dispatch_tools(self):
         """現在派得出去的工具，以及每一個「派出去之後會發生什麼」。
 
@@ -5215,15 +5743,10 @@ class Handler(BaseHTTPRequestHandler):
         limited 也一起回：限流中的工具照樣列出來（使用者要知道它存在），
         但畫面上要能標成不可選，而不是選了才在 503 裡看到原因。
         """
-        limited = self._limited_tools()
-        # 原因也一起給。畫面上只寫「額度用完」而不說為什麼、什麼時候恢復，
-        # 使用者對著頁尾「閒置」與下拉「額度用完」兩種說法無從判斷 ——
-        # 稽核者（kimi）指出這一點。status.json 裡本來就有 reset_at 與 evidence，
-        # 拿出來講就好；沒有的話前端會退回通用的「額度狀態無法確認」。
-        reasons = self._tool_reasons(limited)
-        out = self._tool_rows(limited, reasons)
-        return self._json({"ok": True, "tools": out, "auto": self._auto_pick(limited),
-                           "limited": sorted(limited)})
+        snapshot = self._readiness_snapshot()
+        limited = sorted(row["id"] for row in snapshot["tools"]
+                         if row.get("limited") is True)
+        return self._json({**snapshot, "limited": limited})
 
     def _tool_reasons(self, limited) -> dict:
         """限流工具各自的原因（恢復時間或證據字樣）。拿不到就空。"""
@@ -5252,25 +5775,13 @@ class Handler(BaseHTTPRequestHandler):
         """畫面上的工具列。順序照接力鏈（便宜的在前）：
         原本寫死 claude、codex 在前而且**根本沒有 gemini** —— 「自動」會挑到 agy，
         下拉卻選不到它，使用者看到「自動會挑 gemini」還以為畫面壞了。"""
-        out = []
-        for tool in [*self.CLOUD_CHAIN, *sorted(self.TERMINAL_TOOLS)]:
-            if not _bin_available(tool):
-                continue          # 這台機器上沒裝，不要列出來給人選
-            out.append({
-                "id": tool,
-                "label": self.TOOL_LABELS.get(tool, tool),
-                "mode": "terminal" if tool in self.TERMINAL_TOOLS else "headless",
-                "limited": tool in limited,
-                "reason": reasons.get(tool, ""),
-            })
-        out.append({"id": "local", "label": self.TOOL_LABELS["local"],
-                    "mode": "local", "limited": False})
-        return out
+        # Kept as a compatibility helper for older callers. Its output is now
+        # the same complete contract as /api/dispatch/tools, not a weaker row.
+        return self._readiness_snapshot()["tools"]
 
-    def _auto_pick(self, limited) -> str:
+    def _auto_pick(self, limited) -> str | None:
         """auto 現在會挑到誰。畫面上直接寫出來，不要讓人猜。"""
-        return next((t for t in self.CLOUD_CHAIN
-                     if t not in limited and _bin_available(t)), "local")
+        return self._readiness_snapshot().get("auto")
 
     def do_dispatch_usage(self):
         """各工具的額度狀態 + 今日／七日用量，給「額度與今日用量」那條看。
@@ -5281,9 +5792,8 @@ class Handler(BaseHTTPRequestHandler):
         """
         if not self.DISPATCHES:
             self._load_registry()
-        limited = self._limited_tools()
-        reasons = self._tool_reasons(limited)
-        rows = self._tool_rows(limited, reasons)
+        readiness = self._readiness_snapshot()
+        rows = readiness["tools"]
         now = time.time()
         day = time.strftime("%Y%m%d", time.localtime(now))
         week_floor = now - 7 * 86400
@@ -5331,8 +5841,9 @@ class Handler(BaseHTTPRequestHandler):
         for r in rows:
             r["today"] = today[r["id"]]
             r["week"] = week[r["id"]]
-        return self._json({"ok": True, "day": time.strftime("%Y-%m-%d", time.localtime(now)),
-                           "auto": self._auto_pick(limited), "tools": rows})
+        return self._json({**readiness,
+                           "day": time.strftime("%Y-%m-%d", time.localtime(now)),
+                           "tools": rows})
 
     def _handoff_order(self, target: dict, text: str, why: str) -> str:
         """把一件做到一半的工作，交接給另一個 AI。
@@ -5386,6 +5897,26 @@ class Handler(BaseHTTPRequestHandler):
             parts += ["", "── 使用者這次補充的要求 ──", text]
         return "\n".join(parts)
 
+    # 本機問答的界線：只回答，不改派、不動檔案。文案直接給前端顯示。
+    LOCAL_ONLY_FOLLOWUP_REASON = ("本機問答只回答，不會改派雲端或執行檔案；"
+                                  "請回原對話的本機續聊。")
+    LOCAL_ONLY_NEXT_ACTION = "local_chat"
+
+    @staticmethod
+    def _is_local_answer(rec) -> bool:
+        """這一筆是不是「本機問答」——只回答一次、不派工人也不動檔案的那一路。
+
+        兩個欄位任一成立就算：tool 是 local，或 mode 是 sync（本機那一路是
+        同步回答，沒有背景工人）。用「或」不用「且」是刻意的：紀錄可能只剩其中
+        一個欄位（舊紀錄、寫到一半的紀錄、被改過的公開列），這裡寧可多擋一筆
+        CLI 的接力，也不要少擋一筆——把一句本機問答變成會改檔案的派工，
+        是使用者沒答應過的事。
+        """
+        if not isinstance(rec, dict):
+            return False
+        return str(rec.get("tool") or "").strip().lower() == "local" \
+            or str(rec.get("mode") or "").strip().lower() == "sync"
+
     def do_followup(self):
         """對一件已派出的工作補一句話
 
@@ -5402,6 +5933,34 @@ class Handler(BaseHTTPRequestHandler):
         if not target:
             return self._json({"ok": False, "error": "找不到這件派工"}, 404)
 
+        # ── 本機問答不改派 ──────────────────────────────────────────
+        # 下面那段接力是「拿工單去開另一個 CLI 把事做完」，而 CLI 會改檔案。
+        # 對一句本機問答做這件事，等於使用者只答應了「回答我」，卻換來一個
+        # 會動他檔案的 agent。這是同意的界線，不是額度夠不夠的問題 ——
+        # 就算此刻有一個完全就緒的 CLI 在旁邊，也一樣不改派。
+        # 擋在排隊、寫登記表、送 HTTP 之前：原本的 target 與這句 text 一個字不動，
+        # 前端只在 ok 為真時才清輸入框，使用者的話留在原地可以再送一次。
+        if self._is_local_answer(target):
+            return self._json({"ok": False,
+                               "error": self.LOCAL_ONLY_FOLLOWUP_REASON,
+                               "reason": self.LOCAL_ONLY_FOLLOWUP_REASON,
+                               "handoff": False,
+                               "nextAction": self.LOCAL_ONLY_NEXT_ACTION}, 409)
+
+        pid = target.get("pid")
+        alive = bool(pid) and int(pid) in _alive_pids({int(pid)})
+        if alive:
+            # Queue before considering rate limits or handoff: the original
+            # worker still owns the conversation, and starting another worker
+            # would create two concurrent writers for the same task.
+            with self._REG_LOCK:
+                pend = list(target.get("pending") or [])
+                pend.append(text)
+                target["pending"] = pend
+                self._save_registry()
+            return self._json({"ok": True, "queued": True,
+                               "note": f"這一輪還在跑，已排隊（第 {len(pend)} 句），結束後自動送出"})
+
         # ── 原本那個 AI 接不下去的時候，換一個人接手 ──
         #
         # 「補一句」是用各家的續談旗標再派一次，所以**一定是原本那個 AI 執行**。
@@ -5414,13 +5973,14 @@ class Handler(BaseHTTPRequestHandler):
         # 對話脈絡活在原工具裡帶不走，但「原始工單」與「它做到哪裡」
         # 我們手上就有。組成一份接力工單換人做，比讓人重打可靠得多。
         prev_tool = target.get("tool", "")
-        limited = self._limited_tools()
+        _, _, _, direct_error = self._resolve_ready_dispatch(prev_tool)
         why = ""
         if prev_tool not in self.FOLLOWUP_TOOLS:
             why = f"{prev_tool} 沒有無頭續談模式"
-        elif prev_tool in limited:
-            why = f"{prev_tool} 的額度已經用完"
+        elif direct_error:
+            why = str(direct_error.get("error") or f"{prev_tool} 尚未就緒")
         if why:
+            limited = self._limited_tools()
             # 挑一個「能無頭跑、有執行檔、而且沒限流」的工具
             pick = next((t for t in self.CLOUD_CHAIN
                          if t != prev_tool and t in self.DISPATCH_TOOLS
@@ -5428,7 +5988,9 @@ class Handler(BaseHTTPRequestHandler):
             if not pick:
                 return self._json({"ok": False, "error":
                                    f"{why}，而其他工具現在也都不能用（限流或沒安裝）。"
-                                   "等額度恢復，或自己開終端接手"}, 503)
+                                   "等額度恢復，或自己開終端接手",
+                                   "ready": False,
+                                   "nextAction": runtime_readiness.NEXT_ACTION_SETUP}, 503)
             payload = {"tool": pick, "task": self._handoff_order(target, text, why)}
             if target.get("cwd"):
                 payload["cwd"] = target["cwd"]
@@ -5446,18 +6008,6 @@ class Handler(BaseHTTPRequestHandler):
             out["note"] = f"{why}，已把工單與它做到的進度交給 {pick} 接手"
             return self._json(out)
 
-        pid = target.get("pid")
-        alive = bool(pid) and int(pid) in _alive_pids({int(pid)})
-        if alive:
-            # 讀 pending → 加一句 → 寫回，要在同一把鎖裡。
-            # 分開做的話兩個分頁同時補話，後寫的那份會把前一句吃掉。
-            with self._REG_LOCK:
-                pend = list(target.get("pending") or [])
-                pend.append(text)
-                target["pending"] = pend
-                self._save_registry()
-            return self._json({"ok": True, "queued": True,
-                               "note": f"這一輪還在跑，已排隊（第 {len(pend)} 句），結束後自動送出"})
         r = self._send_followup(target, text)
         if r.get("error"):
             return self._json({"ok": False, "error": r["error"]}, 500)
@@ -5481,6 +6031,12 @@ class Handler(BaseHTTPRequestHandler):
             for d in rows:
                 if d.get("alive") or d.get("handedOffTo"):
                     continue
+                # 本機問答完全不進接力：它只回答一次，沒有工人也沒有檔案權限。
+                # 額度用完、欄位看起來像「終端沒人按」都不算理由 —— 接力送出去的
+                # 是一個會改檔案的 CLI，而使用者只答應了一次回答。擋在算 why、
+                # 查限流、寫 handedOffTo 之前，這一筆連被認領都不會發生。
+                if self._is_local_answer(d):
+                    continue
                 why = ""
                 if d.get("outcome") == "error" and _is_quota_issue(d.get("issue") or ""):
                     why = f"{d.get('tool')} 的額度已經用完（{(d.get('issue') or '')[:60]}）"
@@ -5501,6 +6057,10 @@ class Handler(BaseHTTPRequestHandler):
                     break
                 src = next((x for x in self.DISPATCHES if x.get("id") == d.get("id")), None)
                 if not src or src.get("handedOffTo"):
+                    continue
+                # 傳進來的 rows 是給畫面看的公開列，欄位可能被裁過或改過；
+                # 認領與改寫都發生在登記表這一份，所以以它為準再看一次。
+                if self._is_local_answer(src):
                     continue
                 if int(src.get("handoffHops") or 0) >= _HANDOFF_MAX_HOPS:
                     continue
@@ -5564,12 +6124,23 @@ class Handler(BaseHTTPRequestHandler):
                 src = next((x for x in self.DISPATCHES if x.get("id") == d.get("id")), None)
                 if not src or not src.get("pending"):
                     continue
-                claimed.append((src, "\n".join(src.get("pending") or [])))
+                pending = list(src.get("pending") or [])
+                claimed.append((src, pending))
                 src["pending"] = []
             if claimed:
                 self._save_registry()
-        for src, text in claimed:
-            self._send_followup(src, text)
+        for src, pending in claimed:
+            result = self._send_followup(src, "\n".join(pending))
+            if result.get("error"):
+                # Restore the claimed messages before anything queued later.
+                # Otherwise an unavailable tool turns a user's text into a
+                # silent drop merely because the poller happened to run first.
+                with self._REG_LOCK:
+                    current = next((x for x in self.DISPATCHES
+                                    if x.get("id") == src.get("id")), None)
+                    if current is not None:
+                        current["pending"] = pending + list(current.get("pending") or [])
+                        self._save_registry()
 
     def do_dispatch_diff(self):
         """某一筆派工的工作目錄現在有什麼未提交的改動。

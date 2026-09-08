@@ -214,9 +214,11 @@ class TestLocalModelLifecycle(unittest.TestCase):
         # 用一定存在的檔案代替 lms.exe，避免單元測試依賴每台機器的安裝位置。
         self._lms = mock.patch.object(api, "LMS_BIN", Path(__file__))
         self._lms.start()
+        api._OWNED_LMS_INSTANCES.clear()
 
     def tearDown(self):
         self._lms.stop()
+        api._OWNED_LMS_INSTANCES.clear()
 
     def test_磁碟清單只收完整且已知的模型(self):
         rows = [
@@ -248,17 +250,21 @@ class TestLocalModelLifecycle(unittest.TestCase):
             lock.assert_not_called()
 
     def test_恰好一個相符模型會沿用它的_identifier(self):
-        loaded = [{"modelKey": self.MODEL, "identifier": "copy-line"}]
+        identifier = api._owned_identifier(self.MODEL)
+        loaded = [{"modelKey": self.MODEL, "identifier": identifier}]
+        api._remember_owned_lms_instance(self.MODEL, identifier)
         with mock.patch.object(api, "lms_installed_model_records",
                                return_value=[self.MODEL_RECORD]), \
-             mock.patch.object(api, "_lifecycle_lock",
+                mock.patch.object(api, "_lifecycle_lock",
                                return_value=api.contextlib.nullcontext()), \
-             mock.patch.object(api, "_lms_ps_strict", return_value=loaded), \
-             mock.patch.object(api, "_lms_server_start") as start, \
-             mock.patch.object(api, "_run_gate") as gate:
-            self.assertEqual(api.ensure_lms_chat_model(self.MODEL), "copy-line")
+                mock.patch.object(api, "_lms_ps_strict", return_value=loaded), \
+                mock.patch.object(api, "_lms_server_start") as start, \
+                mock.patch.object(api, "_lms_cpu_runtime_status", return_value=(True, "cpu")), \
+                mock.patch.object(api, "_run_gate", return_value=(True, "post")) as gate:
+            self.assertEqual(api.ensure_lms_chat_model(self.MODEL), identifier)
             start.assert_called_once_with()
-            gate.assert_not_called()
+            gate.assert_called_once_with("--post-load-identifier", identifier,
+                                         phase="reuse", model_key=self.MODEL)
 
     def test_外來或混合載入狀態一律不互踢(self):
         cases = [
@@ -330,6 +336,25 @@ class TestLocalModelLifecycle(unittest.TestCase):
         self.assertEqual(runner.call_args.args[0],
                          [str(api.LMS_BIN), "runtime", "select", api.LMS_RUNTIME])
 
+    def test_CPU_runtime_只接受實際三欄選用列(self):
+        header = "LLM ENGINE                                        SELECTED    MODEL FORMAT\n"
+        good = header + f"{api.LMS_RUNTIME}                     ✓            GGUF\n"
+        with mock.patch.object(api, "_lms_run", return_value=self._cp(good)):
+            self.assertTrue(api._lms_cpu_runtime_status()[0])
+        bad_cases = [
+            header + f"{api.LMS_RUNTIME}                                  GGUF\n"
+                   + "llama.cpp-win-x86_64-cuda@2.24.0                  ✓            GGUF\n",
+            header + f"{api.LMS_RUNTIME}-extra               ✓            GGUF\n",
+            header + f"{api.LMS_RUNTIME}                     yes          GGUF\n",
+            header,
+            header + f"{api.LMS_RUNTIME}                     ✓            GGUF\n"
+                   + "llama.cpp-win-x86_64-cuda@2.24.0                  ✓            GGUF\n",
+        ]
+        for output in bad_cases:
+            with self.subTest(output=output), \
+                    mock.patch.object(api, "_lms_run", return_value=self._cp(output)):
+                self.assertFalse(api._lms_cpu_runtime_status()[0])
+
     def test_伺服器固定啟動在_loopback_1234(self):
         statuses = [{"running": False, "port": 1234}, {"running": True, "port": 1234}]
         with mock.patch.object(api, "_lms_server_status", side_effect=statuses), \
@@ -358,6 +383,7 @@ class TestLocalModelLifecycle(unittest.TestCase):
                                return_value=64 * 1024 ** 3), \
              mock.patch.object(api, "_run_gate",
                                side_effect=[(True, "pre"), (True, "post")]) as gate, \
+             mock.patch.object(api, "_lms_cpu_runtime_status", return_value=(True, "cpu")), \
              mock.patch.object(api, "_lms_runtime_select") as runtime, \
              mock.patch.object(api, "_lms_server_start") as server, \
              mock.patch.object(api, "_lms_run", return_value=self._cp()) as runner:
@@ -365,7 +391,9 @@ class TestLocalModelLifecycle(unittest.TestCase):
         runtime.assert_called_once_with()
         server.assert_called_once_with()
         self.assertEqual(gate.call_args_list,
-                         [mock.call(), mock.call("--post-load-identifier", ident)])
+                         [mock.call(phase="pre"),
+                          mock.call("--post-load-identifier", ident,
+                                    phase="post", model_key=self.MODEL)])
         self.assertEqual(runner.call_args.args[0],
                          [str(api.LMS_BIN), "load", self.MODEL, "-y", "--gpu", "off",
                           "-c", "8192", "--ttl", "300", "--identifier", ident])
@@ -389,7 +417,7 @@ class TestLocalModelLifecycle(unittest.TestCase):
 
     def test_載入後把關失敗只卸載_owned_identifier(self):
         ident = api._owned_identifier(self.MODEL)
-        states = [[], [{"modelKey": self.MODEL, "identifier": ident}], []]
+        states = [[], [], [{"modelKey": self.MODEL, "identifier": ident}], []]
         with mock.patch.object(api, "lms_installed_model_records",
                                return_value=[self.MODEL_RECORD]), \
              mock.patch.object(api, "_lifecycle_lock",
@@ -478,7 +506,9 @@ class TestLocalModelLifecycle(unittest.TestCase):
         runner.assert_not_called()
 
     def test_已載入_Kimi_即使大小未知或_RAM_低仍沿用(self):
-        loaded = [{"modelKey": self.KIMI, "identifier": "existing-kimi"}]
+        identifier = api._owned_identifier(self.KIMI)
+        loaded = [{"modelKey": self.KIMI, "identifier": identifier}]
+        api._remember_owned_lms_instance(self.KIMI, identifier)
         with mock.patch.object(api, "lms_installed_model_records",
                                return_value=[{"modelKey": self.KIMI,
                                               "sizeBytes": None}]), \
@@ -488,11 +518,13 @@ class TestLocalModelLifecycle(unittest.TestCase):
              mock.patch.object(api, "available_physical_ram_bytes",
                                return_value=1 * 1024 ** 3), \
              mock.patch.object(api, "_lms_server_start") as server, \
-             mock.patch.object(api, "_run_gate") as gate, \
+             mock.patch.object(api, "_lms_cpu_runtime_status", return_value=(True, "cpu")), \
+             mock.patch.object(api, "_run_gate", return_value=(True, "post")) as gate, \
              mock.patch.object(api, "_lms_run") as runner:
-            self.assertEqual(api.ensure_lms_chat_model(self.KIMI), "existing-kimi")
+            self.assertEqual(api.ensure_lms_chat_model(self.KIMI), identifier)
         server.assert_called_once_with()
-        gate.assert_not_called()
+        gate.assert_called_once_with("--post-load-identifier", identifier,
+                                     phase="reuse", model_key=self.KIMI)
         runner.assert_not_called()
 
     def test_模型大小未知時冷載入_fail_closed(self):
@@ -516,7 +548,7 @@ class TestLocalModelLifecycle(unittest.TestCase):
 
     def test_冷載入逾時只清理精確_owned_identifier(self):
         ident = api._owned_identifier(self.MODEL)
-        states = [[], [{"modelKey": self.MODEL, "identifier": ident}], []]
+        states = [[], [], [{"modelKey": self.MODEL, "identifier": ident}], []]
 
         def run(argv, **kwargs):
             if argv[1] == "load":
@@ -543,7 +575,7 @@ class TestLocalModelLifecycle(unittest.TestCase):
     def test_冷載入非零退出也會清理並嚴格確認(self):
         ident = api._owned_identifier(self.MODEL)
         owned = [{"modelKey": self.MODEL, "identifier": ident}]
-        states = [[], owned, []]
+        states = [[], [], owned, []]
 
         def run(argv, **kwargs):
             if argv[1] == "load":
@@ -568,7 +600,7 @@ class TestLocalModelLifecycle(unittest.TestCase):
         self.assertFalse(any("--all" in command for command in commands))
 
     def test_冷載入逾時但只有外來實例時不卸載(self):
-        states = [[], [{"modelKey": "foreign/model", "identifier": "foreign"}]]
+        states = [[], [], [{"modelKey": "foreign/model", "identifier": "foreign"}]]
 
         def run(argv, **kwargs):
             if argv[1] == "load":

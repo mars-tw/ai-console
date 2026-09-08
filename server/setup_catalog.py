@@ -22,14 +22,15 @@ TOOL_GUIDES = (
 )
 
 
-def setup_catalog(available, models, connections, *, lmstudio_installed=False, tailscale_available=False):
+def setup_catalog(available, models, connections, *, lmstudio_installed=False,
+                  tailscale_available=False, readiness=None):
     """Executable discovery is deliberately not promoted to login/inference proof."""
     tools = [{
         'id': key, 'label': label, 'installed': bool(available(key)),
         'authStatus': 'unknown', 'capabilities': {'chat': False, 'dispatch': True},
         'installUrl': url, 'setupHint': hint,
     } for key, label, url, hint in TOOL_GUIDES]
-    return {
+    result = {
         'ok': True,
         'tools': tools,
         'connections': connections,
@@ -50,3 +51,17 @@ def setup_catalog(available, models, connections, *, lmstudio_installed=False, t
              'url': 'https://tailscale.com/download'},
         ],
     }
+    # The install catalogue keeps its own filesystem facts, while callers may
+    # attach the shared dispatch contract.  This avoids recreating an optimistic
+    # local-ready decision in the setup surface.
+    if isinstance(readiness, dict):
+        local = readiness.get('local')
+        if isinstance(local, dict):
+            result['local'] = dict(local)
+        result['dispatch'] = readiness
+        result['auto'] = readiness.get('auto')
+        result['ready'] = readiness.get('ready') is True
+        result['reason'] = readiness.get('reason', '')
+        if readiness.get('nextAction'):
+            result['nextAction'] = readiness['nextAction']
+    return result

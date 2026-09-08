@@ -229,6 +229,49 @@ class TestAutoHandoff(unittest.TestCase):
         self.assertEqual(len(self.sent), 2)
         self.assertEqual({x["id"] for x in api.Handler.DISPATCHES if x.get("handedOffTo")}, {"a", "b"})
 
+    # ── 本機問答不進接力 ─────────────────────────────────────────────
+
+    def test_本機問答撞額度也不接力(self):
+        """使用者只答應了「回答我一次」。額度用完是換人的理由，但本機問答
+        連「換人」本身都沒被答應 —— 接過去的是一個會改檔案的 CLI。
+        tool 與 mode 只要有一個對得上就擋：紀錄可能只剩其中一個欄位。"""
+        for kw in ({"tool": "local", "mode": "sync", "pid": None},
+                   {"tool": "local", "mode": "headless"},      # 只有 tool 對得上
+                   {"tool": "qwen", "mode": "sync"}):          # 只有 mode 對得上
+            with self.subTest(**kw):
+                api.Handler.DISPATCHES = []
+                self.sent = []
+                rec = self._rec(**kw)
+                self._run([dict(rec)])
+                src = api.Handler.DISPATCHES[0]
+                self.assertEqual(self.sent, [])
+                for flag in ("handedOffTo", "handoffWhy", "handoffHops"):
+                    self.assertNotIn(flag, src)
+
+    def test_本機問答全部限流也不標成等額度(self):
+        """標 handedOffTo=none 也是在說「這件在等接力」—— 本機問答不在這條路上"""
+        api.Handler._limited_tools = staticmethod(lambda: set(api.Handler.CLOUD_CHAIN))
+        rec = self._rec(tool="local", mode="sync", pid=None)
+        self._run([dict(rec)])
+        self.assertNotIn("handedOffTo", api.Handler.DISPATCHES[0])
+        self.assertEqual(self.sent, [])
+
+    def test_公開列被改過_登記表是本機的就不接(self):
+        """輪詢送進來的是給畫面看的列，認領前要以登記表那一份為準"""
+        self._rec(tool="local", mode="sync", pid=None)
+        forged = dict(api.Handler.DISPATCHES[0])
+        forged.update({"tool": "qwen", "mode": "headless"})
+        self._run([forged])
+        self.assertEqual(self.sent, [])
+        self.assertNotIn("handedOffTo", api.Handler.DISPATCHES[0])
+
+    def test_一般CLI撞額度照樣接力(self):
+        """界線只擋本機那一路，CLI 的自動接力不能被順手關掉"""
+        rec = self._rec(tool="qwen", mode="headless")
+        self._run([dict(rec)])
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(api.Handler.DISPATCHES[0]["handedOffTo"], "20260903-100100")
+
 
 if __name__ == "__main__":
     unittest.main()

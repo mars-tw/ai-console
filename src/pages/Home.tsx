@@ -6,12 +6,15 @@ import Adventure from '@/components/Adventure'
 import AskAI from '@/components/AskAI'
 import AISetup, { SetupWelcome } from '@/components/AISetup'
 import type { AIConnection } from '@/components/AISetup'
-import type { AskSession } from '@/components/AskAI'
+import type { AskPreflightState, AskSession, AskSubmitPlan, LocalSetupInfo } from '@/components/AskAI'
+import { askBlockMessage, askPreflight, localModels, pickSetupLocal, planAskSubmit, shouldRestoreDraft } from '@/components/AskAI'
 import { chatContext, nextChatModel, pickChatAnswer, retryChatHistory } from '@/lib/chatResponse'
 import Console from '@/components/Console'
 import ConversationSync from '@/components/ConversationSync'
 import Office from '@/components/Office'
 import QuickDispatch from '@/components/QuickDispatch'
+import ContinueWorkDialog from '@/components/ContinueWorkDialog'
+import { canOpenContinueWork } from '@/lib/continuationHelp'
 import SkillCenter from '@/components/SkillCenter'
 import { t, useLang } from '@/i18n'
 import LangSwitch from '@/components/LangSwitch'
@@ -47,7 +50,7 @@ export const BEGINNER_ACTIONS = [
 ] as const
 
 export function originalAiActionLabel(): string {
-  return '在原本的 AI 開啟'
+  return '繼續工作'
 }
 
 interface ConversationFilters {
@@ -104,6 +107,32 @@ export function shouldShowSearchNoResults(
     && titleCount === 0 && contentCount === 0 && hiddenCount === 0
 }
 
+export const SELECTED_KEY = 'ac_selected'
+
+/**
+ * 選取哪一份對話，只由這一條寫進 localStorage。
+ *
+ * 原本是寫在「載入對話內容」的 effect 裡（有 selected 才寫），於是回到首頁時
+ * 沒有人負責把它清掉 —— 重新整理又跳回剛剛那份對話，使用者按了「回首頁」
+ * 卻回不了家，而且找不到原因。回首頁時即使目前已經是 null 也要清，
+ * 因為上一次的值還躺在 storage 裡。
+ * 無痕模式／配額滿會丟例外，那不該讓「切換對話」整個壞掉，所以只回報成功與否。
+ */
+export function persistSelectedConversation(
+  id: string | null,
+  store: Pick<Storage, 'setItem' | 'removeItem'> | null =
+    typeof localStorage === 'undefined' ? null : localStorage,
+): boolean {
+  if (!store) return false
+  try {
+    if (id) store.setItem(SELECTED_KEY, id)
+    else store.removeItem(SELECTED_KEY)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function canDeleteFromConsole(c: ConversationSummary): boolean {
   return !c.readOnly && !SOURCE_MANAGED_DELETE_TOOLS.has(c.tool)
 }
@@ -155,7 +184,7 @@ function folderName(dir: string): string {
  * 舊版 localStorage 快取沒有這兩個欄位，讀回來就是 undefined，
  * 等同舊版行為 —— 不能因為升級就讓使用者的聊天紀錄壞掉。
  */
-interface ChatMsg {
+export interface ChatMsg {
   role: string
   text: string
   who?: string
@@ -188,6 +217,124 @@ const SYSTEM_REMINDER_BLOCK = /<system-reminder>[\s\S]*?<\/system-reminder>/g
 /** 一則訊息要顯示的文字。拿掉注入區塊後整則變空的，由呼叫端收合成一行小字 */
 function displayMessageText(text: string): string {
   return text.replace(SYSTEM_REMINDER_BLOCK, '').trim()
+}
+
+/** 只顯示有中文的對話：預設開著，只有明確存過 '0' 才關。 */
+export function onlyChineseDefault(stored: string | null): boolean {
+  return stored !== '0'
+}
+
+/** 續聊永遠打地端 /api/chat；旁邊就算有雲端連線也絕不自動接手。 */
+export function localChatEndpoint(): string {
+  return '/api/chat'
+}
+
+/** 續聊的前置狀態一律走地端分支（沒有 connectionId），可用性只認 /api/setup 的 local。 */
+export function localChatPreflightState(input: {
+  local: LocalSetupInfo | null
+  localLoading: boolean
+  model: string
+}): AskPreflightState {
+  return {
+    model: input.model,
+    local: input.local,
+    localLoading: input.localLoading,
+    connections: [],
+    connectionsLoading: false,
+    connectionsError: '',
+  }
+}
+
+/** 送出、Enter、重試共用同一個判斷：沒過就不准動歷史、輸入框或網路。 */
+export function planLocalChatSend(input: {
+  text: string
+  busy: boolean
+  local: LocalSetupInfo | null
+  localLoading: boolean
+  model: string
+}): AskSubmitPlan {
+  return planAskSubmit({ text: input.text, busy: input.busy, state: localChatPreflightState(input) })
+}
+
+export type ChatConsumed = { conversationId: string | null; draft: string; editSeq: number }
+
+/** 這次回應還算不算數：換過對話或又送了一次，舊結果就不能再改畫面。 */
+export function ownsChatResponse(input: {
+  requestSeq: number
+  requestId: number
+  selectedId: string | null
+  conversationId: string | null
+}): boolean {
+  return input.requestSeq === input.requestId && input.selectedId === input.conversationId
+}
+
+/** 失敗時把被吃掉的問題放回輸入框；使用者後來打的字（含打了又自己清掉）比舊句子重要。 */
+export function restoreChatDraft(input: {
+  consumed?: ChatConsumed
+  owns: boolean
+  currentInput: string
+  editSeq: number
+}): string | null {
+  if (!input.owns || !input.consumed) return null
+  return shouldRestoreDraft({
+    draft: input.consumed.draft,
+    currentInput: input.currentInput,
+    editSeqAtSend: input.consumed.editSeq,
+    editSeq: input.editSeq,
+  }) ? input.consumed.draft : null
+}
+
+/** 只收回「畫面上仍是這次寫進去的那一份」提問，別份對話的內容一個字都不能動。 */
+export function rollbackChatMessages(current: ChatMsg[], echoed: ChatMsg[] | null, prior: ChatMsg[]): ChatMsg[] {
+  return echoed && current === echoed ? prior : current
+}
+
+/** 從「接入 AI」回來要去哪。兩條路都不把舊對話內容交給任何服務。 */
+export function planSetupReturn(input: { origin: string | null; connectionId?: string }): {
+  view: 'list' | 'ask'
+  conversationId: string | null
+  connectionId?: string
+  carryHistory: false
+} {
+  if (!input.connectionId && input.origin) return { view: 'list', conversationId: input.origin, carryHistory: false }
+  return { view: 'ask', conversationId: input.origin, connectionId: input.connectionId, carryHistory: false }
+}
+
+/**
+ * 設定頁可以回報「使用者剛剛在地端選好的那個模型」。
+ * 沒有回報（舊的呼叫端、雲端連線、或空字串）就維持原本的選擇 ——
+ * 這個參數是選用的，不能因為沒帶就把使用者選過的模型洗掉。
+ */
+export function setupReturnModel(current: string, localModel?: unknown): string {
+  return typeof localModel === 'string' && localModel.trim() ? localModel.trim() : current
+}
+
+/** 續聊紅字的來源：事前判斷擋下來的，還是真的送出後失敗的。 */
+export type ChatErrorKind = 'preflight' | 'chat'
+export type ChatErrorState = { kind: ChatErrorKind; text: string } | null
+
+/**
+ * 地端恢復可用之後，只清掉已經過期的事前提示。
+ *
+ * 實測：接入 AI 回到原對話後送出鈕已經可以按，畫面上那行紅色的
+ * 「地端 AI 還沒準備好」卻留著 —— 使用者不知道該相信哪一個。
+ * 但反過來也不能一律清掉：真的路由／傳輸／模型失敗的訊息若被一次
+ * GET 狀態刷新抹掉，使用者會以為剛剛那次送出成功了。
+ * 用旗標分辨來源，不去比對翻譯後的字串（換語言就會失效）。
+ */
+export function nextChatError(current: ChatErrorState, ready: boolean): ChatErrorState {
+  if (!ready || !current) return current
+  return current.kind === 'preflight' ? null : current
+}
+
+/** 側欄看不看得見。窄視窗的浮層只是暫時收起，桌面偏好一個字都不會被改寫。 */
+export function sidebarVisible(input: {
+  pref?: boolean
+  fallback: boolean
+  narrow: boolean
+  dismissed: boolean
+}): boolean {
+  return (input.pref ?? input.fallback) && !(input.narrow && input.dismissed)
 }
 
 /** 標題裡有沒有中文 */
@@ -244,7 +391,7 @@ export default function Home() {
    * 做成開關而不是寫進索引器 —— 那是使用習慣不是資料性質，
    * 寫死的話哪天用英文開一個對話就會憑空消失而且找不到原因。
    */
-  const [onlyCJK, setOnlyCJK] = useState(() => localStorage.getItem('ac_onlyCJK') !== '0')
+  const [onlyCJK, setOnlyCJK] = useState(() => onlyChineseDefault(localStorage.getItem('ac_onlyCJK')))
   /** 打開垃圾桶：看被規則收起來的那些 */
   const [showTrash, setShowTrash] = useState(false)
   /**
@@ -276,15 +423,35 @@ export default function Home() {
   const [copied, setCopied] = useState('')
   const [apiOk, setApiOk] = useState(false)
   const [liveTools, setLiveTools] = useState<IndexData['tools'] | null>(null)
-  const [busy, setBusy] = useState('')
+  const [continueTarget, setContinueTarget] = useState<ConversationSummary | null>(null)
+  const [continueSetupId, setContinueSetupId] = useState<string | null>(null)
   const [toast, setToast] = useState('')
-  const [models, setModels] = useState<string[]>([])
+  /**
+   * 地端能不能用，只認 /api/setup 的 local。
+   * /api/models 是庫存清單：「有這個檔案」不等於「現在載得動」，
+   * 拿庫存當準備好，使用者按下送出才會撞上載入失敗，而問題已經被吃掉了。
+   */
+  const [localSetup, setLocalSetup] = useState<LocalSetupInfo | null>(null)
+  const [localSetupLoading, setLocalSetupLoading] = useState(true)
   const [chatModel, setChatModel] = useState('auto')
   const [routeInfo, setRouteInfo] = useState('')
   const [routedModel, setRoutedModel] = useState('')
   const [chatMsgs, setChatMsgs] = useState<ChatMsg[]>([])
   const [chatInput, setChatInput] = useState('')
+  const [chatError, setChatErrorState] = useState<ChatErrorState>(null)
+  /** 紅字一律標來源：事前提示（preflight）可以在恢復可用時清掉，真失敗不行。 */
+  const setChatError = (text: string, kind: ChatErrorKind = 'chat') =>
+    setChatErrorState(text ? { kind, text } : null)
   const chatDrafts = useRef<Record<string, string>>({})
+  /** 輸入框現在真正的內容。非同步回來時閉包裡那份是送出前的舊值，不能拿來判斷。 */
+  const chatInputRef = useRef(chatInput)
+  chatInputRef.current = chatInput
+  /** 使用者自己動過續聊輸入框的次數；失敗要不要把問題放回去看它。 */
+  const chatEditSeq = useRef(0)
+  /** 按下送出到 React 把 busy 畫出來之間還有幾毫秒，連按兩下不能送兩次。 */
+  const chatInFlight = useRef(false)
+  /** 進行中的那一次送出借走了什麼：屬於哪份對話、吃掉的草稿、寫進去的那個陣列。 */
+  const chatActive = useRef<{ conversationId: string | null; consumed?: ChatConsumed } | null>(null)
   const [chatBusy, setChatBusy] = useState(false)
   /** 地端推論已經等了幾秒。沒有這個數字，畫面只有一行不會動的「思考中…」 */
   const [chatSecs, setChatSecs] = useState(0)
@@ -323,11 +490,25 @@ export default function Home() {
   )
   const [viewMode, setViewMode] = useState<'list' | 'ask' | 'console' | 'office' | 'rpg' | 'skills' | 'setup'>('list')
   const [askSession, setAskSession] = useState<AskSession>({ model: 'auto', messages: [], input: '' })
+  /**
+   * 快速派工的工作草稿，依對話 id 分開存。
+   *
+   * 只放在記憶體：去設定頁再回來、QuickDispatch 被卸載重掛，寫到一半的工單
+   * 都還在；但不寫 localStorage —— 工單常含專案路徑與內部細節，不該留在磁碟上。
+   */
+  const [quickDrafts, setQuickDrafts] = useState<Record<string, string>>({})
+  /**
+   * 主控台輸入框的內容，跟 quickDrafts 同樣的理由：只放記憶體。
+   *
+   * 主控台在「還沒接入 AI」時會把人送去設定頁，而那是一次分頁切換 ——
+   * Console 整個 unmount，打到一半的任務就沒了。接完回來看到空白輸入框，
+   * 使用者只會覺得剛剛白打一場。這裡存著，兩個 Console 分支都吃同一份。
+   * 一樣不寫 localStorage：任務常含專案路徑與內部細節。
+   */
+  const [consoleDraft, setConsoleDraft] = useState('')
   const [syncOpen, setSyncOpen] = useState(false)
-  const startSetupChat = (connection?: AIConnection) => {
-    setAskSession(current => ({ ...current, connectionId: connection?.id, connectionModels: connection?.models, model: connection?.model || 'auto' }))
-    setViewMode('ask')
-  }
+  /** 從哪一份對話按「去設定 AI」進來的。設定完要回得去，而且中途不清任何草稿。 */
+  const [setupOrigin, setSetupOrigin] = useState<string | null>(null)
   /**
    * 側欄開合。
    *
@@ -339,9 +520,32 @@ export default function Home() {
   const [sidebarPref, setSidebarPref] = useState<Record<string, boolean>>(() => {
     try { return JSON.parse(localStorage.getItem('ac_sidebar') || '{}') } catch { return {} }
   })
-  const sidebarOpen = sidebarPref[viewMode]
-    ?? (viewMode === 'list' && (typeof window === 'undefined' || window.innerWidth >= 640))
+  /**
+   * 窄視窗的側欄是蓋住主區的浮層，寬視窗是常駐欄位 —— 兩者要分開處理。
+   * 收浮層只改這個暫時的旗標，絕不把桌面的偏好寫成 false，
+   * 不然手機收一次，回到桌面清單就整個消失了。
+   */
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      && window.matchMedia('(max-width: 639px)').matches,
+  )
+  const [overlayDismissed, setOverlayDismissed] = useState(false)
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+    const query = window.matchMedia('(max-width: 639px)')
+    const onChange = (e: MediaQueryListEvent) => setNarrow(e.matches)
+    setNarrow(query.matches)
+    query.addEventListener('change', onChange)
+    return () => query.removeEventListener('change', onChange)
+  }, [])
+  const sidebarOpen = sidebarVisible({
+    pref: sidebarPref[viewMode],
+    fallback: viewMode === 'list' && (typeof window === 'undefined' || window.innerWidth >= 640),
+    narrow,
+    dismissed: overlayDismissed,
+  })
   const setSidebarOpen = (v: boolean) => {
+    if (v) setOverlayDismissed(false)   // 手動拉回來永遠有效
     setSidebarPref((s) => {
       const next = { ...s, [viewMode]: v }
       try { localStorage.setItem('ac_sidebar', JSON.stringify(next)) } catch { /* 存不了不影響使用 */ }
@@ -356,15 +560,38 @@ export default function Home() {
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 4000) }
 
+  /**
+   * 離開一份對話之前先把它的草稿收好。
+   * 使用者現在打的字優先；如果這一次送出已經把輸入框吃掉、而他沒有再打新的，
+   * 那句被吃掉的問題就是這份對話的草稿 —— 不收好，換一下對話它就永遠不見了。
+   */
+  const stashChatDraft = (id: string | null) => {
+    if (!id) return
+    const active = chatActive.current
+    const restored = restoreChatDraft({
+      consumed: active && active.conversationId === id ? active.consumed : undefined,
+      owns: true,
+      currentInput: chatInputRef.current,
+      editSeq: chatEditSeq.current,
+    })
+    chatDrafts.current[id] = restored ?? chatInputRef.current
+  }
+
   /** 換對話要當下中止地端請求，並讓任何已經在回程上的舊結果失效。 */
   const selectConversation = (id: string | null) => {
+    // 先同步落地。回首頁時 id 已經是 null 也要走這一步，否則下面就 return 了，
+    // 舊的 ac_selected 會留著，重新整理直接把人彈回剛剛那份對話。
+    persistSelectedConversation(id)
     if (id === selectedIdRef.current) return
-    if (selectedIdRef.current) chatDrafts.current[selectedIdRef.current] = chatInput
+    stashChatDraft(selectedIdRef.current)
     setChatInput(id ? chatDrafts.current[id] || '' : '')
+    setChatError('')
     selectedIdRef.current = id
     chatRequestSeq.current += 1
     chatAbort.current?.abort()
     chatAbort.current = null
+    chatActive.current = null
+    chatInFlight.current = false
     setChatBusy(false)
     setChatSecs(0)
     setRouteInfo('')
@@ -399,10 +626,6 @@ export default function Home() {
       setApiOk(true)
       fetch('/api/status').then((r2) => r2.ok ? r2.json() : null)
         .then((d) => d?.tools && setLiveTools(d.tools)).catch(() => {})
-      fetch('/api/models').then((r3) => r3.ok ? r3.json() : null)
-        .then((d) => {
-          if (d?.models?.length) setModels(d.models)
-        }).catch(() => {})
     }).catch(() => setApiOk(false))
   }, [])
 
@@ -411,6 +634,63 @@ export default function Home() {
     const timer = setInterval(checkApi, 20000)
     return () => clearInterval(timer)
   }, [checkApi])
+
+  /** 地端可用性。讀不到就是不知道能不能送，一律當成還沒準備好。 */
+  const refreshLocalSetup = useCallback(async (signal?: AbortSignal) => {
+    setLocalSetupLoading(true)
+    try {
+      const response = await fetch('/api/setup', { signal, cache: 'no-store' })
+      const data = response.ok ? await response.json() : null
+      if (!signal?.aborted) setLocalSetup(pickSetupLocal(response.ok, data))
+    } catch (failure) {
+      if ((failure as Error)?.name === 'AbortError') return
+      setLocalSetup(null)
+    } finally {
+      if (!signal?.aborted) setLocalSetupLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void refreshLocalSetup(controller.signal)
+    return () => controller.abort()
+  }, [refreshLocalSetup])
+
+  /** 真正載得動的模型；庫存清單（/api/models）不算數。 */
+  const readyModels = useMemo(() => localModels(localSetup), [localSetup])
+  const chatPreflight = askPreflight(localChatPreflightState({
+    local: localSetup, localLoading: localSetupLoading, model: chatModel,
+  }))
+  const chatBlocked = chatPreflight.ok ? null : chatPreflight.reason
+
+  // 地端重新可用時，把過期的事前提示收掉；真正送出失敗的訊息留在畫面上。
+  useEffect(() => {
+    setChatErrorState((current) => nextChatError(current, !chatBlocked))
+  }, [chatBlocked])
+
+  /**
+   * 設定完成之後要去哪。
+   *
+   * 地端裝好、而且是從某份對話按進來的：回那份對話繼續接續，重新確認可用性，
+   * 不自動送出任何東西。選了雲端連線：另開一個新的問答，舊對話的內容與草稿
+   * 留在原地，一個字都不會被帶去那個服務。
+   */
+  const startSetupChat = (connection?: AIConnection, localModel?: string) => {
+    void refreshLocalSetup()
+    const plan = planSetupReturn({ origin: setupOrigin, connectionId: connection?.id })
+    if (plan.view === 'list' && plan.conversationId) {
+      // 剛剛在設定頁選好的地端模型直接沿用，使用者不必回來再選一次；
+      // 沒回報就維持原本的選擇，而且一樣不自動送出任何東西。
+      setChatModel(current => setupReturnModel(current, localModel))
+      setSetupOrigin(null)
+      setSyncOpen(false)
+      setViewMode('list')
+      selectConversation(plan.conversationId)
+      return
+    }
+    setAskSession(current => ({ ...current, connectionId: connection?.id, connectionModels: connection?.models, model: connection?.model || setupReturnModel('auto', localModel) }))
+    setViewMode('ask')
+  }
 
   /**
    * 全域快捷鍵。
@@ -582,23 +862,37 @@ export default function Home() {
     } catch { showToast(t('控制 API 無回應')) }
   }
 
-  const launch = async (c: ConversationSummary) => {
-    setBusy(c.id)
-    try {
-      const r = await fetch('/api/launch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: c.id }) })
-      const d = await r.json()
-      if (d.ok) showToast(t('已開啟終端：{cmd}', { cmd: d.cmd }))
-      else {
-        if (c.resume) {
-          copy(c.resume, 'resume')
-          showToast(t('此工具無法直接啟動，已改為複製接續指令'))
-        } else {
-          showToast(t('無法啟動：{err}', { err: d.error || '' }))
-        }
-      }
-    } catch { showToast(t('控制 API 無回應')) }
-    setBusy('')
-  }
+  const openContinueWork = useCallback((c: ConversationSummary) => {
+    if (!canOpenContinueWork(c)) {
+      showToast(t('匯入的對話僅供閱讀，請在原本的 AI 操作。'))
+      return
+    }
+    setContinueSetupId(null)
+    setContinueTarget(c)
+  }, [])
+
+  const closeContinueWork = useCallback(() => setContinueTarget(null), [])
+
+  const openSetupFromContinueWork = useCallback(() => {
+    if (!continueTarget) return
+    setContinueSetupId(continueTarget.id)
+    setContinueTarget(null)
+    setViewMode('setup')
+  }, [continueTarget])
+
+  const returnToContinueWork = useCallback(() => {
+    const id = continueSetupId
+    if (!id || !index) return
+    const conv = index.conversations.find((c) => c.id === id)
+    if (!conv) return
+    setContinueSetupId(null)
+    setSyncOpen(false)
+    setViewMode('list')
+    selectConversation(id)
+    setContinueTarget(conv)
+    // selectConversation 來自同一元件、行為穩定；列入 deps 會在每次 render 換參考
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable selectConversation
+  }, [continueSetupId, index])
 
   /**
    * 換對話時重置聊天串，並還原本機暫存。
@@ -683,19 +977,44 @@ export default function Home() {
     return () => cancelAnimationFrame(id)
   }, [detail, detailLoading])
 
-  const runChat = async (text: string, chosenModel: string, history: ChatMsg[]) => {
-    if (!text || chatBusy || !chosenModel) return
+  /**
+   * 送一次地端續聊。
+   *
+   * 順序是重點：能不能送必須在碰畫面之前就算完（planLocalChatSend）——
+   * 原本先把提問寫進歷史、清掉輸入框，才發現沒有模型或路由失敗然後直接 return，
+   * 使用者打的那句話就這樣被吃掉了。路由與 /api/chat 的非 200／ok:false 一律丟出去，
+   * 走同一條失敗善後：還草稿、收回沒被回答的提問。
+   */
+  const runChat = async (rawText: string, chosenModel: string, history: ChatMsg[], consumed?: ChatConsumed) => {
+    const plan = planLocalChatSend({
+      text: rawText,
+      busy: chatBusy || chatInFlight.current,
+      local: localSetup,
+      localLoading: localSetupLoading,
+      model: chosenModel,
+    })
+    if (plan.action !== 'send') {
+      if (plan.action === 'blocked') setChatError(t(askBlockMessage(plan.reason)), 'preflight')
+      return
+    }
+    const text = plan.text
     const conversationId = selected?.id ?? null
     const requestId = chatRequestSeq.current + 1
     chatRequestSeq.current = requestId
-    const isCurrent = () => (
-      chatRequestSeq.current === requestId && selectedIdRef.current === conversationId
-    )
+    chatInFlight.current = true
+    const isCurrent = () => ownsChatResponse({
+      requestSeq: chatRequestSeq.current,
+      requestId,
+      selectedId: selectedIdRef.current,
+      conversationId,
+    })
     const ac = new AbortController()
     chatAbort.current = ac
-    const next = [...history, { role: 'user', text }]
-    setChatMsgs(next)
-    setChatInput('')
+    const echoed: ChatMsg[] = [...history, { role: 'user', text }]
+    chatActive.current = { conversationId, consumed }
+    setChatError('')
+    setChatMsgs(echoed)
+    if (consumed) setChatInput('')   // 只有真的吃掉草稿的那條路才清輸入框；重試不動它
     setChatBusy(true)
     setChatSecs(0)
     try {
@@ -703,20 +1022,16 @@ export default function Home() {
       let useModel = chosenModel
       if (chosenModel === 'auto') {
         const rr = await fetch('/api/route?task=' + inferTask(), { signal: ac.signal })
-        const rd = await rr.json()
+        const rd = await rr.json().catch(() => null)
         if (!isCurrent()) return
-        if (rd.ok && rd.model) {
-          useModel = rd.model
-          setRoutedModel(rd.model)
-          setRouteInfo(t('自動選擇：{model} — {reason}', { model: rd.model, reason: rd.reason }))
-        } else {
-          setRouteInfo(rd.reason || t('自動路由失敗'))
-          return
-        }
+        if (!rr.ok || !rd?.ok || !rd.model) throw new Error(rd?.reason || rd?.error || t('自動路由失敗'))
+        useModel = rd.model
+        setRoutedModel(rd.model)
+        setRouteInfo(t('自動選擇：{model} — {reason}', { model: rd.model, reason: rd.reason }))
       }
       if (!isCurrent()) return
 
-      const r = await fetch('/api/chat', {
+      const r = await fetch(localChatEndpoint(), {
         method: 'POST',
         signal: ac.signal,
         headers: { 'Content-Type': 'application/json' },
@@ -724,42 +1039,70 @@ export default function Home() {
           model: useModel,
           messages: [
             { role: 'system', content: t('你正在接續一段來自其他 AI 工具的對話。以下是對話的近期內容，請直接延續脈絡，用繁體中文回答。') },
-            ...chatContext(next).map((m) => ({ role: m.role, content: m.text })),
+            ...chatContext(echoed).map((m) => ({ role: m.role, content: m.text })),
           ],
         }),
       })
-      const d = await r.json()
+      const d = await r.json().catch(() => null)
       if (!isCurrent()) return
-      const picked = r.ok && d.ok ? pickChatAnswer(d.content, d.reasoning)
-        : { text: `⚠️ ${d.error || t('呼叫失敗')}`, excludeFromContext: true }
-      const reply: ChatMsg = { role: 'assistant', ...picked, who: useModel }
-      if (picked.excludeFromContext) {
+      if (!r.ok || !d?.ok) throw new Error(d?.error || `HTTP ${r.status}`)
+      const reply: ChatMsg = { role: 'assistant', ...pickChatAnswer(d.content, d.reasoning), who: useModel }
+      if (reply.excludeFromContext) {
         reply.retryText = text
-        reply.retryModel = nextChatModel(models, useModel)
+        reply.retryModel = nextChatModel(readyModels, useModel)
       }
-      const finalMsgs = [...next, reply]
+      const finalMsgs = [...echoed, reply]
       setChatMsgs(finalMsgs)
       if (conversationId) localStorage.setItem('ac_chat_' + conversationId, JSON.stringify(finalMsgs.slice(-30)))
     } catch (e) {
-      // 換對話造成的 abort 屬於舊對話，不能把「已取消」塞進新對話。
+      // 換對話造成的 abort 屬於舊對話，不能把結果塞進新對話。
       if (!isCurrent()) return
-      // 自己按「不等了」不是錯誤，不能報成「控制 API 無回應」——
-      // 那會讓人以為是後端掛了，然後去重開伺服器找一個不存在的問題。
-      if ((e as Error)?.name === 'AbortError') {
-        setChatMsgs([...next, { role: 'assistant', text: t('（已取消，沒有等這一次的回覆）'), excludeFromContext: true }])
+      const aborted = (e as Error)?.name === 'AbortError'
+      const why = aborted
+        ? t('（已取消，沒有等這一次的回覆）')
+        : `⚠️ ${(e as Error)?.message || t('控制 API 無回應')}`
+      // 沒有再打新的字，就把問題原封不動放回輸入框，順手收回那則沒人回答的提問。
+      const restored = restoreChatDraft({ consumed, owns: true, currentInput: chatInputRef.current, editSeq: chatEditSeq.current })
+      if (restored !== null) {
+        setChatInput(restored)
+        setChatMsgs((current) => rollbackChatMessages(current, echoed, history))
+        // 不能說「沒有送出」：POST 已經出去了，只是沒等到可信的回覆 ——
+        // 後端可能已經受理。只講我們真的知道的事。
+        setChatError(`${why} ${t('尚未確認回覆，問題已放回輸入框。')}`)
       } else {
-        setChatMsgs([...next, { role: 'assistant', text: t('⚠️ 控制 API 無回應'), excludeFromContext: true }])
+        // 使用者已經在打下一句了：留著提問，改標成不進上下文，並附上重試。
+        const failure: ChatMsg = { role: 'assistant', text: why, excludeFromContext: true }
+        if (!aborted) {
+          failure.retryText = text
+          failure.retryModel = chosenModel === 'auto' ? 'auto' : nextChatModel(readyModels, chosenModel) || chosenModel
+        }
+        setChatMsgs((current) => (current === echoed ? [...echoed, failure] : current))
+        setChatError(why)
       }
     } finally {
+      // 同步鎖也要在同一個歸屬判斷裡放開。原本放在外面：舊請求（已被中止）的
+      // finally 比較晚跑，就會把「新對話那一次送出」的鎖一起解掉，
+      // 連按兩下等於送出兩次。換對話／清空仍由 selectConversation、clearChat
+      // 明確重置，這裡不必替它們代勞。
       if (isCurrent()) {
+        chatInFlight.current = false
         if (chatAbort.current === ac) chatAbort.current = null
+        chatActive.current = null
         setChatBusy(false)
       }
     }
   }
 
-  const sendChat = () => runChat(chatInput.trim(), chatModel, chatMsgs.length ? chatMsgs : recentContextMsgs())
+  const sendChat = () => {
+    const consumed: ChatConsumed = {
+      conversationId: selected?.id ?? null,
+      draft: chatInput,
+      editSeq: chatEditSeq.current,
+    }
+    void runChat(chatInput, chatModel, chatMsgs.length ? chatMsgs : recentContextMsgs(), consumed)
+  }
 
+  /** 重試只重送那一句失敗的話，不吃現在輸入框裡的新草稿。 */
   const retryChat = (index: number) => {
     const failed = chatMsgs[index]
     const history = retryChatHistory(chatMsgs, index)
@@ -771,6 +1114,9 @@ export default function Home() {
     chatRequestSeq.current += 1
     chatAbort.current?.abort()
     chatAbort.current = null
+    chatActive.current = null
+    chatInFlight.current = false
+    setChatError('')
     setChatBusy(false)
     setChatSecs(0)
     setRouteInfo('')
@@ -827,7 +1173,8 @@ export default function Home() {
   const selectedHasMessages = selected?.hasMessages ?? false
   useEffect(() => {
     if (!selected) return
-    localStorage.setItem('ac_selected', selected.id)
+    // 這裡不再重寫 ac_selected：唯一的寫入點是 selectConversation。
+    // 兩個地方都寫，回首頁清掉之後索引一重載又被這個 effect 寫回去。
     if (!selected.hasMessages) return
     const controller = new AbortController()
     setDetailLoading(true)
@@ -1036,6 +1383,79 @@ export default function Home() {
   // overflow-x-auto 是保險：視窗再窄一點時分頁列會變成可橫捲，
   // 而不是把最後一個分頁擠到看不見的地方。
   // 子項全部 flex-none，不然它們會被壓扁成一團看不懂的字。
+  /**
+   * 回首頁。選一份對話之後，畫面上原本沒有任何一個「回去」的出口 ——
+   * 實測第一次用的人點進一份對話就卡在那裡，只能重新整理（而且重新整理
+   * 還會回到同一份對話）。所以：清掉選取、關掉同步視窗、回到「你現在想做什麼？」。
+   * 只是換畫面，不刪任何對話，也不動「直接問 AI」那一串已經打好的字。
+   */
+  const goHome = () => {
+    selectConversation(null)
+    setSyncOpen(false)
+    setSetupOrigin(null)
+    setContinueSetupId(null)
+    setViewMode('list')
+    // 390px 的手機上側欄是蓋住主區的浮層：不收起來，回到首頁也只看得到清單。
+    // 只動這個暫時旗標，桌面那份「側欄要開著」的偏好不碰。
+    if (narrow) setOverlayDismissed(true)
+  }
+
+  /** 從續聊區去設定 AI：記住是哪一份對話，選取、草稿與上下文全部留在原地。 */
+  const openSetupFromChat = () => {
+    if (selected) setSetupOrigin(selected.id)
+    setViewMode('setup')
+  }
+
+  /** 設定途中隨時回得去原本那份對話，不必重找。 */
+  const returnToSetupOrigin = () => {
+    const id = setupOrigin
+    if (!id) return
+    setSetupOrigin(null)
+    setSyncOpen(false)
+    setViewMode('list')
+    selectConversation(id)
+    void refreshLocalSetup()
+  }
+
+  /**
+   * 首頁鈕自己一列，放在分頁列外面。
+   *
+   * 分頁列是 overflow-x-auto：390px 的手機上最後幾個分頁本來就被捲到看不見，
+   * 「回首頁」擠進去等於做了一個找不到的出口。它也放在側欄浮層外面 ——
+   * 手機把對話清單拉開時，那層浮層蓋住主區的左邊 320px。
+   */
+  const homeBar = (
+    <div className="z-30 flex flex-none items-center gap-2 border-b border-line bg-panel px-3 py-1.5">
+      <button
+        type="button"
+        className="flex-none rounded-md border border-line px-3 py-1 text-xs font-medium text-ink2 hover:bg-elev focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+        onClick={goHome}
+        aria-label={t('回首頁／開始新任務')}
+      >
+        🏠 {t('回首頁／開始新任務')}
+      </button>
+      {setupOrigin && (
+        <button
+          type="button"
+          className="flex-none rounded-md border border-line px-3 py-1 text-xs font-medium text-ink2 hover:bg-elev focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+          onClick={returnToSetupOrigin}
+        >
+          ↩ {t('返回原對話接續')}
+        </button>
+      )}
+      {continueSetupId && (
+        <button
+          type="button"
+          className="flex-none rounded-md border border-line px-3 py-1 text-xs font-medium text-ink2 hover:bg-elev focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+          onClick={returnToContinueWork}
+        >
+          ↩ {t('返回繼續工作')}
+        </button>
+      )}
+      <span className="min-w-0 flex-1 truncate text-xs text-mute3">{t('隨時可以回到這裡重新開始，已經打好的問題不會消失。')}</span>
+    </div>
+  )
+
   const tabs = (
     <div className="flex flex-none items-center gap-1 overflow-x-auto border-b border-line px-3 py-1.5">
       {([
@@ -1058,6 +1478,7 @@ export default function Home() {
 
   if (!index) return (
     <div className="flex h-screen flex-col bg-panel text-ink">
+      {homeBar}
       <main className="flex min-w-0 flex-1 flex-col">
         {tabs}
         {viewMode === 'setup' ? (
@@ -1065,13 +1486,17 @@ export default function Home() {
         ) : viewMode === 'ask' ? (
           <AskAI session={askSession} onSessionChange={setAskSession} onSetup={() => setViewMode('setup')} />
         ) : viewMode === 'console' ? (
-          <Console />
+          <Console
+            draft={consoleDraft}
+            onDraftChange={setConsoleDraft}
+            onSetup={() => setViewMode('setup')}
+          />
         ) : viewMode === 'office' ? (
-          <Office tools={liveTools ?? {}} projects={[]} conversations={[]} onDispatch={launch} busyId={busy} />
+          <Office tools={liveTools ?? {}} projects={[]} conversations={[]} onDispatch={openContinueWork} busyId="" />
         ) : viewMode === 'rpg' ? (
           <Adventure tools={liveTools ?? {}} />
         ) : viewMode === 'skills' ? (
-          <SkillCenter />
+          <SkillCenter onOpenSetup={() => { setSetupOrigin(null); setViewMode('setup') }} />
         ) : (
           error ? (
             <div className="min-h-0 flex-1 overflow-y-auto">
@@ -1102,6 +1527,7 @@ export default function Home() {
 
   return (
     <div className="flex h-screen flex-col bg-panel text-ink">
+      {homeBar}
       <div className="relative flex min-h-0 flex-1">
         {/* ── 側欄 ───────────────────────────
             在「📋 對話」以外的分頁預設收起來。
@@ -1117,7 +1543,16 @@ export default function Home() {
         <aside className="absolute inset-y-0 left-0 z-20 flex w-[min(20rem,calc(100vw-2rem))] flex-none flex-col border-r border-line bg-panel shadow-xl sm:relative sm:z-auto sm:w-64 sm:shadow-none lg:w-80">
           <div className="border-b border-line p-3">
             <div className="mb-2 flex items-baseline justify-between gap-2">
-              <h1 className="text-lg font-medium">{t('AI 控制台')}</h1>
+              <h1 className="text-lg font-medium">
+                <button
+                  type="button"
+                  className="rounded text-left hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                  onClick={goHome}
+                  title={t('回首頁／開始新任務')}
+                >
+                  {t('AI 控制台')}
+                </button>
+              </h1>
               <span className="min-w-0 flex-1 truncate text-right text-xs text-mute3">
                 {t('{time}更新', { time: relTime(index.generated_at) })}
               </span>
@@ -1371,10 +1806,10 @@ export default function Home() {
                         title={t('派工：接續此資料夾最新的對話')}
                         onClick={() => {
                           const target = convs.find((c) => c.resume)
-                          if (target) launch(target)
+                          if (target) openContinueWork(target)
                         }}
                       >
-                        {busy && convs.some((c) => c.id === busy) ? '…' : t('▶ 派工')}
+                        {t('▶ 派工')}
                       </button>
                     )}
                   </div>
@@ -1470,19 +1905,23 @@ export default function Home() {
           ) : viewMode === 'ask' ? (
             <AskAI session={askSession} onSessionChange={setAskSession} onSetup={() => setViewMode('setup')} />
           ) : viewMode === 'console' ? (
-            <Console />
+            <Console
+              draft={consoleDraft}
+              onDraftChange={setConsoleDraft}
+              onSetup={() => setViewMode('setup')}
+            />
           ) : viewMode === 'office' ? (
             <Office
               tools={liveTools ?? index.tools}
               projects={index.projects}
               conversations={index.conversations}
-              onDispatch={launch}
-              busyId={busy}
+              onDispatch={openContinueWork}
+              busyId=""
             />
           ) : viewMode === 'rpg' ? (
             <Adventure tools={liveTools ?? index.tools} />
           ) : viewMode === 'skills' ? (
-            <SkillCenter />
+            <SkillCenter onOpenSetup={() => { setSetupOrigin(null); setViewMode('setup') }} />
           ) : syncOpen ? (
             <ConversationSync
               index={index}
@@ -1563,13 +2002,13 @@ export default function Home() {
                   {selected.resume && (
                     <button
                       className="rounded-md bg-ink px-3 py-1.5 text-sm font-medium text-invink hover:bg-ink2 disabled:opacity-40"
-                      disabled={!apiOk || busy === selected.id}
-                      onClick={() => launch(selected)}
+                      disabled={!apiOk || !canOpenContinueWork(selected)}
+                      onClick={() => openContinueWork(selected)}
                     >
-                      {busy === selected.id ? t('開啟中…') : t(originalAiActionLabel())}
+                      {t(originalAiActionLabel())}
                     </button>
                   )}
-                  {!apiOk && selected.resume && <span className="text-amber-600">{t('控制 API 離線，重開控制台後即可開啟。')}</span>}
+                  {!apiOk && selected.resume && <span className="text-amber-600">{t('控制 API 離線，重開控制台後即可繼續工作。')}</span>}
                 </div>
                 <details className="mt-2 text-xs text-mute3">
                   <summary className="cursor-pointer hover:text-ink3">{t('進階資訊')}</summary>
@@ -1678,11 +2117,14 @@ export default function Home() {
                       <span className="text-sm font-medium">{t('💬 用地端模型接續')}</span>
                       <select
                         className="rounded-md border border-line2 bg-panel px-2 py-1 text-xs text-ink2 [&>option]:bg-panel [&>option]:text-ink2"
-                        value={chatModel}
+                        disabled={localSetupLoading || !readyModels.length}
+                        value={localSetupLoading || !readyModels.length ? '' : chatModel}
                         onChange={(e) => setChatModel(e.target.value)}
                       >
-                        <option value="auto">{t('🤖 自動（依狀態路由）')}</option>
-                        {models.map((m) => <option key={m} value={m}>{m}</option>)}
+                        {localSetupLoading || !readyModels.length
+                          ? <option value="" disabled>{localSetupLoading ? t('正在檢查地端模型…') : t('尚未安裝地端模型')}</option>
+                          : <option value="auto">{t('🤖 自動（依狀態路由）')}</option>}
+                        {readyModels.map((m) => <option key={m} value={m}>{m}</option>)}
                       </select>
                       {chatMsgs.length === 0 && detail?.messages?.length ? (
                         <button className="rounded-md border border-line px-2 py-1 text-xs hover:bg-elev" onClick={seedChat}>
@@ -1697,6 +2139,31 @@ export default function Home() {
                         </button>
                       )}
                     </div>
+                    {/* 還沒準備好就把話講在前面：為什麼不能送、下一步去哪、以及
+                        「你打的字會留著」—— 按下去才發現不能送、問題又不見了，
+                        是原本最傷人的那個壞法。 */}
+                    {chatBlocked && (
+                      <div role="status" aria-live="polite" className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+                        <span>{t(askBlockMessage(chatBlocked))}</span>
+                        <span>{t('你打的字會留著，設定好再送出就行。')}</span>
+                        <button
+                          type="button"
+                          className="rounded border border-amber-400 px-2 py-0.5 hover:bg-amber-100 dark:hover:bg-amber-900"
+                          onClick={openSetupFromChat}
+                        >
+                          {t('去設定地端 AI')}
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded border border-line px-2 py-0.5 hover:bg-elev disabled:opacity-40"
+                          disabled={localSetupLoading}
+                          onClick={() => void refreshLocalSetup()}
+                        >
+                          {localSetupLoading ? t('檢查中…') : t('重新檢查')}
+                        </button>
+                      </div>
+                    )}
+                    {chatError && <div role="alert" className="mb-2 text-xs text-amber-600 dark:text-amber-400">{chatError.text}</div>}
                     {routeInfo && <div role="status" aria-live="polite" className="mb-2 text-xs text-amber-600 dark:text-amber-400">{routeInfo}</div>}
                     {chatMsgs.length > 0 && (
                       <div
@@ -1733,7 +2200,7 @@ export default function Home() {
                                 </details>
                               )}
                               {m.retryModel && i === chatMsgs.length - 1 && (
-                                <button type="button" className="mt-2 rounded border border-line2 px-2.5 py-1 text-xs disabled:opacity-40" disabled={chatBusy} onClick={() => retryChat(i)}>
+                                <button type="button" className="mt-2 rounded border border-line2 px-2.5 py-1 text-xs disabled:opacity-40" disabled={chatBusy || !!chatBlocked} onClick={() => retryChat(i)}>
                                   {t('換個模型再問一次')}
                                 </button>
                               )}
@@ -1776,12 +2243,13 @@ export default function Home() {
                             ? t('這份對話沒有可帶入的內容，地端模型看不到它')
                             : t('直接輸入會自動帶入近期訊息當上下文')}
                         value={chatInput}
-                        onChange={(e) => setChatInput(e.target.value)}
+                        onChange={(e) => { chatEditSeq.current += 1; setChatInput(e.target.value) }}
                         onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat() } }}
                       />
                       <button
                         className="self-end rounded-md bg-ink px-4 py-2 text-sm text-invink hover:bg-ink2 disabled:opacity-40"
-                        disabled={chatBusy || !chatModel}
+                        disabled={chatBusy || !!chatBlocked}
+                        title={chatBlocked ? t(askBlockMessage(chatBlocked)) : undefined}
                         onClick={sendChat}
                       >
                         {chatBusy ? '…' : t('送出')}
@@ -1790,12 +2258,16 @@ export default function Home() {
                     {/* 問問題與交工作是兩個不同意圖。QuickDispatch 有自己的工作草稿，
                         不會把上面還沒送出的問題當成可執行工單。 */}
                     {!selected?.readOnly && <QuickDispatch
+                      key={selected?.id ?? 'none'}
                       conv={selected ? { title: selected.title, projectDir: selected.projectDir } : null}
                       recent={(detail?.messages || []).slice(-6).map((m) => ({
                         role: m.role === 'assistant' ? 'assistant' : 'user',
                         text: m.text,
                       }))}
                       onToast={showToast}
+                      draft={quickDrafts[selected?.id ?? ''] ?? ''}
+                      onDraftChange={(v) => setQuickDrafts((m) => ({ ...m, [selected?.id ?? '']: v }))}
+                      onSetup={() => setViewMode('setup')}
                     />}
                   </div>
                 )}
@@ -1810,6 +2282,23 @@ export default function Home() {
         <div role="status" aria-live="polite" aria-atomic="true" className="fixed bottom-10 left-1/2 z-10 -translate-x-1/2 rounded-lg bg-ink px-4 py-2 text-sm text-invink shadow-lg">
           {toast}
         </div>
+      )}
+      {continueTarget && (
+        <ContinueWorkDialog
+          key={continueTarget.id}
+          open
+          conversation={continueTarget}
+          onClose={closeContinueWork}
+          onToast={showToast}
+          onSetup={openSetupFromContinueWork}
+          apiOk={apiOk}
+          draft={quickDrafts[continueTarget.id] ?? ''}
+          onDraftChange={(v) => setQuickDrafts((m) => ({ ...m, [continueTarget.id]: v }))}
+          detailMessages={detail && selectedId === continueTarget.id ? detail.messages : null}
+          detailLoading={detailLoading && selectedId === continueTarget.id}
+          detailForId={selectedId}
+          detailTailError={selectedId === continueTarget.id ? detailTailError : ''}
+        />
       )}
       <footer className="flex flex-none items-center gap-4 overflow-x-auto border-t border-line px-4 py-1.5 text-xs">
         {Object.entries(liveTools ?? index.tools).map(([key, tool]) => (

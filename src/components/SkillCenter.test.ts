@@ -11,7 +11,12 @@ import {
   installableTargetIds,
   installStatusText,
   validateFileCandidates,
+  parseStarterCatalog,
+  toolEvidenceText,
+  copySkillPrompt,
+  SkillUseGuide,
 } from '@/components/SkillCenter'
+import SkillCenter from '@/components/SkillCenter'
 
 describe('提問與執行意圖分離', () => {
   it('QuickDispatch 自己提供執行草稿，不借用聊天輸入框', () => {
@@ -37,6 +42,47 @@ describe('Office 隱私邊界', () => {
 })
 
 describe('技能匯入安全流程', () => {
+  it('預設入門來源且 ZIP 仍可使用，沒有預選安裝目標', () => {
+    const html = renderToStaticMarkup(createElement(SkillCenter))
+    expect(html).toMatch(/name="skill-source"[^>]*checked=""[^>]*value="starter"/)
+    expect(html).toContain('ZIP 技能包')
+    expect(html).not.toContain('name="skill-install-target"')
+  })
+
+  it('拒絕格式錯誤的入門清單並複製合法的一般 ZIP 資料', () => {
+    const entry = { id: 'a', name: 'starter-a', title: 'A', description: 'purpose', testPrompt: 'try', package: { kind: 'zip', data: 'UEs=' } }
+    const valid = { ok: true, starters: [entry, { ...entry, id: 'b', name: 'starter-b' }] }
+    const parsed = parseStarterCatalog(valid)
+    expect(parsed[0].package).toEqual({ kind: 'zip', data: 'UEs=' })
+    parsed[0].package.data = 'changed'
+    expect(entry.package.data).toBe('UEs=')
+    for (const invalid of [null, [], { ok: true }, { ...valid, ok: false }, { ...valid, starters: [entry, entry] }, { ...valid, starters: [entry, { ...entry, id: 'b', title: {} }] }]) {
+      expect(() => parseStarterCatalog(invalid)).toThrow('可改用 ZIP')
+    }
+  })
+
+  it('工具不存在或只找到執行檔，都不能宣稱已登入或執行成功', () => {
+    expect(toolEvidenceText()).toContain('AI 尚未安裝')
+    expect(toolEvidenceText(false)).toContain('可先存放技能')
+    expect(toolEvidenceText(true)).toContain('登入與實際執行仍待驗證')
+    expect(installableTargetIds([{ id: 'codex', label: 'Codex', status: 'unavailable', toolInstalled: true }])).toEqual([])
+    expect(classifyInstallResponse({ ok: true }).success).toBeNull()
+    expect(classifyInstallResponse({ ok: true, results: [{ target: 'codex', status: 'failed' }] }).success).toBeNull()
+  })
+
+  it('安裝後提供可選取提示詞，剪貼簿失敗仍有手動複製路徑', async () => {
+    const prompt = '請使用 starter-a 技能測試'
+    expect(await copySkillPrompt(prompt, async () => { throw new Error('denied') })).toContain('手動複製')
+    let copied = ''
+    expect(await copySkillPrompt(prompt, async (text) => { copied = text })).toContain('尚未執行 AI')
+    expect(copied).toBe(prompt)
+    const html = renderToStaticMarkup(createElement(SkillUseGuide, { prompt }))
+    expect(html).toMatch(/readonly=""/i)
+    expect(html).toContain(prompt)
+    expect(html).toContain('接入 AI')
+    expect(html).toContain('重新啟動')
+    expect(html).toContain('實際回答')
+  })
   it('來源變更或取消後，晚到的成功與失敗都不可取代目前預覽', async () => {
     const session = createPreviewSession()
     const first = session.begin()

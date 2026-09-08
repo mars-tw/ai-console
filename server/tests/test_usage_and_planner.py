@@ -140,7 +140,7 @@ class TestPlannerDefault(unittest.TestCase):
         self.assertEqual(planner.default_tool({"claude", "codex", "qwen"}), "qwen")
         self.assertEqual(planner.default_tool({"claude", "gemini"}), "gemini")
         self.assertEqual(planner.default_tool({"claude"}), "claude")
-        self.assertEqual(planner.default_tool(set()), "local")
+        self.assertEqual(planner.default_tool(set()), "")
 
     def test_拆不出來時整件交給便宜的(self):
         got = planner.plan("把 README 的錯字修一修", model="", available=["claude", "codex", "gemini"])

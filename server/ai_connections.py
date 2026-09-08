@@ -95,7 +95,9 @@ def normalize_base_url(value):
     if not re.fullmatch(r"[/a-zA-Z0-9._~-]*", path) or "//" in path or any(
             p in (".", "..") for p in path.split("/")):
         raise _invalid("API 路徑格式不正確。")
-    if not path.endswith("/v1"):
+    # Keep an explicit final /vN version segment (e.g. Zhipu /api/paas/v4).
+    # Root and generic service bases still get /v1 appended.
+    if not re.search(r"/v\d+$", path):
         path += "/v1"
     netloc = f"[{host}]" if ":" in host else host
     if port is not None:
@@ -437,6 +439,12 @@ class AIConnections:
             raise ConnectionError("authentication_failed", "API 拒絕驗證或目前金鑰沒有權限。", "確認金鑰、環境變數與模型存取權限。")
         if status == 429:
             raise ConnectionError("rate_limited", "API 已達使用限制。", "稍後再試，或向供應商確認額度。")
+        if endpoint == "/models" and status in (404, 405):
+            raise ConnectionError(
+                "model_list_unavailable",
+                "API 無法提供模型清單。",
+                "請手動填入模型名稱後儲存，再測試一則回覆。",
+            )
         if status == 404:
             raise ConnectionError("not_supported", "API 找不到這個端點或模型。", "確認 API 網址與模型名稱支援 OpenAI 相容聊天。")
         if not 200 <= status < 300:
@@ -467,7 +475,11 @@ class AIConnections:
             return {"ok": True, "status": "models_available", "models": models,
                     "nextAction": "選擇模型並儲存，再測試一則回覆；讀到清單尚未驗證推論。"}
         except ConnectionError as error:
-            return {**error.result(), "models": []}
+            result = {**error.result(), "models": []}
+            if error.status == "model_list_unavailable":
+                result["manualModelAllowed"] = True
+                result["verified"] = False
+            return result
 
     def _inference(self, payload, testing):
         item = None

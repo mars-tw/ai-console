@@ -12,7 +12,8 @@ import stat
 import zipfile
 
 TEXT_EXTENSIONS = {'.json', '.py', '.js', '.cjs', '.mjs', '.ts', '.tsx', '.md', '.html',
-                   '.css', '.map', '.toml', '.yaml', '.yml', '.txt', '.bat', '.ps1', '.webmanifest', '.svg'}
+                   '.css', '.map', '.toml', '.yaml', '.yml', '.txt', '.bat', '.ps1', '.webmanifest', '.svg', '._pth'}
+PYTHON_PIN = json.loads(Path(__file__).with_name('python-runtime.json').read_text(encoding='utf-8'))
 FORBIDDEN_PARTS = {'.claude', '.codex', '.gemini', '.qwen', '.grok', '.agents', '.git',
                    '.playwright-cli', '.audit-tmp', '__pycache__', 'output', 'private'}
 FORBIDDEN_FILES = {'config.json', 'connections.json', '_remote.json', 'auth.json', '.env', '.graphify-project.json',
@@ -62,6 +63,8 @@ def audit(path: Path, kind: str, version: str, private_home: str | None = None,
     variants = {home, home.replace('\\', '/'), home.replace('\\', '\\\\')}
     needles = [value.casefold().encode('utf-8') for value in variants if len(value) > 5]
     files = {}
+    runtime_hashes = {}
+    runtime_metadata = {}
     folded_paths = set()
     issues = []
     total = 0
@@ -72,6 +75,13 @@ def audit(path: Path, kind: str, version: str, private_home: str | None = None,
             issues.append({'file': name, 'rule': 'duplicate-entry'})
         folded_paths.add(folded)
         files[name] = len(data)
+        if '/runtime/python/' in '/' + name:
+            runtime_hashes[name] = hashlib.sha256(data).hexdigest()
+            if name.endswith('/runtime.json'):
+                try:
+                    runtime_metadata[name] = json.loads(data)
+                except (ValueError, UnicodeError):
+                    runtime_metadata[name] = None
         if linked or forbidden_path(name):
             issues.append({'file': name, 'rule': 'private-or-linked-path'})
         if pairing_secret and pairing_secret in data:
@@ -107,6 +117,22 @@ def audit(path: Path, kind: str, version: str, private_home: str | None = None,
         for relative in required:
             if prefix + relative not in files:
                 issues.append({'file': relative, 'rule': 'missing-runtime-file'})
+        if kind != 'source':
+            runtime_prefix = prefix + 'runtime/python/'
+            expected = {runtime_prefix + name for name in PYTHON_PIN['files']}
+            metadata_name = runtime_prefix + 'runtime.json'
+            expected.add(metadata_name)
+            present = {name for name in files if name.startswith(runtime_prefix)}
+            for name in sorted(expected - present):
+                issues.append({'file': name, 'rule': 'missing-python-runtime-file'})
+            for name in sorted(present - expected):
+                issues.append({'file': name, 'rule': 'unexpected-python-runtime-file'})
+            if runtime_metadata.get(metadata_name) != PYTHON_PIN:
+                issues.append({'file': metadata_name, 'rule': 'python-runtime-metadata-mismatch'})
+            for name, digest in PYTHON_PIN['files'].items():
+                full = runtime_prefix + name
+                if full in present and runtime_hashes.get(full) != digest:
+                    issues.append({'file': full, 'rule': 'python-runtime-integrity-mismatch'})
     digest = None
     if path.is_file():
         hasher = hashlib.sha256()

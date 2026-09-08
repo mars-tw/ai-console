@@ -1,14 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  capturePairing,
   clearRemoteToken,
+  createSnapshotFetch,
   getRemoteToken,
   installRemoteFetch,
+  isPairingIntact,
   isSameOriginApi,
+  isStalePairingError,
   setRemoteToken,
   tokenFromHash,
   TOKEN_STORAGE_KEY,
   uninstallRemoteFetch,
   validateRemoteToken,
+  type PairingSnapshot,
+  type StalePairingError,
 } from './remoteApi'
 
 describe('remoteApi token 儲存與存取', () => {
@@ -263,5 +269,159 @@ describe('installRemoteFetch 請求攔截包裝', () => {
     expect(window.dispatchEvent).toHaveBeenCalledTimes(1)
 
     uninstallRemoteFetch(window)
+  })
+})
+
+// 以下 token 皆為合成字串，不是任何真實憑證；全程也不碰真的網路。
+describe('createSnapshotFetch 工單級配對綁定（token + 代次）', () => {
+  let memoryStorage: Record<string, string>
+  let calls: { input: RequestInfo | URL; init?: RequestInit }[]
+
+  const authOf = (index: number) => new Headers(calls[index]?.init?.headers).get('Authorization')
+  const winOf = () => window
+
+  beforeEach(() => {
+    memoryStorage = { [TOKEN_STORAGE_KEY]: 'token-A' }
+    calls = []
+
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => memoryStorage[key] ?? null,
+      setItem: (key: string, val: string) => {
+        memoryStorage[key] = String(val)
+      },
+      removeItem: (key: string) => {
+        delete memoryStorage[key]
+      },
+    })
+
+    vi.stubGlobal('window', {
+      location: { origin: 'http://localhost:5178' },
+      fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input, init })
+        return new Response(JSON.stringify({ ok: true }), { status: 200 })
+      },
+      dispatchEvent: vi.fn(),
+    })
+  })
+
+  it('同源 /api/ 帶「當初那把」token；跨域與靜態資源一律不帶工單授權', async () => {
+    const send = createSnapshotFetch(capturePairing(3), { fetch: window.fetch, win: winOf() })
+
+    await send('/api/dispatch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tool: 'claude', task: 'x' }),
+    })
+    expect(authOf(0)).toBe('Bearer token-A')
+    expect(new Headers(calls[0].init?.headers).get('Content-Type')).toBe('application/json')
+
+    await send('https://external-api.example.com/api/dispatch')
+    await send('/m/icon.svg')
+    await send('/assets/index.js')
+    expect(authOf(1)).toBeNull()
+    expect(authOf(2)).toBeNull()
+    expect(authOf(3)).toBeNull()
+  })
+
+  it('Request 物件輸入同樣帶當初那把 token 的明確授權', async () => {
+    const send = createSnapshotFetch(capturePairing(1), { fetch: window.fetch, win: winOf() })
+    await send(new Request('http://localhost:5178/api/dispatch/followup', { method: 'POST' }))
+    expect((calls[0].input as Request).headers.get('Authorization')).toBe('Bearer token-A')
+  })
+
+  it('token 由 A 換成 B（代次沒動）：整件中止，零請求，錯誤訊息不含 token', async () => {
+    const intent = capturePairing(1)
+    const send = createSnapshotFetch(intent, { fetch: window.fetch, win: winOf() })
+
+    setRemoteToken('token-B')
+    const error = await send('/api/dispatch', { method: 'POST' }).catch((e: unknown) => e)
+
+    expect(isStalePairingError(error)).toBe(true)
+    expect((error as StalePairingError).reason).toBe('token_rotated')
+    expect((error as Error).message).not.toContain('token-A')
+    expect((error as Error).message).not.toContain('token-B')
+    expect(calls).toHaveLength(0)
+    expect(isPairingIntact(intent, 1)).toBe(false)
+  })
+
+  it('token 被清空／從未配對：安全地失敗，零請求', async () => {
+    clearRemoteToken()
+    const intent = capturePairing(1)
+    expect(intent.token).toBe('')
+
+    const send = createSnapshotFetch(intent, { fetch: window.fetch, win: winOf() })
+    const error = await send('/api/dispatch/stop', { method: 'POST' }).catch((e: unknown) => e)
+
+    expect(isStalePairingError(error)).toBe(true)
+    expect((error as StalePairingError).reason).toBe('missing_token')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('配對換代（epoch 變了）：整件中止，零請求', async () => {
+    const intent = capturePairing(1)
+    const send = createSnapshotFetch(intent, {
+      fetch: window.fetch,
+      win: winOf(),
+      isCurrent: () => isPairingIntact(intent, 2),
+    })
+
+    const error = await send('/api/dispatch/cancel', { method: 'POST' }).catch((e: unknown) => e)
+    expect(isStalePairingError(error)).toBe(true)
+    expect((error as StalePairingError).reason).toBe('pairing_changed')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('送出當下才被換掉時仍用當初那把 A 授權：永遠不會拿 B 去送舊工單', async () => {
+    // 真實儲存已經是 B（別的分頁換了配對），本頁讀到的還是舊快取 A —— 沒有跨分頁原子性可言，
+    // 但被保證的是：這件工單只會帶 A 出去。
+    memoryStorage[TOKEN_STORAGE_KEY] = 'token-B'
+    const intent: PairingSnapshot = { token: 'token-A', epoch: 1 }
+    const send = createSnapshotFetch(intent, {
+      fetch: window.fetch,
+      win: winOf(),
+      readToken: () => 'token-A',
+    })
+
+    await send('/api/dispatch', { method: 'POST', body: '{}' })
+
+    expect(authOf(0)).toBe('Bearer token-A')
+    expect(authOf(0)).not.toContain('token-B')
+    expect(getRemoteToken()).toBe('token-B')
+  })
+
+  it('疊在攔截器上：明確授權不被較新的 token 覆蓋，且舊配對的延遲 401 不解除新配對', async () => {
+    let finish: ((response: Response) => void) | undefined
+    window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init })
+      return new Promise<Response>((resolve) => { finish = resolve })
+    }) as typeof fetch
+    installRemoteFetch(window)
+
+    const send = createSnapshotFetch({ token: 'token-A', epoch: 1 }, {
+      fetch: window.fetch,
+      win: winOf(),
+      readToken: () => 'token-A',
+    })
+    const pending = send('/api/dispatch/stop', { method: 'POST', body: '{}' })
+
+    setRemoteToken('token-B') // 舊請求還在飛的時候完成了新配對
+    finish?.(new Response('{}', { status: 401 }))
+    await pending
+
+    expect(authOf(0)).toBe('Bearer token-A')
+    expect(window.dispatchEvent).not.toHaveBeenCalled()
+    expect(getRemoteToken()).toBe('token-B')
+
+    uninstallRemoteFetch(window)
+  })
+
+  it('isPairingIntact：token、代次、有無憑證三者都要成立', () => {
+    const intent: PairingSnapshot = { token: 'token-A', epoch: 2 }
+    expect(isPairingIntact(intent, 2, () => 'token-A')).toBe(true)
+    expect(isPairingIntact(intent, 2, () => 'token-B')).toBe(false)
+    expect(isPairingIntact(intent, 3, () => 'token-A')).toBe(false)
+    expect(isPairingIntact(intent, 2, () => '')).toBe(false)
+    expect(isPairingIntact({ token: '', epoch: 2 }, 2, () => '')).toBe(false)
+    expect(isPairingIntact(null, 2, () => 'token-A')).toBe(false)
   })
 })

@@ -4,7 +4,7 @@
 // 同時是「別人 clone 下來一定不能跑」和「把作者的目錄結構印在原始碼裡」
 // 兩個問題，所以一律改成按順序探測。
 //
-// 順序的理由：使用者明講的最優先；接著是本專案自帶的虛擬環境；
+// 順序的理由：使用者明講的最優先；接著是 Windows 隨附 runtime、專案虛擬環境；
 // 再來是 Kimi 桌面版內建的 runtime（本專案的產圖管線本來就會用到它）；
 // 都沒有才退回系統 PATH 上的 python。
 
@@ -51,6 +51,7 @@ function onPath(name) {
 function findPython() {
   const candidates = [
     process.env.AI_CONSOLE_PYTHON,
+    WIN ? path.join(ROOT, 'runtime', 'python', 'python.exe') : null,
     venvPython(path.join(ROOT, '.venv')),
     venvPython(path.join(ROOT, 'venv')),
     ...kimiRuntime(),

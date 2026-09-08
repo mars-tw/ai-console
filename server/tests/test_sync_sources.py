@@ -43,8 +43,10 @@ class ConversationSourceHealthTest(unittest.TestCase):
         by_id = {row["id"]: row for row in rows}
         self.assertEqual(by_id["codex"]["status"], "ok")
         self.assertEqual(by_id["codex"]["count"], 1)
-        self.assertEqual(by_id["kimi"]["status"], "empty")
-        self.assertEqual(by_id["claude"]["status"], "missing")
+        self.assertEqual(by_id["kimi"]["status"], "optional")
+        self.assertTrue(by_id["kimi"]["optional"])
+        self.assertFalse(by_id["kimi"]["needsAttention"])
+        self.assertEqual(by_id["claude"]["status"], "optional")
         self.assertEqual(by_id["qwen"]["status"], "error")
         self.assertNotIn(str(qwen_root), str(by_id["qwen"]))
 
@@ -55,7 +57,7 @@ class ConversationSourceHealthTest(unittest.TestCase):
         store.mkdir(parents=True)
         rows = api._conversation_source_health({"conversations": []}, self.home)
         claude = next(row for row in rows if row["id"] == "claude")
-        self.assertEqual(claude["status"], "empty")
+        self.assertEqual(claude["status"], "optional")
 
     def test_corrupt_codex_database_is_not_reported_as_readable_empty_source(self):
         database = self.home / ".codex" / "state_5.sqlite"
@@ -64,6 +66,18 @@ class ConversationSourceHealthTest(unittest.TestCase):
         rows = api._conversation_source_health({"conversations": []}, self.home)
         codex = next(row for row in rows if row["id"] == "codex")
         self.assertEqual(codex["status"], "error")
+
+    def test_previously_indexed_missing_and_metadata_error_still_need_attention(self):
+        index = {"conversations": [
+            {"tool": "claude", "inApp": False, "metadataErrors": 1},
+            {"tool": "qwen", "inApp": False},
+        ]}
+        rows = {row["id"]: row for row in api._conversation_source_health(index, self.home)}
+
+        self.assertEqual(rows["claude"]["status"], "error")
+        self.assertTrue(rows["claude"]["needsAttention"])
+        self.assertEqual(rows["qwen"]["status"], "warning")
+        self.assertTrue(rows["qwen"]["needsAttention"])
 
 
 if __name__ == "__main__":

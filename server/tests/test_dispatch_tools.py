@@ -100,14 +100,31 @@ class TestBinAvailability(unittest.TestCase):
 class TestDispatchTools(unittest.TestCase):
     """/api/dispatch/tools：畫面上要看得出「派出去之後還需不需要你」"""
 
+    # 合成地端事實：測試只驗路由，不看這台機器實際裝了什麼模型
+    UNREADY_LOCAL = {
+        "state": "missing_tool", "installed": False, "ready": False, "available": False,
+        "models": [], "model": None, "loaded": [], "limited": False,
+        "reason": "not_installed", "readiness": "unavailable", "authStatus": "not_required",
+    }
+    READY_LOCAL = {
+        "state": "needs_start", "installed": True, "ready": True, "available": True,
+        "models": ["qwen/qwen3.5-4b"], "model": "qwen/qwen3.5-4b", "loaded": [], "limited": False,
+        "reason": "safe", "readiness": "prepare_on_send", "authStatus": "not_required",
+    }
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="actools_"))
         self._status = api.STATUS_JSON
         self._bin = dict(api.BIN)
         self.available = set()
+        self.local_facts = dict(self.UNREADY_LOCAL)
         self._available_patch = mock.patch.object(
             api, "_bin_available", side_effect=lambda tool: tool in self.available)
         self._available_patch.start()
+        local_patch = mock.patch.object(
+            api, "local_runtime_readiness", side_effect=lambda *a, **k: dict(self.local_facts))
+        local_patch.start()
+        self.addCleanup(local_patch.stop)
 
     def tearDown(self):
         self._available_patch.stop()
@@ -168,10 +185,18 @@ class TestDispatchTools(unittest.TestCase):
         self.available = {"claude", "codex", "qwen"}
         self.assertEqual(self._call()["auto"], "qwen")
 
-    def test_全部限流時自動退回地端(self):
+    def test_全部限流且本機未安全就緒時_auto_為空(self):
         self._status_file(limited=["claude", "codex", "qwen"])
         self.available = {"claude", "codex", "qwen"}
-        self.assertEqual(self._call()["auto"], "local")
+        self.assertIsNone(self._call()["auto"])
+
+    def test_全部限流但本機安全就緒時_auto_挑地端(self):
+        self._status_file(limited=["claude", "codex", "qwen"])
+        self.available = {"claude", "codex", "qwen"}
+        self.local_facts = dict(self.READY_LOCAL)
+        got = self._call()
+        self.assertEqual(got["auto"], "local")
+        self.assertFalse({x["id"]: x for x in got["tools"]}["local"]["limited"])
 
 
 class TestCancel(unittest.TestCase):
