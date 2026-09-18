@@ -21,11 +21,13 @@
 
 ## 下載與開始
 
+**[下載快速安裝包 v1.5.1](https://github.com/mars-tw/ai-console/releases/download/v1.5.1/ai-console-quick-start-v1.5.1.zip)**：解壓縮後雙擊 `快速安裝.cmd`，依提示完成準備；以後雙擊桌面「DevSpace 控制台」或 `快速啟動.cmd`。詳見 [快速開始說明](docs/quick-start.md)。
+
 第一次使用請看 **[完整安裝與執行手冊](docs/install-and-run.md)**：從解壓縮、安裝 DevSpace、設定允許目錄，到送出第一個工作，依序操作即可。
 
 ### Windows 一般使用者請下載這個
 
-**[⬇ 下載 Windows 免安裝版 v1.5.0（64 位元）](https://github.com/mars-tw/ai-console/releases/download/v1.5.0/ai-console-win32-x64-v1.5.0.zip)**
+**[⬇ 下載 Windows 免安裝版 v1.5.1（64 位元）](https://github.com/mars-tw/ai-console/releases/download/v1.5.1/ai-console-win32-x64-v1.5.1.zip)**
 
 1. 解壓縮整個 ZIP，再開啟資料夾裡的 `AI控制台.exe`。
 2. 按「接入 AI」，依畫面選擇電腦上的 AI、雲端服務或已有的工具。
@@ -40,11 +42,11 @@ Windows 發行包已包含控制台需要的 Python，不必另裝，也不會�
 <details>
 <summary>開發者：原始碼下載與自行建置</summary>
 
-[下載 v1.5.0 原始碼](https://github.com/mars-tw/ai-console/releases/download/v1.5.0/ai-console-source-v1.5.0.zip)。原始碼 ZIP 不是可直接執行的 Windows 程式；自行建置仍需 Node.js 與 Python，步驟見下方「快速開始」。
+[下載 v1.5.1 原始碼](https://github.com/mars-tw/ai-console/releases/download/v1.5.1/ai-console-source-v1.5.1.zip)。原始碼 ZIP 不是可直接執行的 Windows 程式；自行建置仍需 Node.js 與 Python，步驟見下方「快速開始」。
 
 </details>
 
-v1.5.0 新增 DevSpace 桌面控制台：查看 MCP 服務狀態、檢查環境、選擇允許的專案目錄，並派工給 Codex、Claude 或本機 AI；任務完成後可查看回覆及接續工作。支援繁體中文與 English，原始碼版另附 Windows 桌面捷徑建立腳本。
+v1.5.1 新增快速安裝與快速啟動：自動校驗下載包、安裝到使用者目錄、建立捷徑，並引導第一次 DevSpace 設定。已有設定會沿用。DevSpace 桌面控制台可查看服務狀態、選擇允許的專案、派工、查看結果及接續任務。
 
 保留 v1.4.1 的新手冷啟動流程：沒有模型不會顯示可派工；問題草稿會保留並引導接入；提供持續可見的首頁、可略過的未使用來源、內建入門技能及安裝後使用步驟。相容服務提供預設網址與官方設定入口，並正確處理智譜 `/v4` 網址。
 
@@ -350,8 +352,8 @@ src/                       # React + TypeScript + Tailwind 前端
 `scripts/audit_release.py` 能檢查資料夾或 ZIP 的版本、必要檔案、本機路徑、配對碼、私密檔名和 Windows 路徑／大小寫衝突。壓縮包通過檢查後，才把本機專屬設定放回本地安裝。
 
 ```bash
-python scripts/audit_release.py release/clean/AI控制台-win32-x64 --kind windows --version 1.5.0
-python scripts/audit_release.py release/ai-console-source-v1.5.0.zip --kind source --version 1.5.0
+python scripts/audit_release.py release/clean/AI控制台-win32-x64 --kind windows --version 1.5.1
+python scripts/audit_release.py release/ai-console-source-v1.5.1.zip --kind source --version 1.5.1
 ```
 
 發佈者可加 `--check-local-pairing`，只在記憶體中比對本機配對碼是否誤入成品；一般檢查與測試不會讀取配對設定。
