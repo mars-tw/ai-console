@@ -108,6 +108,7 @@ def audit(path: Path, kind: str, version: str, private_home: str | None = None,
         if json.loads(manifest).get('version') != version:
             issues.append({'file': manifest_name, 'rule': 'wrong-version'})
         required = ['server/api.py', 'server/ai_connections.py', 'server/setup_catalog.py',
+                    'server/devspace_console.py',
                     'electron/main.cjs', 'scripts/find-python.cjs']
         if kind != 'source':
             required += ['dist/index.html', 'dist/m/manifest.webmanifest',

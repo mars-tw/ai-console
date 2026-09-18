@@ -85,6 +85,17 @@ PORT = 5177
 
 _AI_CONNECTIONS = None
 _AI_CONNECTIONS_LOCK = threading.Lock()
+_DEVSPACE_CONSOLE = None
+_DEVSPACE_CONSOLE_LOCK = threading.Lock()
+
+
+def _devspace_console():
+    global _DEVSPACE_CONSOLE
+    with _DEVSPACE_CONSOLE_LOCK:
+        if _DEVSPACE_CONSOLE is None:
+            from devspace_console import DevSpaceConsole
+            _DEVSPACE_CONSOLE = DevSpaceConsole()
+        return _DEVSPACE_CONSOLE
 
 
 def _ai_connections():
@@ -4000,6 +4011,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/health":
             return self._json({"ok": True, "ts": time.time()})
+        if self.path == '/api/devspace/status':
+            return self._devspace_request('status')
         if self.path in {'/api/setup', '/api/ai-connections'}:
             if not self._same_origin():
                 return self._json({'ok': False, 'error': '跨來源請求已拒絕'}, 403)
@@ -4327,7 +4340,60 @@ class Handler(BaseHTTPRequestHandler):
             return False           # 兩個都沒有 → 不是從本應用頁面來的
         return True
 
+    def _devspace_request(self, action: str, post: bool = False):
+        """DevSpace controls are desktop-only, with exact origin/host checks.
+
+        Do not add these endpoints to the mobile proxy allowlist. Parsing the
+        Referer avoids accepting a hostname that merely starts with localhost.
+        """
+        allowed_hosts = {urllib.parse.urlsplit(o).netloc for o in self.ALLOWED_ORIGINS}
+        host = self.headers.get('Host', '')
+        origin = self.headers.get('Origin')
+        ref = self.headers.get('Referer')
+        trusted = origin in self.ALLOWED_ORIGINS if origin else False
+        if not origin and ref:
+            try:
+                parsed = urllib.parse.urlsplit(ref)
+                trusted = (not parsed.username and not parsed.password
+                           and f'{parsed.scheme}://{parsed.netloc}' in self.ALLOWED_ORIGINS)
+            except ValueError:
+                trusted = False
+        if host not in allowed_hosts or not trusted:
+            return self._json({'ok': False, 'code': 'DESKTOP_ONLY',
+                               'error': 'DevSpace 只接受本機控制台的操作。'}, 403)
+        body = None
+        if post:
+            if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
+                return self._json({'ok': False, 'code': 'INVALID_CONTENT_TYPE',
+                                   'error': '請使用 JSON 傳送 DevSpace 操作。'}, 415)
+            body = self._body()
+            if not isinstance(body, dict) or getattr(self, '_body_error', None):
+                return self._json({'ok': False, 'code': 'INVALID_BODY',
+                                   'error': 'DevSpace 請求格式不正確。'}, 400)
+        try:
+            method = getattr(_devspace_console(), action)
+            result = method(body) if post else method()
+        except Exception:
+            # CLI/config exceptions can contain secrets; expose only a fixed message.
+            return self._json({'ok': False, 'code': 'DEVSPACE_UNAVAILABLE',
+                               'error': 'DevSpace 暫時無法使用，請重新檢查。'}, 503)
+        return self._json(result, 200 if result.get('ok') else 400)
+
     def do_POST(self):
+        if self.path.startswith('/api/devspace/'):
+            actions = {
+                '/api/devspace/doctor': 'doctor',
+                '/api/devspace/start': 'start',
+                '/api/devspace/stop': 'stop',
+                '/api/devspace/tasks': 'tasks',
+                '/api/devspace/run': 'run',
+                '/api/devspace/show': 'show',
+                '/api/devspace/continue': 'continue_task',
+            }
+            action = actions.get(self.path)
+            if not action:
+                return self._json({'ok': False, 'code': 'NOT_FOUND', 'error': '找不到這個 DevSpace 操作。'}, 404)
+            return self._devspace_request(action, post=True)
         if not self._same_origin():
             return self._json({"ok": False, "error":
                                "跨來源請求已拒絕（此 API 只接受本應用自己的呼叫）"}, 403)

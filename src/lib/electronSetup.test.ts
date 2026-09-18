@@ -34,7 +34,7 @@ describe('Electron setup directory picker sender boundary', () => {
     const fixture = setupHarness()
     await expect(fixture.invoke({ sender: fixture.webContents, senderFrame: fixture.mainFrame })).resolves.toBe('fixture-directory')
     expect(fixture.showOpenDialog).toHaveBeenCalledExactlyOnceWith(fixture.window, {
-      title: '選擇 AI 對話或匯出資料夾', properties: ['openDirectory'],
+      title: '選擇資料夾', properties: ['openDirectory'],
     })
   })
 

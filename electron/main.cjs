@@ -20,6 +20,7 @@ if (process.platform === 'win32') {
 
 const PORT = 5177
 const APP_URL = `http://127.0.0.1:${PORT}/`
+const START_URL = process.argv.includes('--devspace') ? `${APP_URL}?view=devspace` : APP_URL
 const API = path.join(__dirname, '..', 'server', 'api.py')
 const LOG = path.join(os.tmpdir(), 'ai-console-launch.log')
 
@@ -124,7 +125,7 @@ function wireSetup() {
       if (url.origin !== new URL(APP_URL).origin || url.pathname.startsWith('/m')) return null
     } catch { return null }
     const choice = await dialog.showOpenDialog(win, {
-      title: '選擇 AI 對話或匯出資料夾',
+      title: '選擇資料夾',
       properties: ['openDirectory'],
     })
     return choice.canceled ? null : (choice.filePaths[0] || null)
@@ -315,7 +316,7 @@ async function createWindow() {
   // 伺服器剛起來時偶爾第一次連線會被拒，載入失敗就重試幾次
   for (let i = 0; i < 5; i++) {
     try {
-      await win.loadURL(APP_URL)
+      await win.loadURL(START_URL)
       log('畫面載入成功')
       return
     } catch (e) {
