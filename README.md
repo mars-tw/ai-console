@@ -21,6 +21,8 @@
 
 ## 下載與開始
 
+第一次使用請看 **[完整安裝與執行手冊](docs/install-and-run.md)**：從解壓縮、安裝 DevSpace、設定允許目錄，到送出第一個工作，依序操作即可。
+
 ### Windows 一般使用者請下載這個
 
 **[⬇ 下載 Windows 免安裝版 v1.5.0（64 位元）](https://github.com/mars-tw/ai-console/releases/download/v1.5.0/ai-console-win32-x64-v1.5.0.zip)**
@@ -31,7 +33,7 @@
 
 Windows 發行包已包含控制台需要的 Python，不必另裝，也不會變更系統 Python。AI 工具、模型與雲端帳號並未預先附送：本機問答需安裝 LM Studio 並下載模型；雲端問答需從選定服務取得 API 金鑰，可能另外計費。控制台不會代你註冊、購買額度或自動下載大型模型。
 
-要讀寫專案或交給 AI 寫程式，可切到新增的「DevSpace」分頁。請先依 [DevSpace 官方說明](https://github.com/Waishnav/devspace) 安裝 DevSpace、Node.js 與 Windows 所需的 Git Bash，完成允許目錄及 provider 設定，再選擇專案送出工作。這些工具未包含在控制台下載包內；詳見 [DevSpace 桌面使用說明](docs/devspace-desktop.md)。
+要讀寫專案或交給 AI 寫程式，可切到新增的「DevSpace」分頁。請依 [安裝與執行手冊](docs/install-and-run.md) 安裝 DevSpace、Node.js 與 Windows 所需的 Git Bash，完成允許目錄及 provider 設定，再選擇專案送出工作。這些工具未包含在控制台下載包內。標準上游 DevSpace 沒有 `local` provider；「本機 AI」需使用另外提供並啟用該 provider 的 DevSpace 安裝。
 
 第一次只用電腦即可；手機遙控是選配，另需在電腦與手機安裝並登入同一個 Tailscale 網路。
 

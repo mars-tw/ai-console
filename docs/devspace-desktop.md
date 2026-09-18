@@ -1,6 +1,8 @@
 # DevSpace 桌面控制台
 
-AI Console 的「DevSpace」分頁把本機 DevSpace 的服務、專案目錄與 agent 任務放在同一個畫面。開啟畫面不會派工；只有按「派出任務」或續接任務後，才會呼叫所選 AI。
+AI Console 的「DevSpace」分頁把本機 DevSpace 的服務、專案目錄與 agent 任務放在同一個畫面。開啟畫面不會派工；只有按「送出工作」或續接任務後，才會呼叫所選 AI。
+
+第一次使用請先看 [完整安裝與執行手冊](install-and-run.md)，包含下載、安裝指令、允許目錄設定與第一次派工。
 
 ## 在 Windows 桌面使用
 
@@ -10,6 +12,8 @@ AI Console 的「DevSpace」分頁把本機 DevSpace 的服務、專案目錄與
 4. 從任務清單選取一筆，查看狀態與結果。任務結束後可輸入後續指示，沿用同一個 agent session。
 
 AI Console 不包含 AI 帳號、模型或 DevSpace 的 owner 密碼。目標出現在選單中，代表 DevSpace 已啟用該 provider；登入狀態、額度與模型是否可用，仍以實際派工結果為準。使用雲端 provider 時，任務內容會交給該服務。
+
+標準上游 DevSpace 1.0.8 沒有 `local` provider；「本機 AI」只適用於另外提供並啟用該 provider 的 DevSpace 安裝。只安裝 LM Studio 不會讓這個選項可用。
 
 從 Git checkout 建立桌面版本（打包程式需要 Git 追蹤清單）：
 
