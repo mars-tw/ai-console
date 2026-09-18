@@ -10,6 +10,7 @@ import type { AskPreflightState, AskSession, AskSubmitPlan, LocalSetupInfo } fro
 import { askBlockMessage, askPreflight, localModels, pickSetupLocal, planAskSubmit, shouldRestoreDraft } from '@/components/AskAI'
 import { chatContext, nextChatModel, pickChatAnswer, retryChatHistory } from '@/lib/chatResponse'
 import Console from '@/components/Console'
+import DevSpaceConsole from '@/components/DevSpaceConsole'
 import ConversationSync from '@/components/ConversationSync'
 import Office from '@/components/Office'
 import QuickDispatch from '@/components/QuickDispatch'
@@ -488,7 +489,8 @@ export default function Home() {
     () => new Map((index?.conversations ?? []).map((c) => [c.id, c])),
     [index],
   )
-  const [viewMode, setViewMode] = useState<'list' | 'ask' | 'console' | 'office' | 'rpg' | 'skills' | 'setup'>('list')
+  const [viewMode, setViewMode] = useState<'list' | 'ask' | 'console' | 'devspace' | 'office' | 'rpg' | 'skills' | 'setup'>(() =>
+    typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('view') === 'devspace' ? 'devspace' : 'list')
   const [askSession, setAskSession] = useState<AskSession>({ model: 'auto', messages: [], input: '' })
   /**
    * 快速派工的工作草稿，依對話 id 分開存。
@@ -1461,6 +1463,7 @@ export default function Home() {
       {([
         ['setup', t('🔌 接入 AI')],
         ['list', t('📋 對話')], ['ask', t('💬 問 AI')], ['console', t('🎙️ 派工主控台')],
+        ['devspace', 'DevSpace'],
         ['office', t('🎮 辦公室')], ['rpg', t('⚔️ 冒險')],
         ['skills', t('🧩 AI 技能')],
       ] as const).map(([m, label]) => (
@@ -1479,7 +1482,7 @@ export default function Home() {
   if (!index) return (
     <div className="flex h-screen flex-col bg-panel text-ink">
       {homeBar}
-      <main className="flex min-w-0 flex-1 flex-col">
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         {tabs}
         {viewMode === 'setup' ? (
           <AISetup onStartChat={startSetupChat} />
@@ -1491,6 +1494,8 @@ export default function Home() {
             onDraftChange={setConsoleDraft}
             onSetup={() => setViewMode('setup')}
           />
+        ) : viewMode === 'devspace' ? (
+          <DevSpaceConsole />
         ) : viewMode === 'office' ? (
           <Office tools={liveTools ?? {}} projects={[]} conversations={[]} onDispatch={openContinueWork} busyId="" />
         ) : viewMode === 'rpg' ? (
@@ -1910,6 +1915,8 @@ export default function Home() {
               onDraftChange={setConsoleDraft}
               onSetup={() => setViewMode('setup')}
             />
+          ) : viewMode === 'devspace' ? (
+            <DevSpaceConsole />
           ) : viewMode === 'office' ? (
             <Office
               tools={liveTools ?? index.tools}
