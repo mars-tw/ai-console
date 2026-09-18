@@ -1,5 +1,6 @@
 """The distributed artifact must never include private runtime data."""
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -13,6 +14,45 @@ spec.loader.exec_module(release_audit)
 
 
 class ReleaseArtifactTests(unittest.TestCase):
+    def test_payload_inventory_detects_missing_or_corrupt_files(self):
+        with tempfile.TemporaryDirectory(prefix='ac_payload_audit_') as tmp:
+            artifact = Path(tmp) / 'windows.zip'
+            entries = {'resources/app/package.json': b'{"version":"1.5.1"}',
+                       'resources/app/electron/pty.cjs': b'fixture'}
+            inventory = {'schemaVersion': 1, 'version': '1.5.1', 'files': [
+                {'path': name, 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+                for name, data in entries.items()]}
+            def write(mode):
+                with zipfile.ZipFile(artifact, 'w') as archive:
+                    for name, data in entries.items():
+                        if mode == 'missing' and name.endswith('pty.cjs'):
+                            continue
+                        archive.writestr('app/' + name, b'changed' if mode == 'corrupt' and name.endswith('pty.cjs') else data)
+                    archive.writestr('app/quick-payload.json', json.dumps(inventory))
+            write('complete')
+            self.assertNotIn('payload-manifest-mismatch', {i['rule'] for i in release_audit.audit(artifact, 'windows', '1.5.1')['issues']})
+            for mode in ('missing', 'corrupt'):
+                write(mode)
+                self.assertIn('payload-manifest-mismatch', {i['rule'] for i in release_audit.audit(artifact, 'windows', '1.5.1')['issues']})
+
+    def test_bootstrap_requires_exact_inventory_and_matching_public_release(self):
+        with tempfile.TemporaryDirectory(prefix='ac_bootstrap_audit_') as tmp:
+            artifact = Path(tmp) / 'bootstrap.zip'
+            def write(extra=None, version='1.5.1'):
+                with zipfile.ZipFile(artifact, 'w') as archive:
+                    for name in (*release_audit.QUICK_FILES, 'LICENSE'):
+                        content = json.dumps({'version': version, 'repository': 'mars-tw/ai-console',
+                                              'asset': f'ai-console-win32-x64-v{version}.zip'}) if name.endswith('quick-start.json') else 'fixture'
+                        archive.writestr('quick/' + name, content)
+                    if extra:
+                        archive.writestr('quick/' + extra, 'unexpected')
+            write()
+            self.assertTrue(release_audit.audit(artifact, 'bootstrap', '1.5.1')['ok'])
+            write('private-data.txt')
+            self.assertIn('unexpected-bootstrap-file', {i['rule'] for i in release_audit.audit(artifact, 'bootstrap', '1.5.1')['issues']})
+            write(version='1.5.0')
+            self.assertIn('invalid-quick-manifest', {i['rule'] for i in release_audit.audit(artifact, 'bootstrap', '1.5.1')['issues']})
+
     def test_private_paths_are_refused_in_both_package_prefixes(self):
         for prefix in ('', 'app/resources/app/', 'ai-console-1.3.1/'):
             for filename in ('.claude/launch.json', 'dist/data/conv/a.json',

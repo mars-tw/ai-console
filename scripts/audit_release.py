@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import stat
 import zipfile
@@ -18,6 +19,9 @@ FORBIDDEN_PARTS = {'.claude', '.codex', '.gemini', '.qwen', '.grok', '.agents', 
                    '.playwright-cli', '.audit-tmp', '__pycache__', 'output', 'private'}
 FORBIDDEN_FILES = {'config.json', 'connections.json', '_remote.json', 'auth.json', '.env', '.graphify-project.json',
                    'graphify-boot.md', 'gemini.md'}
+QUICK_FILES = ('快速安裝.cmd', '快速啟動.cmd', 'scripts/quick-install.ps1',
+               'scripts/quick-launch.ps1', 'scripts/quick-payload.ps1', 'scripts/setup-devspace.ps1',
+               'scripts/quick-start.json', 'docs/install-and-run.md', 'docs/quick-start.md')
 
 
 def _parts(name: str) -> tuple[str, ...]:
@@ -63,6 +67,8 @@ def audit(path: Path, kind: str, version: str, private_home: str | None = None,
     variants = {home, home.replace('\\', '/'), home.replace('\\', '\\\\')}
     needles = [value.casefold().encode('utf-8') for value in variants if len(value) > 5]
     files = {}
+    file_hashes = {}
+    payload_manifests = {}
     runtime_hashes = {}
     runtime_metadata = {}
     folded_paths = set()
@@ -75,6 +81,12 @@ def audit(path: Path, kind: str, version: str, private_home: str | None = None,
             issues.append({'file': name, 'rule': 'duplicate-entry'})
         folded_paths.add(folded)
         files[name] = len(data)
+        file_hashes[name] = hashlib.sha256(data).hexdigest()
+        if name.endswith('quick-payload.json'):
+            try:
+                payload_manifests[name] = json.loads(data)
+            except (ValueError, UnicodeError):
+                payload_manifests[name] = None
         if '/runtime/python/' in '/' + name:
             runtime_hashes[name] = hashlib.sha256(data).hexdigest()
             if name.endswith('/runtime.json'):
@@ -91,7 +103,20 @@ def audit(path: Path, kind: str, version: str, private_home: str | None = None,
             if any(needle in lowered for needle in needles):
                 issues.append({'file': name, 'rule': 'host-absolute-path'})
     prefix = ''
-    if kind == 'windows':
+    quick_version = bool(re.fullmatch(r'\d+\.\d+\.\d+', version)) and tuple(map(int, version.split('.'))) >= (1, 5, 1)
+    if kind == 'bootstrap':
+        quick_matches = [name for name in files if name.endswith('scripts/quick-start.json')]
+        if len(quick_matches) != 1:
+            issues.append({'file': 'scripts/quick-start.json', 'rule': 'missing-or-ambiguous-quick-manifest'})
+        else:
+            quick_prefix = quick_matches[0][:-len('scripts/quick-start.json')]
+            expected = {quick_prefix + name for name in (*QUICK_FILES, 'LICENSE')}
+            for name in sorted(expected - files.keys()):
+                issues.append({'file': name, 'rule': 'missing-quick-start-file'})
+            for name in sorted(files.keys() - expected):
+                issues.append({'file': name, 'rule': 'unexpected-bootstrap-file'})
+        matches = []
+    elif kind == 'windows':
         matches = [name for name in files if name.endswith('resources/app/package.json')]
     elif kind == 'source':
         matches = [name for name in files if name.endswith('/package.json') and len(_parts(name)) == 2]
@@ -99,7 +124,9 @@ def audit(path: Path, kind: str, version: str, private_home: str | None = None,
             matches = ['package.json']
     else:
         matches = ['package.json'] if 'package.json' in files else []
-    if len(matches) != 1:
+    if kind == 'bootstrap':
+        pass
+    elif len(matches) != 1:
         issues.append({'file': 'package.json', 'rule': 'missing-or-ambiguous-app-manifest'})
     else:
         manifest_name = matches[0]
@@ -118,6 +145,30 @@ def audit(path: Path, kind: str, version: str, private_home: str | None = None,
         for relative in required:
             if prefix + relative not in files:
                 issues.append({'file': relative, 'rule': 'missing-runtime-file'})
+        if quick_version and kind in ('source', 'windows'):
+            quick_prefix = prefix[:-len('resources/app/')] if kind == 'windows' else prefix
+            for relative in QUICK_FILES:
+                if quick_prefix + relative not in files:
+                    issues.append({'file': relative, 'rule': 'missing-quick-start-file'})
+            if kind == 'windows':
+                payload_name = quick_prefix + 'quick-payload.json'
+                payload = payload_manifests.get(payload_name)
+                expected_files = {name for name in files if name != payload_name}
+                seen_files = set()
+                valid = isinstance(payload, dict) and type(payload.get('schemaVersion')) is int and payload.get('schemaVersion') == 1 and payload.get('version') == version and isinstance(payload.get('files'), list)
+                if valid:
+                    for row in payload['files']:
+                        if not isinstance(row, dict) or not isinstance(row.get('path'), str):
+                            valid = False
+                            break
+                        full = quick_prefix + row['path']
+                        if (forbidden_path(row['path']) or full in seen_files or type(row.get('size')) is not int
+                                or row.get('size') != files.get(full) or row.get('sha256') != file_hashes.get(full)):
+                            valid = False
+                            break
+                        seen_files.add(full)
+                if not valid or seen_files != expected_files:
+                    issues.append({'file': payload_name, 'rule': 'payload-manifest-mismatch'})
         if kind != 'source':
             runtime_prefix = prefix + 'runtime/python/'
             expected = {runtime_prefix + name for name in PYTHON_PIN['files']}
@@ -134,6 +185,19 @@ def audit(path: Path, kind: str, version: str, private_home: str | None = None,
                 full = runtime_prefix + name
                 if full in present and runtime_hashes.get(full) != digest:
                     issues.append({'file': full, 'rule': 'python-runtime-integrity-mismatch'})
+    if kind == 'bootstrap' or (quick_version and kind in ('source', 'windows')):
+        manifests = [(name, data) for name, data, _ in contents(path) if name.endswith('scripts/quick-start.json')]
+        if len(manifests) == 1:
+            try:
+                quick = json.loads(manifests[0][1])
+                valid = (quick.get('version') == version and quick.get('repository') == 'mars-tw/ai-console'
+                         and quick.get('asset') == f'ai-console-win32-x64-v{version}.zip')
+            except (ValueError, AttributeError):
+                valid = False
+            if not valid:
+                issues.append({'file': manifests[0][0], 'rule': 'invalid-quick-manifest'})
+        else:
+            issues.append({'file': 'scripts/quick-start.json', 'rule': 'missing-or-ambiguous-quick-manifest'})
     digest = None
     if path.is_file():
         hasher = hashlib.sha256()
@@ -149,7 +213,7 @@ def audit(path: Path, kind: str, version: str, private_home: str | None = None,
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('path', type=Path)
-    parser.add_argument('--kind', choices=('source', 'stage', 'windows'), required=True)
+    parser.add_argument('--kind', choices=('source', 'stage', 'windows', 'bootstrap'), required=True)
     parser.add_argument('--version', required=True)
     parser.add_argument('--check-local-pairing', action='store_true',
                         help='Check the current app pairing secret in memory; never print it')

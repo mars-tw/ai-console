@@ -4,6 +4,8 @@ AI Console 的「DevSpace」分頁把本機 DevSpace 的服務、專案目錄與
 
 第一次使用請先看 [完整安裝與執行手冊](install-and-run.md)，包含下載、安裝指令、允許目錄設定與第一次派工。
 
+v1.5.1 可直接使用 [快速安裝與快速啟動](quick-start.md)，由精靈建立捷徑並引導首次設定。
+
 ## 在 Windows 桌面使用
 
 1. 依 [DevSpace 官方說明](https://github.com/Waishnav/devspace) 安裝 Node.js、Git Bash 與 DevSpace，完成 `devspace init`。已經有 DevSpace 的電腦可沿用既有安裝。

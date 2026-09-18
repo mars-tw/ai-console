@@ -1,10 +1,12 @@
 # 安裝與執行手冊
 
-適用 AI Console v1.5.0／Windows 64 位元。一般使用者從第一節開始；自行修改程式的人可看第六節。
+適用 AI Console v1.5.1／Windows 64 位元。一般使用者從第一節開始；自行修改程式的人可看第六節。
+
+想減少手動設定，可先用 [快速安裝包](https://github.com/mars-tw/ai-console/releases/download/v1.5.1/ai-console-quick-start-v1.5.1.zip)，解壓縮後雙擊 `快速安裝.cmd`。完整步驟見 [快速開始說明](quick-start.md)。以下保留手動安裝與開發者操作方式。
 
 ## 1. 下載並開啟控制台
 
-1. 下載 [Windows 免安裝版 v1.5.0](https://github.com/mars-tw/ai-console/releases/download/v1.5.0/ai-console-win32-x64-v1.5.0.zip)。請選檔名含 `win32-x64` 的 ZIP。
+1. 下載 [Windows 免安裝版 v1.5.1](https://github.com/mars-tw/ai-console/releases/download/v1.5.1/ai-console-win32-x64-v1.5.1.zip)。請選檔名含 `win32-x64` 的 ZIP。
 2. 用 Windows「全部解壓縮」解開整個 ZIP，放到之後會保留的資料夾。
 3. 進入 `AI控制台-win32-x64`，雙擊 `AI控制台.exe`。
 4. 一般問答請按「接入 AI」；要讀寫專案或寫程式，請完成下方的 DevSpace 設定，再切到「DevSpace」。
@@ -150,5 +152,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/create-desktop-short
 ## 參考
 
 - [DevSpace 官方專案與安裝說明](https://github.com/Waishnav/devspace)
-- [AI Console v1.5.0 下載頁](https://github.com/mars-tw/ai-console/releases/tag/v1.5.0)
+- [AI Console v1.5.1 下載頁](https://github.com/mars-tw/ai-console/releases/tag/v1.5.1)
 - [DevSpace 桌面控制台與 API 說明](https://github.com/mars-tw/ai-console/blob/main/docs/devspace-desktop.md)
