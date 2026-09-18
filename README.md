@@ -23,7 +23,7 @@
 
 ### Windows 一般使用者請下載這個
 
-**[⬇ 下載 Windows 免安裝版 v1.4.1（64 位元）](https://github.com/mars-tw/ai-console/releases/download/v1.4.1/ai-console-win32-x64-v1.4.1.zip)**
+**[⬇ 下載 Windows 免安裝版 v1.5.0（64 位元）](https://github.com/mars-tw/ai-console/releases/download/v1.5.0/ai-console-win32-x64-v1.5.0.zip)**
 
 1. 解壓縮整個 ZIP，再開啟資料夾裡的 `AI控制台.exe`。
 2. 按「接入 AI」，依畫面選擇電腦上的 AI、雲端服務或已有的工具。
@@ -31,16 +31,20 @@
 
 Windows 發行包已包含控制台需要的 Python，不必另裝，也不會變更系統 Python。AI 工具、模型與雲端帳號並未預先附送：本機問答需安裝 LM Studio 並下載模型；雲端問答需從選定服務取得 API 金鑰，可能另外計費。控制台不會代你註冊、購買額度或自動下載大型模型。
 
+要讀寫專案或交給 AI 寫程式，可切到新增的「DevSpace」分頁。請先依 [DevSpace 官方說明](https://github.com/Waishnav/devspace) 安裝 DevSpace、Node.js 與 Windows 所需的 Git Bash，完成允許目錄及 provider 設定，再選擇專案送出工作。這些工具未包含在控制台下載包內；詳見 [DevSpace 桌面使用說明](docs/devspace-desktop.md)。
+
 第一次只用電腦即可；手機遙控是選配，另需在電腦與手機安裝並登入同一個 Tailscale 網路。
 
 <details>
 <summary>開發者：原始碼下載與自行建置</summary>
 
-[下載 v1.4.1 原始碼](https://github.com/mars-tw/ai-console/releases/download/v1.4.1/ai-console-source-v1.4.1.zip)。原始碼 ZIP 不是可直接執行的 Windows 程式；自行建置仍需 Node.js 與 Python，步驟見下方「快速開始」。
+[下載 v1.5.0 原始碼](https://github.com/mars-tw/ai-console/releases/download/v1.5.0/ai-console-source-v1.5.0.zip)。原始碼 ZIP 不是可直接執行的 Windows 程式；自行建置仍需 Node.js 與 Python，步驟見下方「快速開始」。
 
 </details>
 
-v1.4.1 修正新手冷啟動流程：沒有模型不再顯示可派工；問題草稿會保留並引導接入；提供持續可見的首頁、可略過的未使用來源、內建入門技能及安裝後使用步驟。相容服務新增預設網址與官方設定入口，智譜 `/v4` 不再被錯接網址。
+v1.5.0 新增 DevSpace 桌面控制台：查看 MCP 服務狀態、檢查環境、選擇允許的專案目錄，並派工給 Codex、Claude 或本機 AI；任務完成後可查看回覆及接續工作。支援繁體中文與 English，原始碼版另附 Windows 桌面捷徑建立腳本。
+
+保留 v1.4.1 的新手冷啟動流程：沒有模型不會顯示可派工；問題草稿會保留並引導接入；提供持續可見的首頁、可略過的未使用來源、內建入門技能及安裝後使用步驟。相容服務提供預設網址與官方設定入口，並正確處理智譜 `/v4` 網址。
 
 **繼續工作（新手）**：從對話按「繼續工作」會開啟中文對話框；預設是在控制台建立**新工單**（最多帶入最近 6 則、每則 300 字的對話背景），**不是**恢復原 AI 的完整舊 session。原工具預選且不會被自動改換；僅 headless 派工，需手動展開「原工具終端機（進階）」才會開英文終端，並附雙語安全提示。設定往返、草稿保留與焦點還原已一併修正。
 
@@ -184,6 +188,8 @@ python server/api.py       # 啟動整合伺服器 → http://127.0.0.1:5177/
 ```
 
 開發模式（熱更新）：`npm run dev`（會同時啟動 API + vite）。
+
+原始碼 ZIP 可用於上述建置與執行；若要執行 `npm run pack` 製作 Windows 發行包，請先使用 `git clone https://github.com/mars-tw/ai-console.git` 取得含 Git 紀錄的專案。打包程式依 Git 追蹤清單挑選檔案，以排除私人資料。
 
 ```bash
 npm run verify             # 型別 + 靜態檢查 + 前後端測試，一次跑完
@@ -342,8 +348,8 @@ src/                       # React + TypeScript + Tailwind 前端
 `scripts/audit_release.py` 能檢查資料夾或 ZIP 的版本、必要檔案、本機路徑、配對碼、私密檔名和 Windows 路徑／大小寫衝突。壓縮包通過檢查後，才把本機專屬設定放回本地安裝。
 
 ```bash
-python scripts/audit_release.py release/clean/AI控制台-win32-x64 --kind windows --version 1.4.1
-python scripts/audit_release.py release/ai-console-source-v1.4.1.zip --kind source --version 1.4.1
+python scripts/audit_release.py release/clean/AI控制台-win32-x64 --kind windows --version 1.5.0
+python scripts/audit_release.py release/ai-console-source-v1.5.0.zip --kind source --version 1.5.0
 ```
 
 發佈者可加 `--check-local-pairing`，只在記憶體中比對本機配對碼是否誤入成品；一般檢查與測試不會讀取配對設定。

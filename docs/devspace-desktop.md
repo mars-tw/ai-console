@@ -11,9 +11,11 @@ AI Console 的「DevSpace」分頁把本機 DevSpace 的服務、專案目錄與
 
 AI Console 不包含 AI 帳號、模型或 DevSpace 的 owner 密碼。目標出現在選單中，代表 DevSpace 已啟用該 provider；登入狀態、額度與模型是否可用，仍以實際派工結果為準。使用雲端 provider 時，任務內容會交給該服務。
 
-從原始碼建立桌面版本：
+從 Git checkout 建立桌面版本（打包程式需要 Git 追蹤清單）：
 
 ```powershell
+git clone https://github.com/mars-tw/ai-console.git
+cd ai-console
 npm ci
 npm run verify
 npm run pack
@@ -21,6 +23,8 @@ powershell -ExecutionPolicy Bypass -File scripts/create-desktop-shortcut.ps1 -De
 ```
 
 桌面會建立「DevSpace 控制台」捷徑，直接開啟 DevSpace 分頁。打包輸出在 `release/clean/AI控制台-win32-x64/`；請保留整個資料夾。也可以執行 `npm run app -- --devspace`，使用已建置的原始碼版本。
+
+若使用原始碼 ZIP，可執行 `npm ci`、`npm run build`、`npm run app -- --devspace`；要製作發行包時請改用上述 Git checkout。
 
 ## 服務與任務分開管理
 
