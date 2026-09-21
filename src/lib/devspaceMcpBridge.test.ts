@@ -1,6 +1,8 @@
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
 import { request } from 'node:http'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -13,6 +15,13 @@ const bridge = require('../../electron/devspace-mcp-bridge.cjs') as {
   validCallback(value: string, redirect: string, state: string): boolean
   callbackListener(redirect: string | undefined, state: string, timeout?: number): Promise<Callback>
   accessToken(config: unknown, options: Record<string, unknown>): Promise<string>
+  probeDevSpaceService(config: unknown, fetcher: (url: string, init: RequestInit) => Promise<unknown>): Promise<boolean>
+  progressFile(session: string, temporary?: string): { directory: string; file: string }
+  createProgressReporter(session: string, options?: Record<string, unknown>): (state: string) => void
+  createStateHeartbeat(write: (state: string) => void, options?: Record<string, unknown>): { report(state: string): void; stop(): void }
+  connectRemoteMcp(remote: { connect(transport: unknown): Promise<void> }, transport: unknown, report: (state: string) => void): Promise<void>
+  monitorRemoteConnection(remote: { ping(options?: unknown): Promise<unknown>; onclose?: () => void; onerror?: (error: Error) => void }, report: (state: string) => void, options?: Record<string, unknown>): { pulse(): Promise<void>; fail(state: string): void; stop(): void }
+  BRIDGE_PROGRESS_MAX_AGE_MS: number
   workspaceFilter(remote: Remote, config: unknown, io: unknown, paths: typeof path): Filter
   findDevSpacePackage(env: unknown, io: unknown, resolve: (file: string) => string): string | null
 }
@@ -27,6 +36,107 @@ describe('public DevSpace MCP OAuth bridge', () => {
     for (const target of ['https://evil.test/token', 'https://devspace.example/other', 'https://user:secret@devspace.example/token', 'https://devspace.example/token?leak=1', 'https://devspace.example/token#fragment']) {
       expect(() => bridge.oauthEndpoint(target, '/token', config)).toThrow()
     }
+  })
+
+  it('probes only the read-only OAuth metadata endpoint and never opens consent', async () => {
+    const fetcher = vi.fn(async (url: string, init: RequestInit) => {
+      expect(url).toBe(config.origin + '/.well-known/oauth-authorization-server')
+      expect(init.redirect).toBe('manual')
+      expect(init.headers).toBeUndefined()
+      return json(metadata)
+    })
+    await expect(bridge.probeDevSpaceService(config, fetcher)).resolves.toBe(true)
+    expect(fetcher).toHaveBeenCalledOnce()
+    await expect(bridge.probeDevSpaceService(config, async () => { throw new Error('offline') })).resolves.toBe(false)
+    await expect(bridge.probeDevSpaceService(config, async () => json({ ...metadata, authorization_endpoint: 'https://evil.test/authorize' }))).resolves.toBe(false)
+  })
+
+  it('writes fixed progress states to an exact random session without secrets', () => {
+    const session = '11111111-1111-4111-8111-111111111111'
+    const temporary = mkdtempSync(path.join(tmpdir(), 'ai-console-opencode-progress-'))
+    try {
+      const report = bridge.createProgressReporter(session, { temporary, now: () => 12345 })
+      report('waiting_for_owner')
+      const target = bridge.progressFile(session, temporary)
+      const text = readFileSync(target.file, 'utf8')
+      expect(JSON.parse(text)).toEqual({ version: 1, session, state: 'waiting_for_owner', updatedAt: 12345 })
+      expect(text).not.toMatch(/access_token|refresh_token|owner_token|password|Basic |Bearer /i)
+      expect(() => report('access_token=secret')).toThrow()
+      expect(() => bridge.progressFile('../escape', temporary)).toThrow()
+    } finally { rmSync(temporary, { recursive: true, force: true }) }
+  })
+
+  it('keeps authorization progress fresh without treating a connected snapshot as a heartbeat', () => {
+    let tick: () => void = () => undefined
+    const cleared = vi.fn()
+    const states: string[] = []
+    const heartbeat = bridge.createStateHeartbeat(state => states.push(state), {
+      intervalMs: 10,
+      setInterval: (callback: () => void) => { tick = callback; return { unref: vi.fn() } },
+      clearInterval: cleared,
+    })
+    heartbeat.report('waiting_for_owner')
+    tick()
+    expect(states).toEqual(['waiting_for_owner', 'waiting_for_owner'])
+    heartbeat.report('connected')
+    tick()
+    expect(states).toEqual(['waiting_for_owner', 'waiting_for_owner', 'connected'])
+    heartbeat.stop()
+    tick()
+    expect(cleared).toHaveBeenCalledOnce()
+    expect(states).toHaveLength(3)
+  })
+
+  it('refreshes connected liveness only after MCP ping and records remote error or close', async () => {
+    const states: string[] = []
+    const remote = { ping: vi.fn(async () => ({})) } as {
+      ping(options?: unknown): Promise<unknown>
+      onclose?: () => void
+      onerror?: (error: Error) => void
+    }
+    const monitor = bridge.monitorRemoteConnection(remote, state => states.push(state), {
+      intervalMs: 10,
+      pingTimeoutMs: 5,
+      setInterval: () => ({ unref: vi.fn() }),
+      clearInterval: vi.fn(),
+    })
+    expect(states).toEqual(['connected'])
+    await monitor.pulse()
+    expect(remote.ping).toHaveBeenCalledWith({ timeout: 5 })
+    expect(states).toEqual(['connected', 'connected'])
+    remote.onerror?.(new Error('upstream failed'))
+    expect(states.at(-1)).toBe('connection_failed')
+    await monitor.pulse()
+    expect(remote.ping).toHaveBeenCalledOnce()
+
+    const closeStates: string[] = []
+    const closedRemote = { ping: vi.fn(async () => ({})) } as typeof remote
+    bridge.monitorRemoteConnection(closedRemote, state => closeStates.push(state), {
+      setInterval: () => ({ unref: vi.fn() }), clearInterval: vi.fn(),
+    })
+    closedRemote.onclose?.()
+    expect(closeStates).toEqual(['connected', 'disconnected'])
+  })
+
+  it('keeps a valid Owner authorization separate from a later MCP transport failure', async () => {
+    const states: string[] = []
+    const cached = {
+      resource: config.resource,
+      client: { client_id: 'own', token_endpoint_auth_method: 'none' },
+      access_token: 'valid-token', expiresAt: Date.now() + 3600000,
+    }
+    const token = await bridge.accessToken(config, {
+      lock: unlocked,
+      readCache: () => cached,
+      fetch: async () => json(metadata),
+      onProgress: (state: string) => states.push(state),
+    })
+    expect(token).toBe('valid-token')
+    await expect(bridge.connectRemoteMcp({
+      connect: vi.fn(async () => { throw new Error('transport unavailable') }),
+    }, {}, state => states.push(state))).rejects.toMatchObject({ code: 'connection_failed' })
+    expect(states).toEqual(['checking_service', 'connecting', 'connection_failed'])
+    expect(states).not.toContain('authorization_failed')
   })
 
   it('performs public native registration and PKCE after browser consent without an owner password', async () => {
@@ -64,6 +174,53 @@ describe('public DevSpace MCP OAuth bridge', () => {
     expect(calls.every(call => call.url.startsWith(config.origin + '/'))).toBe(true)
     expect(JSON.stringify(save.mock.calls)).not.toContain('must-not-save')
     expect(close).toHaveBeenCalledOnce()
+  })
+
+  it('recovers from an authorization timeout by opening a fresh consent attempt', async () => {
+    let saved: Record<string, unknown> = {}
+    const writeCache = vi.fn((_file: string, value: Record<string, unknown>) => { saved = value })
+    const firstProgress: string[] = []
+    const timeout = Object.assign(new Error('timeout'), { code: 'authorization_timeout' })
+    const rejectedCode = { then: (_resolve: unknown, reject: (error: Error) => void) => reject(timeout) } as unknown as Promise<string>
+    const firstClose = vi.fn()
+    await expect(bridge.accessToken(config, {
+      lock: unlocked,
+      readCache: () => ({}),
+      writeCache,
+      onProgress: (state: string) => firstProgress.push(state),
+      fetch: async (url: string) => url.endsWith('/.well-known/oauth-authorization-server')
+        ? json(metadata) : json({ client_id: 'retry-client', token_endpoint_auth_method: 'none' }),
+      callbackListener: async () => ({ redirectUri: 'http://127.0.0.1:14444/callback', code: rejectedCode, close: firstClose }),
+      openConsent: vi.fn(),
+    })).rejects.toMatchObject({ code: 'authorization_timeout' })
+    expect(firstProgress).toEqual(['checking_service', 'waiting_for_owner', 'authorization_timeout'])
+    expect(saved).toMatchObject({ resource: config.resource, client: { client_id: 'retry-client', token_endpoint_auth_method: 'none' } })
+    expect(firstClose).toHaveBeenCalledOnce()
+
+    const secondProgress: string[] = []
+    const secondConsent = vi.fn()
+    const secondClose = vi.fn()
+    const token = await bridge.accessToken(config, {
+      lock: unlocked,
+      readCache: () => saved,
+      writeCache,
+      onProgress: (state: string) => secondProgress.push(state),
+      fetch: async (url: string, init: RequestInit) => {
+        if (url.endsWith('/.well-known/oauth-authorization-server')) return json(metadata)
+        expect(url).toBe(config.origin + '/token')
+        expect((init.body as URLSearchParams).get('grant_type')).toBe('authorization_code')
+        return json({ access_token: 'recovered-access', refresh_token: 'recovered-refresh', expires_in: 3600 })
+      },
+      callbackListener: async (redirect: string | undefined) => {
+        expect(redirect).toBe('http://127.0.0.1:14444/callback')
+        return { redirectUri: redirect!, code: Promise.resolve('retry-code'), close: secondClose }
+      },
+      openConsent: secondConsent,
+    })
+    expect(token).toBe('recovered-access')
+    expect(secondConsent).toHaveBeenCalledOnce()
+    expect(secondClose).toHaveBeenCalledOnce()
+    expect(secondProgress).toEqual(['checking_service', 'waiting_for_owner', 'authorization_received', 'connecting'])
   })
 
   it('refreshes only its own cache and never opens consent for a valid access token', async () => {

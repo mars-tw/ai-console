@@ -65,6 +65,11 @@ describe('新手首頁', () => {
     expect(selector).toContain(': <option value="auto">')
     expect(homeSource.match(/<SkillCenter onOpenSetup=/g)).toHaveLength(2)
   })
+  it('DevSpace 草稿由 Home 持有，兩個版面分支共用同一份狀態', () => {
+    expect(homeSource).toContain('const [devSpaceDraft, setDevSpaceDraft]')
+    expect(homeSource.match(/<DevSpaceConsole draft={devSpaceDraft} onDraftChange={setDevSpaceDraft} \/>/g)).toHaveLength(2)
+  })
+
   it('第一個畫面提供四個白話意圖入口', () => {
     expect(BEGINNER_ACTIONS).toEqual([
       '找回舊對話',
@@ -75,7 +80,7 @@ describe('新手首頁', () => {
   })
 
   it('大對話的主動作不顯示 CLI 術語', () => {
-    expect(originalAiActionLabel()).toBe('繼續工作')
+    expect(originalAiActionLabel()).toBe('在 ChatGPT 對話續作')
     expect(originalAiActionLabel()).not.toMatch(/CLI|指令|路徑/)
   })
 
@@ -86,12 +91,13 @@ describe('新手首頁', () => {
     expect(homeSource).not.toContain('const launch =')
   })
 
-  it('從繼續工作去設定會關閉對話框並可返回', () => {
-    expect(homeSource).toContain('continueSetupId')
-    expect(homeSource).toContain('openSetupFromContinueWork')
-    expect(homeSource).toContain('returnToContinueWork')
-    expect(homeSource).toContain('返回繼續工作')
-    expect(homeSource).toContain('useCallback(() => setContinueTarget(null)')
+  it('續作只準備共用 DevSpace 草稿，不保留第二條設定／返回流程', () => {
+    expect(homeSource).toContain('onPrepareConversation={prepareChatGPTConversation}')
+    expect(homeSource).toContain("setViewMode('devspace')")
+    expect(homeSource).not.toContain('continueSetupId')
+    expect(homeSource).not.toContain('openSetupFromContinueWork')
+    expect(homeSource).not.toContain('returnToContinueWork')
+    expect(homeSource).not.toContain('返回繼續工作')
   })
 })
 

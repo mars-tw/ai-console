@@ -37,10 +37,9 @@ class DevSpaceAPITest(unittest.TestCase):
         manager.start.assert_not_called()
         self.assertEqual(handler.response, (200, {'ok': True, 'installed': False}))
 
-    def test_only_explicit_actions_are_exposed(self):
+    def test_only_explicit_service_and_history_actions_are_exposed(self):
         for action, method in (('doctor', 'doctor'), ('start', 'start'), ('stop', 'stop'),
-                               ('tasks', 'tasks'), ('run', 'run'), ('show', 'show'),
-                               ('continue', 'continue_task')):
+                               ('tasks', 'tasks'), ('show', 'show')):
             with self.subTest(action=action):
                 payload = {'cwd': 'synthetic', 'prompt': 'hello'}
                 handler = FakeHandler('/api/devspace/' + action, payload)
@@ -50,6 +49,16 @@ class DevSpaceAPITest(unittest.TestCase):
                     handler.do_POST()
                 getattr(manager, method).assert_called_once_with(payload)
                 self.assertEqual(handler.response[0], 200)
+
+    def test_run_and_continue_require_chatgpt_conversation_without_service_call(self):
+        for action in ('run', 'continue'):
+            with self.subTest(action=action):
+                handler = FakeHandler('/api/devspace/' + action, {'cwd': 'synthetic', 'prompt': 'hello'})
+                with mock.patch.object(api, '_devspace_console') as manager:
+                    handler.do_POST()
+                self.assertEqual(handler.response[0], 409)
+                self.assertEqual(handler.response[1]['code'], 'USE_CHATGPT_CONVERSATION')
+                manager.assert_not_called()
 
     def test_missing_or_foreign_origin_and_rebinding_host_are_refused(self):
         for headers in ({'Origin': ''}, {'Origin': 'https://example.com'},
@@ -73,19 +82,28 @@ class DevSpaceAPITest(unittest.TestCase):
             handler.do_GET()
         self.assertEqual(handler.response[0], 200)
 
-    def test_non_json_or_invalid_body_is_rejected_before_service_call(self):
+    def test_non_json_or_invalid_body_is_rejected_before_active_service_call(self):
         for body, headers, expected in (([], {}, 400), ({}, {'Content-Type': 'text/plain'}, 415)):
-            handler = FakeHandler('/api/devspace/run', body, **headers)
+            handler = FakeHandler('/api/devspace/start', body, **headers)
             with mock.patch.object(api, '_devspace_console') as manager:
                 handler.do_POST()
             self.assertEqual(handler.response[0], expected)
             manager.assert_not_called()
-        handler = FakeHandler('/api/devspace/run')
+        handler = FakeHandler('/api/devspace/start')
         handler._body_error = ('INVALID_JSON', 'bad', 400)
         with mock.patch.object(api, '_devspace_console') as manager:
             handler.do_POST()
         self.assertEqual(handler.response[0], 400)
         manager.assert_not_called()
+
+    def test_disabled_work_routes_return_guidance_even_with_legacy_body_shapes(self):
+        for body in ([], {}, {'anything': 'old-client'}):
+            handler = FakeHandler('/api/devspace/run', body)
+            with mock.patch.object(api, '_devspace_console') as manager:
+                handler.do_POST()
+            self.assertEqual(handler.response[0], 409)
+            self.assertEqual(handler.response[1]['code'], 'USE_CHATGPT_CONVERSATION')
+            manager.assert_not_called()
 
     def test_unsupported_command_is_not_exposed(self):
         handler = FakeHandler('/api/devspace/bash', {'command': 'anything'})

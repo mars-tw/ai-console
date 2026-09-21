@@ -9,16 +9,21 @@ const net = require('node:net')
 const http = require('node:http')
 const crypto = require('node:crypto')
 const childProcess = require('node:child_process')
-const { packageCandidates, findDevSpacePackage } = require('./devspace-mcp-bridge.cjs')
+const {
+  packageCandidates, findDevSpacePackage, devSpaceServiceConfig, probeDevSpaceService, progressFile,
+  BRIDGE_PROGRESS_MAX_AGE_MS,
+} = require('./devspace-mcp-bridge.cjs')
 
-const CHANNELS = ['opencode:status', 'opencode:open', 'opencode:stop']
+const CHANNELS = ['opencode:status', 'opencode:open', 'opencode:reconnect', 'opencode:stop']
 const MODELS = ['gpt-5.6-sol', 'gpt-6-astra']
 const ERRORS = {
   forbidden: '只能從本機工作臺操作 OpenCode。',
-  config: '無法讀取 DevSpace 允許目錄，請先完成 DevSpace 設定。',
+  config: '無法讀取 DevSpace 設定或允許目錄，請先完成 DevSpace 設定。',
   workspace: '請選擇 DevSpace 允許目錄內已存在的專案資料夾。',
   missing: '尚未找到 OpenCode，請先安裝後重新整理。',
   bridge: '找不到 DevSpace 對話連線程式或 Node.js，請先完成 DevSpace 安裝。',
+  service: 'DevSpace 服務目前無法連線，請先啟動 DevSpace 後再試一次。',
+  confirm: '重新連接會停止目前的 OpenCode 服務，請在畫面上確認後再試一次。',
   busy: 'OpenCode 已在另一個專案啟動，請先停止服務再切換專案。',
   starting: 'OpenCode 正在啟動，請稍候。',
   start: 'OpenCode 無法啟動，請確認安裝完成後再試一次。',
@@ -124,8 +129,65 @@ function discover({ env = process.env, io = fs, platform = process.platform } = 
   return { nativeBin: nativeBin || null, node: node || null, bridge: exists(bridge) ? bridge : null, devspaceRoot: findDevSpacePackage(env, io) }
 }
 
-function launchSpec({ nativeBin, node, bridge, devspaceRoot, cwd, port, password, model = MODELS[0], env = process.env }) {
+const BRIDGE_PROGRESS = new Set([
+  'checking_service', 'refreshing_authorization', 'waiting_for_owner', 'authorization_received',
+  'connecting', 'connected', 'authorization_timeout', 'authorization_failed',
+  'service_unreachable', 'bridge_failed', 'connection_failed', 'disconnected',
+])
+
+function readBridgeProgress(session, io = fs, temporary = os.tmpdir(), now = Date.now(), maxAge = BRIDGE_PROGRESS_MAX_AGE_MS) {
+  try {
+    const target = progressFile(session, temporary)
+    if (io.statSync(target.file).size > 4096) return null
+    const value = JSON.parse(io.readFileSync(target.file, 'utf8'))
+    if (value?.version !== 1 || value.session !== session || !BRIDGE_PROGRESS.has(value.state)
+      || !Number.isFinite(value.updatedAt) || value.updatedAt <= 0 || value.updatedAt > now + maxAge) return null
+    return { state: value.state, updatedAt: value.updatedAt, fresh: now - value.updatedAt <= maxAge }
+  } catch { return null }
+}
+
+function authorizationState(progress, confirmed = false) {
+  switch (progress?.state) {
+    case 'waiting_for_owner': return 'waiting_for_owner'
+    case 'authorization_received':
+    case 'connecting':
+    case 'connected':
+    case 'connection_failed':
+    case 'disconnected': return 'authorized'
+    case 'authorization_timeout': return 'timed_out'
+    case 'authorization_failed': return 'failed'
+    case 'bridge_failed': return confirmed ? 'authorized' : 'not_started'
+    default: return confirmed ? 'authorized' : 'checking'
+  }
+}
+
+function connectionStatus(active, progress, context = {}) {
+  if (!active) return { authorization: 'not_started', mcp: 'stopped', connectionIssue: null }
+  const authorization = authorizationState(progress, context.authorizationConfirmed)
+  if (context.serviceUnreachable) return { authorization, mcp: 'failed', connectionIssue: 'service_unreachable' }
+  if (context.serviceInterrupted || context.bridgeLost || progress?.fresh === false) {
+    return { authorization: authorization === 'waiting_for_owner' ? 'checking' : authorization, mcp: 'failed', connectionIssue: 'disconnected' }
+  }
+  switch (progress?.state) {
+    case 'waiting_for_owner': return { authorization, mcp: 'connecting', connectionIssue: null }
+    case 'authorization_received':
+    case 'connecting': return { authorization, mcp: 'connecting', connectionIssue: null }
+    case 'connected': return { authorization, mcp: 'connected', connectionIssue: null }
+    case 'authorization_timeout': return { authorization, mcp: 'failed', connectionIssue: 'authorization_timeout' }
+    case 'authorization_failed': return { authorization, mcp: 'failed', connectionIssue: 'authorization_failed' }
+    case 'service_unreachable': return { authorization, mcp: 'failed', connectionIssue: 'service_unreachable' }
+    case 'bridge_failed': return { authorization, mcp: 'failed', connectionIssue: 'bridge_failed' }
+    case 'connection_failed': return { authorization, mcp: 'failed', connectionIssue: 'connection_failed' }
+    case 'disconnected': return { authorization, mcp: 'failed', connectionIssue: 'disconnected' }
+    case 'checking_service':
+    case 'refreshing_authorization':
+    default: return { authorization, mcp: 'connecting', connectionIssue: null }
+  }
+}
+
+function launchSpec({ nativeBin, node, bridge, devspaceRoot, cwd, port, password, bridgeSession, model = MODELS[0], env = process.env }) {
   if (!MODELS.includes(model)) throw failure('model')
+  try { progressFile(bridgeSession) } catch { throw failure('bridge') }
   const permissions = {
     '*': 'ask', task: 'deny', bash: 'deny', read: 'deny', edit: 'deny',
     glob: 'deny', grep: 'deny', list: 'deny', lsp: 'deny', external_directory: 'deny',
@@ -138,8 +200,10 @@ function launchSpec({ nativeBin, node, bridge, devspaceRoot, cwd, port, password
     permission: permissions,
     mcp: { devspace: {
       type: 'local', command: [node, bridge], enabled: true, timeout: 180000,
-      environment: { DEVSPACE_MCP_WORKSPACE: cwd, DEVSPACE_MCP_WRITE_MODE: 'allowed',
-        ...(devspaceRoot ? { AI_CONSOLE_DEVSPACE_PACKAGE: devspaceRoot } : {}) },
+      environment: {
+        DEVSPACE_MCP_WORKSPACE: cwd, DEVSPACE_MCP_WRITE_MODE: 'allowed', AI_CONSOLE_BRIDGE_SESSION: bridgeSession,
+        ...(devspaceRoot ? { AI_CONSOLE_DEVSPACE_PACKAGE: devspaceRoot } : {}),
+      },
     } },
   }
   return {
@@ -194,6 +258,13 @@ function createManager(options) {
   const execFile = options.execFile || childProcess.execFile
   const getRoots = options.getRoots || (() => allowedRoots({ env, io }))
   const getTools = options.discover || (() => discover({ env, io }))
+  const getServiceConfig = options.devspaceConfig || (() => devSpaceServiceConfig(env, io))
+  const serviceHealth = options.devspaceHealth || (config => probeDevSpaceService(config))
+  const now = options.now || Date.now
+  const progressMaxAge = options.progressMaxAge || BRIDGE_PROGRESS_MAX_AGE_MS
+  const getProgress = options.readProgress || (session => readBridgeProgress(
+    session, io, options.temporary || os.tmpdir(), now(), progressMaxAge,
+  ))
   const health = options.health || checkHealth
   const allocatePort = options.freePort || freePort
   const sleep = options.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)))
@@ -213,14 +284,49 @@ function createManager(options) {
     const tools = getTools()
     let roots = [], configError = ''
     try { roots = getRoots() } catch { configError = ERRORS.config }
-    const active = owned && owned.child.exitCode === null && !owned.child.killed
+    const bridgeReady = !!tools.bridge && !!tools.node && !!tools.devspaceRoot
+    let devspaceService = 'not_configured', serviceConfig
+    if (!configError && roots.length > 0 && bridgeReady) {
+      try { serviceConfig = getServiceConfig() } catch { configError = ERRORS.config }
+      if (serviceConfig) {
+        try { devspaceService = await serviceHealth(serviceConfig) ? 'reachable' : 'unreachable' }
+        catch { devspaceService = 'unreachable' }
+      }
+    }
+    const active = !!owned && owned.child.exitCode === null && !owned.child.killed
+    const currentTime = now()
+    const observedProgress = active ? getProgress(owned.bridgeSession) : null
+    if (active && observedProgress) {
+      const fresh = observedProgress.fresh !== false && observedProgress.updatedAt <= currentTime + progressMaxAge
+        && currentTime - observedProgress.updatedAt <= progressMaxAge
+      owned.lastProgress = { ...observedProgress, fresh }
+      owned.progressSeen = true
+      if (['authorization_received', 'connecting', 'connected', 'connection_failed', 'disconnected'].includes(observedProgress.state)) {
+        owned.authorizationConfirmed = true
+      } else if (observedProgress.state === 'authorization_failed') owned.authorizationConfirmed = false
+      if (!fresh) owned.bridgeLost = true
+    }
+    if (active && devspaceService === 'unreachable') owned.serviceInterrupted = true
+    let progress = active ? owned.lastProgress || null : null
+    if (active && progress && currentTime - progress.updatedAt > progressMaxAge) {
+      progress = { ...progress, fresh: false }
+      owned.lastProgress = progress
+      owned.bridgeLost = true
+    }
+    const connection = connectionStatus(active, progress, {
+      serviceUnreachable: devspaceService === 'unreachable',
+      serviceInterrupted: !!owned?.serviceInterrupted,
+      bridgeLost: !!owned?.bridgeLost,
+      authorizationConfirmed: !!owned?.authorizationConfirmed,
+    })
     return {
       installed: !!tools.nativeBin, version: await version(tools.nativeBin),
-      configured: roots.length > 0, allowedRoots: roots, bridgeReady: !!tools.bridge && !!tools.node && !!tools.devspaceRoot,
-      running: !!active && owned.ready, starting: !!active && !owned.ready,
+      configured: roots.length > 0 && !configError, allowedRoots: roots, bridgeReady, devspaceService,
+      ...connection,
+      running: active && owned.ready, starting: active && !owned.ready,
       cwd: active ? owned.cwd : null,
       model: active ? owned.model : MODELS[0],
-      windowOpen: !!active && !!owned.window && !owned.window.isDestroyed(),
+      windowOpen: active && !!owned.window && !owned.window.isDestroyed(),
       ...(configError ? { error: configError } : {}),
     }
   }
@@ -260,6 +366,12 @@ function createManager(options) {
     })
   }
 
+  function cleanupProgress(service) {
+    if (!service?.bridgeSession) return
+    try { io.unlinkSync(progressFile(service.bridgeSession, options.temporary || os.tmpdir()).file) }
+    catch { /* Missing files and unsupported mock filesystems are harmless. */ }
+  }
+
   async function stopOwned(service) {
     if (!service) return
     service.cancelled = true
@@ -271,6 +383,7 @@ function createManager(options) {
       }
       if (service.child.exitCode === null && !service.child.killed) { try { service.child.kill() } catch { /* Already exited. */ } }
     }
+    cleanupProgress(service)
     if (owned === service) owned = null
   }
 
@@ -288,16 +401,31 @@ function createManager(options) {
     const tools = getTools()
     if (!tools.nativeBin) throw failure('missing')
     if (!tools.node || !tools.bridge || !tools.devspaceRoot) throw failure('bridge')
+    let serviceConfig, serviceReachable = false
+    try {
+      serviceConfig = getServiceConfig()
+      serviceReachable = await serviceHealth(serviceConfig)
+    } catch { /* The fixed service error below does not expose configuration details. */ }
+    if (!serviceConfig) throw failure('config')
+    if (!serviceReachable) throw failure('service')
     const port = await allocatePort()
     if (disposed || attempt !== generation) throw failure('stopped')
     const password = crypto.randomBytes(32).toString('base64url')
-    const spec = launchSpec({ ...tools, cwd: workspace, port, password, model, env })
+    const bridgeSession = crypto.randomUUID()
+    const spec = launchSpec({ ...tools, cwd: workspace, port, password, bridgeSession, model, env })
     const child = spawn(spec.file, spec.args, spec.options)
-    const service = { child, cwd: workspace, model, origin: `http://127.0.0.1:${port}`, authorization: `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`, ready: false, cancelled: false, window: null }
+    const service = {
+      child, cwd: workspace, model, bridgeSession, origin: `http://127.0.0.1:${port}`,
+      authorization: `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`,
+      ready: false, cancelled: false, window: null,
+      lastProgress: null, progressSeen: false, bridgeLost: false, serviceInterrupted: false,
+      authorizationConfirmed: false,
+    }
     owned = service
     child.once('error', () => { service.cancelled = true })
     child.once('exit', () => {
       service.cancelled = true
+      cleanupProgress(service)
       if (owned === service) owned = null
       if (service.window && !service.window.isDestroyed()) service.window.destroy()
     })
@@ -318,11 +446,26 @@ function createManager(options) {
     } catch (error) { await stopOwned(service); throw error }
   }
 
+  async function restart(input) {
+    if (!owned) return start(input?.cwd, input?.model)
+    if (input?.confirmInterrupt !== true) throw failure('confirm')
+    const cwd = owned.cwd
+    const model = owned.model
+    generation++
+    await stopOwned(owned)
+    return start(cwd, model)
+  }
+
   return {
     status,
     open(input) {
       if (opening) return Promise.reject(failure('starting'))
       opening = start(input?.cwd, input?.model).finally(() => { opening = null })
+      return opening
+    },
+    reconnect(input) {
+      if (opening) return Promise.reject(failure('starting'))
+      opening = restart(input).finally(() => { opening = null })
       return opening
     },
     async stop() { generation++; await stopOwned(owned); return status() },
@@ -338,11 +481,15 @@ function wireOpenCode(options) {
     if (!trustedSender(event, options.mainWindow, options.appUrl)) return safeError(failure('forbidden'))
     try {
       const status = channel === 'opencode:open' ? await manager.open(input)
-        : channel === 'opencode:stop' ? await manager.stop() : await manager.status()
+        : channel === 'opencode:reconnect' ? await manager.reconnect(input)
+          : channel === 'opencode:stop' ? await manager.stop() : await manager.status()
       return { ok: true, status }
     } catch (error) { return safeError(error) }
   })
   return manager
 }
 
-module.exports = { wireOpenCode, createManager, validateWorkspace, trustedSender, sameOrigin, launchSpec, parseJsonc, allowedRoots, discover }
+module.exports = {
+  wireOpenCode, createManager, validateWorkspace, trustedSender, sameOrigin, launchSpec,
+  parseJsonc, allowedRoots, discover, readBridgeProgress, connectionStatus,
+}

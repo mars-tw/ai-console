@@ -14,6 +14,32 @@ $script:InstallerDirectory = $PSScriptRoot
 if (-not $SourceRoot) { $SourceRoot = Split-Path -Parent $PSScriptRoot }
 . (Join-Path $PSScriptRoot 'quick-payload.ps1')
 
+function Write-QuickInstallProgress {
+    param(
+        [Parameter(Mandatory = $true)][string]$Activity,
+        [Parameter(Mandatory = $true)][string]$Status,
+        [int]$Current = -1,
+        [int]$Total = -1,
+        [switch]$Completed
+    )
+    if ($Completed) {
+        Write-Progress -Activity $Activity -Status $Status -Completed
+        Write-Host ($Activity + '：' + $Status)
+        return
+    }
+    if ($Total -gt 0 -and $Current -ge 0) {
+        $percent = [Math]::Min(100, [Math]::Max(0, [int](($Current * 100) / $Total)))
+        Write-Progress -Activity $Activity -Status ($Status + " ($Current/$Total)") -PercentComplete $percent
+        return
+    }
+    if ($Current -ge 0) {
+        Write-Progress -Activity $Activity -Status ($Status + ' ' + $Current + ' 個檔案')
+        return
+    }
+    Write-Progress -Activity $Activity -Status $Status
+    Write-Host ($Activity + '：' + $Status)
+}
+
 function Assert-SafePath([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
     if ($full.StartsWith('\\')) { throw 'Network and device paths are not supported by quick install.' }
@@ -55,11 +81,13 @@ function Test-PortablePayload([string]$Root, [string]$Version) {
     return (Test-QuickPayload -Root $Root -Version $Version -VerifyHashes)
 }
 
-function Get-PayloadInventory([string]$Root) {
+function Get-PayloadInventory {
+    param([string]$Root, [string]$ProgressActivity = '', [int]$ExpectedCount = 0)
     $base = (Assert-SafePath $Root).TrimEnd('\', '/')
     $pending = New-Object 'System.Collections.Generic.Stack[string]'
     $pending.Push($base)
     $files = @{}
+    [int]$processed = 0
     while ($pending.Count -gt 0) {
         foreach ($item in Get-ChildItem -LiteralPath $pending.Pop() -Force) {
             $null = Assert-ChildPath $item.FullName $base
@@ -67,6 +95,14 @@ function Get-PayloadInventory([string]$Root) {
             $relative = $item.FullName.Substring($base.Length + 1).Replace('\', '/')
             if ($files.ContainsKey($relative)) { throw 'Duplicate file paths in app payload.' }
             $files[$relative] = Get-Sha256 $item.FullName
+            $processed++
+            if ($ProgressActivity) {
+                if ($ExpectedCount -gt 0) {
+                    Write-QuickInstallProgress -Activity $ProgressActivity -Status '已檢查檔案' -Current $processed -Total $ExpectedCount
+                } else {
+                    Write-QuickInstallProgress -Activity $ProgressActivity -Status '已檢查' -Current $processed
+                }
+            }
         }
     }
     return $files
@@ -132,25 +168,31 @@ function Expand-SafeArchive {
             }
         }
         $null = [IO.Directory]::CreateDirectory($target)
+        [int]$processedEntries = 0
         foreach ($record in $entries) {
-            if ($record.Directory) { $null = [IO.Directory]::CreateDirectory($record.Path); continue }
-            $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($record.Path))
-            $inputStream = $record.Entry.Open()
-            $outputStream = $null
-            try {
-                $outputStream = [IO.File]::Open($record.Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-                $buffer = New-Object byte[] 81920
-                [long]$written = 0
-                while (($count = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                    $written += $count
-                    if ($written -gt $record.Entry.Length -or $written -gt $MaxExpandedBytes) { throw 'Archive entry exceeds its declared size.' }
-                    $outputStream.Write($buffer, 0, $count)
+            if ($record.Directory) {
+                $null = [IO.Directory]::CreateDirectory($record.Path)
+            } else {
+                $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($record.Path))
+                $inputStream = $record.Entry.Open()
+                $outputStream = $null
+                try {
+                    $outputStream = [IO.File]::Open($record.Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                    $buffer = New-Object byte[] 81920
+                    [long]$written = 0
+                    while (($count = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                        $written += $count
+                        if ($written -gt $record.Entry.Length -or $written -gt $MaxExpandedBytes) { throw 'Archive entry exceeds its declared size.' }
+                        $outputStream.Write($buffer, 0, $count)
+                    }
+                    if ($outputStream.Length -ne $record.Entry.Length) { throw 'Archive entry size mismatch.' }
+                } finally {
+                    if ($outputStream) { $outputStream.Dispose() }
+                    $inputStream.Dispose()
                 }
-                if ($outputStream.Length -ne $record.Entry.Length) { throw 'Archive entry size mismatch.' }
-            } finally {
-                if ($outputStream) { $outputStream.Dispose() }
-                $inputStream.Dispose()
             }
+            $processedEntries++
+            Write-QuickInstallProgress -Activity '解壓縮下載包' -Status '已處理項目' -Current $processedEntries -Total $entries.Count
         }
     } finally { $zip.Dispose() }
 }
@@ -162,7 +204,7 @@ function Receive-ReleaseFile([string]$Uri, [string]$OutFile) {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $previousProgress = $ProgressPreference
     try {
-        $ProgressPreference = 'SilentlyContinue'
+        $ProgressPreference = 'Continue'
         Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $OutFile -MaximumRedirection 5 -TimeoutSec 900 -ErrorAction Stop | Out-Null
     }
     catch { throw '下載失敗或逾時。請確認網路連線，以及 GitHub 上是否已有這個版本，再重新執行快速安裝。' }
@@ -182,24 +224,48 @@ function Get-DownloadedPayload($Manifest, [string]$Scratch) {
     $base = 'https://github.com/mars-tw/ai-console/releases/download/v' + $Manifest.version + '/'
     $archive = Join-Path $Scratch $Manifest.asset
     $sums = Join-Path $Scratch 'SHA256SUMS.txt'
+    Write-QuickInstallProgress -Activity '下載發行檔' -Status '正在下載 SHA256 校驗碼'
     Receive-ReleaseFile ($base + 'SHA256SUMS.txt') $sums
+    Write-QuickInstallProgress -Activity '下載發行檔' -Status '已下載檔案' -Current 1 -Total 2
     Receive-ReleaseFile ($base + $Manifest.asset) $archive
+    Write-QuickInstallProgress -Activity '下載發行檔' -Status '已下載檔案' -Current 2 -Total 2
     if ((Get-Item -LiteralPath $archive).Length -gt 1610612736) { throw 'Release archive exceeds the download size limit.' }
+    Write-QuickInstallProgress -Activity '下載發行檔' -Status '完成' -Completed
+
+    Write-QuickInstallProgress -Activity '驗證下載校驗碼' -Status '正在比對 SHA256'
     Assert-ReleaseChecksum $archive $sums $Manifest.asset
+    Write-QuickInstallProgress -Activity '驗證下載校驗碼' -Status '完成' -Completed
+
     $unpacked = Join-Path $Scratch 'unpacked'
+    Write-QuickInstallProgress -Activity '解壓縮下載包' -Status '正在安全解壓縮'
     Expand-SafeArchive $archive $unpacked
-    if (Test-PortablePayload $unpacked $Manifest.version) { return $unpacked }
-    $children = @(Get-ChildItem -LiteralPath $unpacked -Force)
-    if ($children.Count -eq 1 -and $children[0].PSIsContainer -and (Test-PortablePayload $children[0].FullName $Manifest.version)) {
-        return $children[0].FullName
+    Write-QuickInstallProgress -Activity '解壓縮下載包' -Status '完成' -Completed
+
+    Write-QuickInstallProgress -Activity '驗證下載內容' -Status '正在檢查必要檔案與版本'
+    $payload = $null
+    if (Test-PortablePayload $unpacked $Manifest.version) {
+        $payload = $unpacked
+    } else {
+        $children = @(Get-ChildItem -LiteralPath $unpacked -Force)
+        if ($children.Count -eq 1 -and $children[0].PSIsContainer -and (Test-PortablePayload $children[0].FullName $Manifest.version)) {
+            $payload = $children[0].FullName
+        }
     }
-    throw '下載包缺少必要檔案，或版本不符。請重新下載完整版本後再試。'
+    if (-not $payload) { throw '下載包缺少必要檔案，或版本不符。請重新下載完整版本後再試。' }
+    Write-QuickInstallProgress -Activity '驗證下載內容' -Status '完成' -Completed
+    return $payload
 }
 
 function Install-AppPayload([string]$Payload, [string]$Destination, [string]$Version) {
     if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid installation version.' }
+    Write-QuickInstallProgress -Activity '驗證安裝來源' -Status '正在檢查必要檔案與雜湊'
     if (-not (Test-PortablePayload $Payload $Version)) { throw '程式缺少必要檔案，或版本不符。請重新解壓縮完整的下載包。' }
-    $inventory = Get-PayloadInventory $Payload
+    Write-QuickInstallProgress -Activity '驗證安裝來源' -Status '完成' -Completed
+
+    Write-QuickInstallProgress -Activity '建立安裝清單' -Status '正在計算檔案雜湊'
+    $inventory = Get-PayloadInventory $Payload -ProgressActivity '建立安裝清單'
+    Write-QuickInstallProgress -Activity '建立安裝清單' -Status ('完成，共 ' + $inventory.Count + ' 個檔案') -Completed
+
     $root = Assert-SafePath $Destination
     $versions = Assert-ChildPath (Join-Path $root 'versions') $root
     $target = Assert-ChildPath (Join-Path $versions $Version) $versions
@@ -210,23 +276,46 @@ function Install-AppPayload([string]$Payload, [string]$Destination, [string]$Ver
     $stage = $null
     try {
         if (Test-Path -LiteralPath $target) {
-            if (-not (Test-PortablePayload $target $Version) -or -not (Test-EqualInventory $inventory (Get-PayloadInventory $target))) {
+            Write-QuickInstallProgress -Activity '驗證既有安裝' -Status '正在比對已安裝檔案'
+            $targetValid = Test-PortablePayload $target $Version
+            $targetInventory = $null
+            if ($targetValid) {
+                $targetInventory = Get-PayloadInventory $target -ProgressActivity '驗證既有安裝' -ExpectedCount $inventory.Count
+            }
+            if (-not $targetValid -or -not (Test-EqualInventory $inventory $targetInventory)) {
                 throw '[VERSION_CONFLICT] 這個版本的安裝資料夾已有不同檔案，原有檔案已保留。請用 InstallRoot 指定其他安裝位置。'
             }
+            Write-QuickInstallProgress -Activity '驗證既有安裝' -Status '完成' -Completed
             return (Join-Path $target 'AI控制台.exe')
         }
         $stage = Assert-ChildPath (Join-Path $versions ('.staging-' + [Guid]::NewGuid().ToString('N'))) $versions
         $null = [IO.Directory]::CreateDirectory($stage)
-        foreach ($relative in $inventory.Keys) {
+        [int]$copied = 0
+        Write-QuickInstallProgress -Activity '複製安裝檔案' -Status '正在複製已驗證檔案'
+        foreach ($relative in ($inventory.Keys | Sort-Object)) {
             $from = Assert-ChildPath (Join-Path $Payload $relative) $Payload
             $to = Assert-ChildPath (Join-Path $stage $relative) $stage
             $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($to))
             [IO.File]::Copy($from, $to, $false)
+            $copied++
+            Write-QuickInstallProgress -Activity '複製安裝檔案' -Status '已複製檔案' -Current $copied -Total $inventory.Count
         }
-        if (-not (Test-PortablePayload $stage $Version) -or -not (Test-EqualInventory $inventory (Get-PayloadInventory $stage))) {
+        Write-QuickInstallProgress -Activity '複製安裝檔案' -Status '完成' -Completed
+
+        Write-QuickInstallProgress -Activity '驗證已安裝檔案' -Status '正在重新檢查必要檔案與雜湊'
+        $stageValid = Test-PortablePayload $stage $Version
+        $stageInventory = $null
+        if ($stageValid) {
+            $stageInventory = Get-PayloadInventory $stage -ProgressActivity '驗證已安裝檔案' -ExpectedCount $inventory.Count
+        }
+        if (-not $stageValid -or -not (Test-EqualInventory $inventory $stageInventory)) {
             throw '複製後的檔案驗證未通過，舊版本已保留。請重新下載完整版本後再試。'
         }
+        Write-QuickInstallProgress -Activity '驗證已安裝檔案' -Status '完成' -Completed
+
+        Write-QuickInstallProgress -Activity '啟用安裝版本' -Status '正在啟用已驗證版本'
         [IO.Directory]::Move($stage, $target)
+        Write-QuickInstallProgress -Activity '啟用安裝版本' -Status '完成' -Completed
         return (Join-Path $target 'AI控制台.exe')
     } finally {
         $lock.Dispose()
@@ -255,7 +344,11 @@ function Write-CurrentPointer([string]$Destination, [string]$Version) {
 
 function New-AppShortcuts([string]$Executable) {
     $shell = New-Object -ComObject WScript.Shell
-    foreach ($folder in @([Environment]::GetFolderPath('DesktopDirectory'), (Join-Path ([Environment]::GetFolderPath('Programs')) 'AI Console'))) {
+    $folders = @([Environment]::GetFolderPath('DesktopDirectory'), (Join-Path ([Environment]::GetFolderPath('Programs')) 'AI Console'))
+    [int]$created = 0
+    [int]$total = $folders.Count * 2
+    Write-QuickInstallProgress -Activity '建立捷徑' -Status '正在建立桌面與開始功能表捷徑'
+    foreach ($folder in $folders) {
         $null = Assert-SafePath $folder
         $null = [IO.Directory]::CreateDirectory($folder)
         foreach ($devspace in @($false, $true)) {
@@ -268,7 +361,38 @@ function New-AppShortcuts([string]$Executable) {
             $shortcut.IconLocation = $Executable + ',0'
             $shortcut.Description = if ($devspace) { 'DevSpace desktop console' } else { 'AI Console' }
             $shortcut.Save()
+            $created++
+            Write-QuickInstallProgress -Activity '建立捷徑' -Status '已建立捷徑' -Current $created -Total $total
         }
+    }
+    Write-QuickInstallProgress -Activity '建立捷徑' -Status '完成' -Completed
+}
+
+function Show-DevSpaceResumeInstructions {
+    param([switch]$AfterFailure)
+    if ($AfterFailure) {
+        Write-Host '控制台不需要重新安裝。修正上述錯誤後，可依下列方式重新執行 DevSpace 設定。'
+    } else {
+        Write-Host '本次未執行 DevSpace 設定；既有設定保持不變。尚未設定者可依下列方式接續。'
+    }
+    Write-Host '回到快速安裝包資料夾，在 PowerShell 執行：'
+    Write-Host 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-devspace.ps1'
+}
+
+function Request-DevSpaceSetupNow {
+    Write-Host ''
+    Write-Host '控制台已安裝並驗證完成。DevSpace 可以現在設定，也可以稍後再設定。'
+    Write-Host '[1] 現在設定 DevSpace'
+    Write-Host '[2] 稍後設定，先開啟控制台'
+    while ($true) {
+        try { $choice = Read-Host '請輸入 1 或 2（直接按 Enter 代表 2）' }
+        catch {
+            Write-Host ('無法讀取設定選擇，已改為稍後設定：' + $_.Exception.Message) -ForegroundColor Yellow
+            return $false
+        }
+        if ([string]::IsNullOrWhiteSpace($choice) -or $choice.Trim() -eq '2') { return $false }
+        if ($choice.Trim() -eq '1') { return $true }
+        Write-Host '請輸入 1 或 2。' -ForegroundColor Yellow
     }
 }
 
@@ -289,7 +413,12 @@ function Invoke-QuickInstall {
     $pin = Get-QuickInstallManifest
     $sourcePath = Assert-SafePath $Source
     $destinationPath = Assert-SafePath $Destination
+    if (-not $Preview) { Write-QuickInstallProgress -Activity '檢查安裝來源' -Status '正在確認本機是否有完整安裝包' }
     $portable = Test-PortablePayload $sourcePath $pin.version
+    if (-not $Preview) {
+        $sourceStatus = if ($portable) { '完成，使用本機完整包' } else { '完成，將下載固定版本' }
+        Write-QuickInstallProgress -Activity '檢查安裝來源' -Status $sourceStatus -Completed
+    }
     $plan = [ordered]@{
         version = $pin.version; source = $(if ($portable) { 'portable' } else { 'github-release' })
         installRoot = $destinationPath; executable = (Join-Path $destinationPath ('versions/' + $pin.version + '/AI控制台.exe'))
@@ -307,27 +436,71 @@ function Invoke-QuickInstall {
     $log = Assert-ChildPath (Join-Path $logs ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N') + '.log')) $logs
     [IO.File]::WriteAllText($log, 'Quick install started: ' + $pin.version + [Environment]::NewLine)
     $scratch = $null
+    $appInstalled = $false
     try {
         $payload = $sourcePath
         if (-not $portable) {
             $scratch = Assert-ChildPath (Join-Path $dataRoot ('download-' + [Guid]::NewGuid().ToString('N'))) $dataRoot
             $null = [IO.Directory]::CreateDirectory($scratch)
-            Write-Host ('正在下載 AI 控制台 ' + $pin.version + '，完成後會驗證檔案。')
             $payload = Get-DownloadedPayload $pin $scratch
         }
         $exe = Install-AppPayload $payload $destinationPath $pin.version
+
+        Write-QuickInstallProgress -Activity '設定目前版本' -Status '正在寫入已驗證版本指標'
         Write-CurrentPointer $destinationPath $pin.version
+        Write-QuickInstallProgress -Activity '設定目前版本' -Status '完成' -Completed
         New-AppShortcuts $exe
+
+        $appInstalled = $true
         [IO.File]::AppendAllText($log, 'App payload verified and activated.' + [Environment]::NewLine)
-        if (-not $OmitDevSpace) { Invoke-DevSpaceSetup }
-        if (-not $OmitLaunch) { Start-InstalledApp $exe }
+        Write-Host ('控制台安裝完成並已驗證：' + $exe) -ForegroundColor Green
+
+        $devspaceStatus = '已略過'
+        if ($OmitDevSpace) {
+            [IO.File]::AppendAllText($log, 'DevSpace setup skipped by explicit option.' + [Environment]::NewLine)
+            Write-Host '已依 SkipDevSpace 略過 DevSpace 設定。'
+            Show-DevSpaceResumeInstructions
+        } elseif (-not (Request-DevSpaceSetupNow)) {
+            $devspaceStatus = '稍後設定'
+            [IO.File]::AppendAllText($log, 'DevSpace setup deferred by user.' + [Environment]::NewLine)
+            Write-Host '已選擇「稍後設定，先開啟控制台」。' -ForegroundColor Cyan
+            Show-DevSpaceResumeInstructions
+        } else {
+            try {
+                Invoke-DevSpaceSetup
+                $devspaceStatus = '已設定'
+                [IO.File]::AppendAllText($log, 'DevSpace setup completed.' + [Environment]::NewLine)
+                Write-Host 'DevSpace 設定完成。' -ForegroundColor Green
+            } catch {
+                $devspaceStatus = '未完成'
+                # Keep the actionable error visible, but do not copy setup output or credentials into the installer log.
+                [IO.File]::AppendAllText($log, 'DevSpace setup incomplete; see the actionable console error.' + [Environment]::NewLine)
+                Write-Host ('控制台已安裝；DevSpace 設定未完成：' + $_.Exception.Message) -ForegroundColor Yellow
+                Show-DevSpaceResumeInstructions -AfterFailure
+            }
+        }
+
+        if ($OmitLaunch) {
+            [IO.File]::AppendAllText($log, 'Launch skipped by explicit option.' + [Environment]::NewLine)
+            Write-Host '已依 NoLaunch 略過自動開啟；可稍後使用捷徑啟動。'
+        } else {
+            Write-QuickInstallProgress -Activity '開啟控制台' -Status '正在啟動已安裝程式'
+            Start-InstalledApp $exe
+            Write-QuickInstallProgress -Activity '開啟控制台' -Status '完成' -Completed
+        }
+
         [IO.File]::AppendAllText($log, 'Quick install completed.' + [Environment]::NewLine)
-        Write-Host ('安裝完成：' + $exe)
+        Write-Host ('快速安裝流程完成。控制台狀態：已安裝；DevSpace 狀態：' + $devspaceStatus)
         Write-Host ('安裝紀錄：' + $log)
         return $exe
     } catch {
         # Do not capture transcripts, subprocess stderr, credentials, or provider output.
-        [IO.File]::AppendAllText($log, 'Quick install failed. See the actionable console error.' + [Environment]::NewLine)
+        if ($appInstalled) {
+            [IO.File]::AppendAllText($log, 'Post-install step failed. App payload remains installed.' + [Environment]::NewLine)
+            Write-Host '控制台已安裝，但後續步驟發生錯誤；已安裝檔案不會回復或刪除。' -ForegroundColor Yellow
+        } else {
+            [IO.File]::AppendAllText($log, 'Quick install failed. See the actionable console error.' + [Environment]::NewLine)
+        }
         Write-Host ('安裝紀錄：' + $log)
         throw
     } finally {

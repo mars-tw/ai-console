@@ -124,6 +124,151 @@ class QuickInstallTests(unittest.TestCase):
         self.assertFalse(self.install.exists())
         self.assertEqual(list(self.local.iterdir()), [])
 
+    def test_interactive_defer_keeps_app_installed_and_launches_console(self):
+        self.make_payload()
+        calls = self.base / 'defer-calls.txt'
+        result = self.run_ps(f"""
+function Read-Host {{ return '2' }}
+function New-AppShortcuts([string]$Executable) {{ [IO.File]::AppendAllText({ps(calls)}, 'shortcut|') }}
+function Invoke-DevSpaceSetup {{ throw 'UNEXPECTED_DEVSPACE_SETUP' }}
+function Start-InstalledApp([string]$Executable) {{ [IO.File]::AppendAllText({ps(calls)}, 'launch|') }}
+Invoke-QuickInstall -Source {ps(self.bundle)} -Destination {ps(self.install)}
+""")
+        self.assertIn('稍後設定，先開啟控制台', result.stdout)
+        self.assertIn(r'.\scripts\setup-devspace.ps1', result.stdout)
+        self.assertIn('控制台狀態：已安裝；DevSpace 狀態：稍後設定', result.stdout)
+        self.assertNotIn('UNEXPECTED_DEVSPACE_SETUP', result.stdout + result.stderr)
+        self.assertEqual(calls.read_text(), 'shortcut|launch|')
+        self.assertTrue((self.install / f'versions/{VERSION}/AI控制台.exe').is_file())
+        self.assertTrue((self.install / 'current.json').is_file())
+
+    def test_cancelled_or_failed_setup_is_actionable_without_rolling_back_app(self):
+        self.make_payload()
+        calls = self.base / 'setup-failure-calls.txt'
+        (self.bundle / 'scripts/setup-devspace.ps1').write_text(
+            f"[IO.File]::AppendAllText({ps(calls)}, 'setup|')\n"
+            "Write-Host 'USER_CANCELLED_SETUP_FIXTURE'\n"
+            "exit 1\n",
+            encoding='utf-8-sig',
+        )
+        result = self.run_ps(f"""
+function Read-Host {{ return '1' }}
+function New-AppShortcuts([string]$Executable) {{ [IO.File]::AppendAllText({ps(calls)}, 'shortcut|') }}
+function Start-InstalledApp([string]$Executable) {{ [IO.File]::AppendAllText({ps(calls)}, 'launch|') }}
+Invoke-QuickInstall -Source {ps(self.bundle)} -Destination {ps(self.install)}
+""")
+        self.assertIn('USER_CANCELLED_SETUP_FIXTURE', result.stdout)
+        self.assertIn('控制台已安裝；DevSpace 設定未完成', result.stdout)
+        self.assertIn(r'.\scripts\setup-devspace.ps1', result.stdout)
+        self.assertIn('控制台狀態：已安裝；DevSpace 狀態：未完成', result.stdout)
+        self.assertNotIn('本次未執行 DevSpace 設定', result.stdout)
+        self.assertEqual(calls.read_text(), 'shortcut|setup|launch|')
+        self.assertTrue((self.install / f'versions/{VERSION}/AI控制台.exe').is_file())
+        self.assertTrue((self.install / 'current.json').is_file())
+
+    def test_no_launch_prevents_start_even_when_setup_is_deferred(self):
+        self.make_payload()
+        calls = self.base / 'no-launch-calls.txt'
+        result = self.run_ps(f"""
+function Read-Host {{ return '2' }}
+function New-AppShortcuts([string]$Executable) {{ [IO.File]::AppendAllText({ps(calls)}, 'shortcut|') }}
+function Invoke-DevSpaceSetup {{ throw 'UNEXPECTED_DEVSPACE_SETUP' }}
+function Start-InstalledApp([string]$Executable) {{ throw 'UNEXPECTED_LAUNCH' }}
+Invoke-QuickInstall -Source {ps(self.bundle)} -Destination {ps(self.install)} -OmitLaunch
+""")
+        self.assertIn('已依 NoLaunch 略過自動開啟', result.stdout)
+        self.assertNotIn('UNEXPECTED_LAUNCH', result.stdout + result.stderr)
+        self.assertEqual(calls.read_text(), 'shortcut|')
+        self.assertTrue((self.install / f'versions/{VERSION}/AI控制台.exe').is_file())
+
+    def test_noninteractive_skip_never_prompts_or_runs_optional_setup(self):
+        self.make_payload()
+        calls = self.base / 'noninteractive-calls.txt'
+        result = self.run_ps(f"""
+function Read-Host {{ throw 'UNEXPECTED_PROMPT' }}
+function New-AppShortcuts([string]$Executable) {{ [IO.File]::AppendAllText({ps(calls)}, 'shortcut|') }}
+function Invoke-DevSpaceSetup {{ throw 'UNEXPECTED_DEVSPACE_SETUP' }}
+function Start-InstalledApp([string]$Executable) {{ throw 'UNEXPECTED_LAUNCH' }}
+Invoke-QuickInstall -Source {ps(self.bundle)} -Destination {ps(self.install)} -Unattended -OmitDevSpace -OmitLaunch
+""")
+        self.assertNotIn('UNEXPECTED_', result.stdout + result.stderr)
+        self.assertIn('已依 SkipDevSpace 略過 DevSpace 設定', result.stdout)
+        self.assertEqual(calls.read_text(), 'shortcut|')
+        self.assertTrue((self.install / f'versions/{VERSION}/AI控制台.exe').is_file())
+
+    def test_existing_devspace_setup_is_untouched_and_not_claimed_incomplete_when_deferred_or_skipped(self):
+        self.make_payload()
+        existing = self.base / 'existing-devspace'
+        existing.mkdir()
+        original = {
+            'config.json': b'{"publicBaseUrl":"https://existing.example","custom":"keep"}\r\n',
+            'auth.json': b'{"ownerToken":"EXISTING_SECRET_MUST_REMAIN"}\r\n',
+        }
+        for name, flags, read_host, expected_calls in (
+            ('defer', '', "function Read-Host { return '2' }", 'shortcut|launch|'),
+            ('skip', '-Unattended -OmitDevSpace -OmitLaunch',
+             "function Read-Host { throw 'UNEXPECTED_PROMPT' }", 'shortcut|'),
+        ):
+            with self.subTest(path=name):
+                for filename, data in original.items():
+                    (existing / filename).write_bytes(data)
+                destination = self.base / f'existing-{name}-install'
+                calls = self.base / f'existing-{name}-calls.txt'
+                result = self.run_ps(f"""
+$env:DEVSPACE_CONFIG_DIR = {ps(existing)}
+{read_host}
+function New-AppShortcuts([string]$Executable) {{ [IO.File]::AppendAllText({ps(calls)}, 'shortcut|') }}
+function Invoke-DevSpaceSetup {{ throw 'UNEXPECTED_DEVSPACE_SETUP' }}
+function Start-InstalledApp([string]$Executable) {{ [IO.File]::AppendAllText({ps(calls)}, 'launch|') }}
+Invoke-QuickInstall -Source {ps(self.bundle)} -Destination {ps(destination)} {flags}
+""")
+                output = result.stdout + result.stderr
+                self.assertIn('本次未執行 DevSpace 設定；既有設定保持不變', result.stdout)
+                self.assertNotIn('DevSpace 尚未設定完成', output)
+                self.assertNotIn('DevSpace 狀態：未完成', output)
+                self.assertNotIn('EXISTING_SECRET_MUST_REMAIN', output)
+                self.assertNotIn('UNEXPECTED_', output)
+                self.assertEqual(calls.read_text(), expected_calls)
+                self.assertEqual({p.name: p.read_bytes() for p in existing.iterdir()}, original)
+
+    def test_inventory_progress_is_indeterminate_until_total_is_known(self):
+        self.make_payload()
+        progress = self.base / 'inventory-progress.txt'
+        expected = sum(1 for path in self.bundle.rglob('*') if path.is_file())
+        self.run_ps(f"""
+function Write-Progress {{
+    param([string]$Activity, [string]$Status, [int]$PercentComplete = -1, [switch]$Completed)
+    [IO.File]::AppendAllText({ps(progress)}, ($Activity + '|' + $Status + '|' + $PercentComplete + '|' + [bool]$Completed + [Environment]::NewLine))
+}}
+Install-AppPayload {ps(self.bundle)} {ps(self.install)} {ps(VERSION)} | Out-Null
+""")
+        lines = progress.read_text(encoding='utf-8-sig').splitlines()
+        unknown = [line for line in lines if line.startswith('建立安裝清單|已檢查 ')]
+        self.assertEqual(len(unknown), expected)
+        self.assertEqual(unknown[0], '建立安裝清單|已檢查 1 個檔案|-1|False')
+        self.assertEqual(unknown[-1], f'建立安裝清單|已檢查 {expected} 個檔案|-1|False')
+        self.assertTrue(all('/' not in line and '|100|' not in line for line in unknown))
+        self.assertIn(f'複製安裝檔案|已複製檔案 ({expected}/{expected})|100|False', lines)
+        self.assertIn(f'驗證已安裝檔案|已檢查檔案 ({expected}/{expected})|100|False', lines)
+
+    def test_validation_failure_never_emits_validation_completion(self):
+        self.make_payload()
+        progress = self.base / 'progress-events.txt'
+        result = self.run_ps(f"""
+function Write-QuickInstallProgress {{
+    param([string]$Activity, [string]$Status, [int]$Current = -1, [int]$Total = -1, [switch]$Completed)
+    [IO.File]::AppendAllText({ps(progress)}, ($Activity + '|' + $Status + '|' + [bool]$Completed + [Environment]::NewLine))
+}}
+function Test-EqualInventory {{ return $false }}
+Install-AppPayload {ps(self.bundle)} {ps(self.install)} {ps(VERSION)}
+""", success=False)
+        self.assertIn('複製後的檔案驗證未通過', result.stderr)
+        events = progress.read_text(encoding='utf-8-sig')
+        self.assertIn('驗證已安裝檔案|正在重新檢查必要檔案與雜湊|False', events)
+        self.assertNotIn('驗證已安裝檔案|完成|True', events)
+        self.assertNotIn('啟用安裝版本|完成|True', events)
+        self.assertFalse((self.install / f'versions/{VERSION}').exists())
+
     def test_portable_install_idempotence_pointer_and_previous_version(self):
         self.make_payload()
         previous = self.install / 'versions/1.5.0/sentinel.txt'

@@ -1,12 +1,14 @@
 # 安裝與執行手冊
 
-適用 AI Console v1.6.0／Windows 64 位元。DevSpace 分頁使用 **ChatGPT「對話」＋ DevSpace MCP**；OpenCode 另有獨立入口。第一次安裝可先看 [快速開始說明](quick-start.md)。
+適用 AI Console v1.7.0／Windows 64 位元。DevSpace 分頁使用 **ChatGPT「對話」＋ DevSpace MCP**；OpenCode 另有獨立入口。第一次安裝可先看 [快速開始說明](quick-start.md)。
 
 ## 1. 下載並開啟控制台
 
-1. 下載 [快速安裝包 v1.6.0](https://github.com/mars-tw/ai-console/releases/download/v1.6.0/ai-console-quick-start-v1.6.0.zip)，完整解壓縮後雙擊 `快速安裝.cmd`；或下載 [Windows 免安裝版 v1.6.0](https://github.com/mars-tw/ai-console/releases/download/v1.6.0/ai-console-win32-x64-v1.6.0.zip)。
-2. 使用免安裝版時，解壓縮整個 ZIP，進入 `AI控制台-win32-x64`，雙擊 `AI控制台.exe`。
-3. 要透過 ChatGPT 讀寫專案，切到「DevSpace」；使用 OpenCode，切到「OpenCode」。一般文字問答與原有其他功能仍從各自入口使用。
+1. 下載 [快速安裝包 v1.7.0](https://github.com/mars-tw/ai-console/releases/download/v1.7.0/ai-console-quick-start-v1.7.0.zip)，完整解壓縮後雙擊 `快速安裝.cmd`；或下載 [Windows 免安裝版 v1.7.0](https://github.com/mars-tw/ai-console/releases/download/v1.7.0/ai-console-win32-x64-v1.7.0.zip)。
+2. 使用快速安裝包時，畫面會顯示下載、SHA256 校驗、解壓縮、檔案複製與驗證、版本指標及捷徑建立進度。控制台驗證完成後，可選 **「現在設定 DevSpace」**，或 **「稍後設定，先開啟控制台」**；未通過檢查前不會顯示完成。
+3. 選擇稍後設定時，本次不檢查或修改既有 DevSpace 設定，既有設定保持不變。只有實際開始設定後取消或發生錯誤，才會顯示「DevSpace 設定未完成」。兩種情況都不會刪除已安裝的控制台；除非使用 `-NoLaunch`，控制台仍會開啟。
+4. 使用免安裝版時，解壓縮整個 ZIP，進入 `AI控制台-win32-x64`，雙擊 `AI控制台.exe`。
+5. 要透過 ChatGPT 讀寫專案，切到「DevSpace」；使用 OpenCode，切到「OpenCode」。一般文字問答與原有其他功能仍從各自入口使用。
 
 Windows 發行包已內附 Python。請保留同資料夾內的 `resources`、DLL 等檔案；只搬走 EXE 會無法啟動。DevSpace、OpenCode、模型與帳號需另外準備。
 
@@ -26,7 +28,13 @@ Windows 發行包已內附 Python。請保留同資料夾內的 `resources`、DL
 - [Git for Windows](https://git-scm.com/install/windows)：包含執行專案指令需要的 Git Bash。
 - 已登入的 Chrome ChatGPT，以及該帳號允許使用的 MCP 連接功能。
 
-快速安裝精靈會檢查本機工具；全新互動設定會開啟官方 `devspace init`。也可以在 PowerShell 手動執行：
+快速安裝精靈會檢查本機工具；全新互動設定會開啟官方 `devspace init`。若在快速安裝時選擇稍後設定，或先前設定被取消／失敗，回到快速安裝包資料夾執行下列第一個命令即可接續，不必重新安裝控制台：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-devspace.ps1
+```
+
+要自行準備工具時，也可以在 PowerShell 手動執行：
 
 ```powershell
 node --version
@@ -72,10 +80,10 @@ ChatGPT 必須能連到你的 DevSpace MCP 入口。本機 `http://127.0.0.1:767
 
 ## 4. 在 ChatGPT 對話中完成第一個需求
 
-1. 在「DevSpace」填入專案資料夾與「要在對話中完成的內容」，按「複製對話指示」。
-2. 按「開啟 ChatGPT 對話」，確認 Chrome 已登入正確帳號。
-3. 確認 ChatGPT 選中「對話」，從新增內容或工具選單加入 DevSpace，並在 ChatGPT 畫面選擇實際模型。
-4. 貼上指示，保留 DevSpace 連接器標籤，確認專案路徑後送出。
+1. 在「DevSpace」填入專案資料夾與「要在對話中完成的內容」。
+2. 按主要操作「複製指示並開啟 ChatGPT」。只有剪貼簿寫入成功後才會開啟網站；也可分別使用複製與開啟按鈕。
+3. 確認 Chrome 已登入正確帳號，ChatGPT 選中「對話」，從新增內容或工具選單加入 DevSpace，並在 ChatGPT 畫面選擇實際模型。
+4. 貼上指示，保留 DevSpace 連接器標籤，確認專案路徑後自行送出。
 5. 查看對話中的 MCP 工具結果；模型應透過 `open_workspace` 開啟專案，再讀寫檔案或執行指令。需要修改時，在同一段對話接續。
 6. 回到本機檢查產出的檔案、程式差異與測試結果。原派工者以這些實際成果接手。
 
@@ -111,6 +119,8 @@ npm.cmd install --global opencode-ai@1.18.31
 
 | 畫面或問題 | 處理方式 |
 | --- | --- |
+| 快速安裝顯示本次未執行 DevSpace 設定 | 這不代表既有設定有問題；安裝器沒有檢查或修改它。尚未設定者可在安裝包資料夾執行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-devspace.ps1`。 |
+| 快速安裝顯示控制台已安裝，但 DevSpace 設定未完成 | 這表示實際設定步驟已失敗或取消，不必重裝控制台。先依保留的錯誤處理，再於安裝包資料夾重新執行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-devspace.ps1`。 |
 | 找不到 Node.js、Git Bash 或 DevSpace | 完成對應安裝，重開控制台；可在 PowerShell 執行版本指令檢查 PATH。 |
 | 沒有允許目錄，或路徑被拒絕 | 依第三節設定，確認資料夾存在，Git 根目錄也在允許範圍內。 |
 | MCP 未啟動 | 在 DevSpace 分頁展開「本機 MCP 服務」，按「啟動 MCP」。已有外部服務時沿用原服務。 |
@@ -119,8 +129,8 @@ npm.cmd install --global opencode-ai@1.18.31
 | 模型選單沒有 SOL／ASTRA，或回覆失敗 | 檢查使用中的服務、登入帳號、模型權限與用量，保留原錯誤，不自動換模型。 |
 | 複製指示後沒有執行 | 複製只準備文字；還要在已加入 DevSpace 的 ChatGPT 對話貼上並送出。 |
 | 對話說完成，但本機沒有檔案 | 回到同一對話提供具體缺少的路徑，要求讀回確認；不要把文字承諾視為成果。 |
-| OpenCode 顯示找不到 bridge 或 DevSpace | 使用完整的 v1.6.0 包，確認官方 DevSpace 1.0.8、Node.js 與 OpenCode 已安裝，再重新整理狀態。 |
-| OpenCode 首次 MCP 授權逾時 | 授權頁等待最多 150 秒；先停止並重開 OpenCode，再於瀏覽器完成 DevSpace 正常授權。 |
+| OpenCode 顯示找不到 bridge 或 DevSpace | 使用完整的 v1.7.0 包，確認官方 DevSpace 1.0.8、Node.js 與 OpenCode 已安裝，再重新整理狀態。 |
+| OpenCode 首次 MCP 授權逾時 | 授權頁等待最多 150 秒；先停止並重開 OpenCode，再於瀏覽器完成 DevSpace 正常授權。服務停止、bridge 消失或重啟時，工作臺會回到可重試狀態；實際心跳恢復後再重新連接。 |
 | 「停止 MCP」不可用 | 只能停止控制台自行啟動的服務；外部服務請回原啟動工具操作。 |
 
 診斷 DevSpace 可執行 `devspace.cmd doctor`。關閉對話視窗不等於終止已在執行的本機指令；請在原對話確認操作結果再接手。
@@ -151,4 +161,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/create-desktop-short
 - [DevSpace 官方專案](https://github.com/Waishnav/devspace)
 - [OpenAI：連接並測試 MCP](https://developers.openai.com/plugins/deploy/connect-chatgpt)
 - [OpenCode 官方網站](https://opencode.ai/zht)
-- [AI Console v1.6.0 下載與版本說明](https://github.com/mars-tw/ai-console/releases/tag/v1.6.0)
+- [AI Console v1.7.0 下載與版本說明](https://github.com/mars-tw/ai-console/releases/tag/v1.7.0)

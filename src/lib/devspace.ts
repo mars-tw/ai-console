@@ -9,6 +9,62 @@ export const DEFAULT_DEVSPACE_MODEL: DevSpaceModel = 'gpt-5.6-sol'
 const MODEL_PREFERENCE = 'ai-console.devspace-model'
 export type DevSpaceTaskState = 'running' | 'completed' | 'failed' | 'stopped'
 
+export interface DevSpaceDraft {
+  workspace: string | null
+  model: DevSpaceModel
+  instructions: string
+}
+
+export type DevSpaceConversationSource =
+  | 'new-work'
+  | 'continuation'
+  | 'legacy-retry'
+  | 'legacy-followup'
+  | 'office'
+  | 'mobile'
+  | 'schedule'
+
+export interface DevSpaceConversationContextMessage {
+  role: string
+  text: string
+  label?: string
+}
+
+export interface DevSpaceConversationPreparation {
+  task: string
+  workspace?: string | null
+  title?: string
+  source?: DevSpaceConversationSource
+  originalTool?: string
+  context?: readonly DevSpaceConversationContextMessage[]
+}
+
+export type DevSpaceTranslate = (
+  text: string,
+  variables?: Record<string, string | number>,
+) => string
+
+export type DevSpaceWorkbenchReason =
+  | 'loading'
+  | 'unreadable'
+  | 'uninstalled'
+  | 'missing-configuration'
+  | 'invalid-project'
+  | 'empty-instructions'
+  | 'mcp-stopped'
+  | 'mcp-running'
+
+export interface DevSpaceWorkbenchState {
+  reason: DevSpaceWorkbenchReason
+  canCopy: boolean
+  canStartMcp: boolean
+  executionReady: boolean
+}
+
+export type DevSpaceCopyOpenResult =
+  | { ok: true }
+  | { ok: false; stage: 'copy' | 'open'; error: unknown }
+
 export interface DevSpaceStatus {
   installed: boolean
   version: string | null
@@ -60,6 +116,105 @@ export function readDevSpaceModel(store?: Pick<Storage, 'getItem'>): DevSpaceMod
 
 export function saveDevSpaceModel(model: DevSpaceModel): void {
   try { localStorage.setItem(MODEL_PREFERENCE, model) } catch { /* Keep the current selection even if storage is unavailable. */ }
+}
+
+/** Conversation instructions and workspace stay in memory; only the existing model preference is durable. */
+export function createDevSpaceDraft(model: DevSpaceModel = readDevSpaceModel()): DevSpaceDraft {
+  return { workspace: null, model, instructions: '' }
+}
+
+export function updateDevSpaceDraft(draft: DevSpaceDraft, patch: Partial<DevSpaceDraft>): DevSpaceDraft {
+  return {
+    workspace: patch.workspace === undefined ? draft.workspace : patch.workspace,
+    model: patch.model === undefined ? draft.model : patch.model,
+    instructions: patch.instructions === undefined ? draft.instructions : patch.instructions,
+  }
+}
+
+/** "Clear draft" is intentionally narrow: keep the chosen project and model. */
+export function clearDevSpaceInstructions(draft: DevSpaceDraft): DevSpaceDraft {
+  return updateDevSpaceDraft(draft, { instructions: '' })
+}
+
+const DEVSPACE_CONTEXT_MESSAGES = 6
+const DEVSPACE_CONTEXT_CHARS = 300
+
+/** Only the smallest recent context needed for the new ChatGPT conversation is carried forward. */
+export function boundedDevSpaceConversationContext(
+  messages: readonly DevSpaceConversationContextMessage[] | undefined,
+): DevSpaceConversationContextMessage[] {
+  if (!Array.isArray(messages)) return []
+  return messages
+    .filter(message => message && typeof message.text === 'string' && !!message.text.trim())
+    .slice(-DEVSPACE_CONTEXT_MESSAGES)
+    .map(message => ({
+      role: message.role === 'assistant' ? 'assistant' : 'user',
+      text: message.text.replace(/\s+/g, ' ').trim().slice(0, DEVSPACE_CONTEXT_CHARS),
+      ...(typeof message.label === 'string' && message.label.trim()
+        ? { label: message.label.trim().slice(0, 80) }
+        : {}),
+    }))
+}
+
+/**
+ * Convert any coding entry point into text for ChatGPT Conversation. This does not resume or
+ * submit a CLI job; it only prepares bounded project/context instructions for the user to paste.
+ */
+export function buildDevSpaceConversationInstructions(input: DevSpaceConversationPreparation): string {
+  const task = typeof input.task === 'string' ? input.task.trim() : ''
+  const parts: string[] = [task]
+  const source: string[] = []
+  if (input.title?.trim()) source.push(`對話／工作：${input.title.trim().slice(0, 240)}`)
+  if (input.originalTool?.trim()) source.push(`原紀錄工具：${input.originalTool.trim().slice(0, 80)}`)
+  if (source.length) parts.push(`【來源摘要】\n${source.join('\n')}`)
+
+  const context = boundedDevSpaceConversationContext(input.context)
+  if (context.length) {
+    const lines = context.map(message => {
+      const who = message.label || (message.role === 'assistant' ? 'AI' : '使用者')
+      return `${who}：${message.text}`
+    })
+    parts.push(`【近期必要背景】\n${lines.join('\n')}`)
+  }
+
+  parts.push('【執行路徑】\n這份內容只用來建立新的 ChatGPT「對話」或貼入目前的 ChatGPT 對話接續。請使用已加入的 DevSpace MCP 操作專案；不要恢復、重派或接力任何舊 CLI 工單，也不要使用 auto-handoff。')
+  return parts.filter(Boolean).join('\n\n')
+}
+
+export function prepareDevSpaceConversationDraft(
+  draft: DevSpaceDraft,
+  input: DevSpaceConversationPreparation,
+): DevSpaceDraft {
+  const workspace = input.workspace === undefined ? draft.workspace : input.workspace
+  return updateDevSpaceDraft(draft, {
+    workspace,
+    instructions: buildDevSpaceConversationInstructions(input),
+  })
+}
+
+/** The exact text copied by desktop/mobile preparation UIs. It still requires a manual paste/send. */
+export function buildDevSpaceConversationPrompt(
+  draft: DevSpaceDraft,
+  translate: DevSpaceTranslate = (text, variables) => Object.entries(variables || {})
+    .reduce((result, [name, value]) => result.split(`{${name}}`).join(String(value)), text),
+): string {
+  const cwd = draft.workspace?.trim() || ''
+  return `${translate('請在 ChatGPT「對話」模式完成以下工作，使用已連接的 DevSpace MCP；不要切到「工作」模式，也不要呼叫 agents run／continue。')}\n\n${translate('專案資料夾')}：${cwd}\n${translate('偏好模型（送出前請在 ChatGPT 選單確認）：{model}', { model: devSpaceModelLabel(draft.model) })}\n\n${draft.instructions.trim()}\n\n${translate('先呼叫 open_workspace 開啟指定專案，再使用 MCP 讀改檔案與執行必要指令。成果直接寫入本機專案，最後回覆成果路徑、驗證結果及未完成事項，供原派工者接手。')}`
+}
+
+/** A cancelled desktop picker must not erase a manually entered or previously chosen path. */
+export function resolveDevSpaceDirectory(current: string | null, selected: string | null | undefined): string | null {
+  return typeof selected === 'string' && !!selected.trim() ? selected : current
+}
+
+/** Opening ChatGPT is strictly sequenced after a successful clipboard write. */
+export async function copyThenOpenDevSpace(
+  copy: () => Promise<void>,
+  open: () => Promise<void>,
+): Promise<DevSpaceCopyOpenResult> {
+  try { await copy() } catch (error) { return { ok: false, stage: 'copy', error } }
+  try { await open() } catch (error) { return { ok: false, stage: 'open', error } }
+  return { ok: true }
 }
 
 export function devSpaceDispatchBody(cwd: string, prompt: string, model: unknown, id?: string) {
@@ -145,6 +300,37 @@ export function withinDevSpaceRoots(cwd: string, roots: string[]): boolean {
   })
 }
 
+/**
+ * One explicit reason drives the headline, while flags keep preparation separate from execution.
+ * A stopped MCP never blocks drafting or copying; it only means the pasted request cannot run yet.
+ */
+export function devSpaceWorkbenchState(
+  status: DevSpaceStatus | null,
+  statusError: string,
+  cwd: string,
+  instructions: string,
+): DevSpaceWorkbenchState {
+  const readable = !statusError && status !== null
+  const installed = !!status && !statusError && status.installed
+  const configured = !!status && installed && status.configured
+  const projectValid = !!status && configured && withinDevSpaceRoots(cwd, status.allowedRoots)
+  const hasInstructions = !!instructions.trim()
+  const running = !!status && readable && status.service.running
+  const canCopy = projectValid && hasInstructions
+  const canStartMcp = configured && !running
+
+  let reason: DevSpaceWorkbenchReason
+  if (statusError) reason = 'unreadable'
+  else if (!status) reason = 'loading'
+  else if (!status.installed) reason = 'uninstalled'
+  else if (!status.configured) reason = 'missing-configuration'
+  else if (!projectValid) reason = 'invalid-project'
+  else if (!hasInstructions) reason = 'empty-instructions'
+  else reason = running ? 'mcp-running' : 'mcp-stopped'
+
+  return { reason, canCopy, canStartMcp, executionReady: canCopy && running }
+}
+
 export function devSpaceRunProblem(status: DevSpaceStatus | null, cwd: string, target: string, prompt: string, model: string = DEFAULT_DEVSPACE_MODEL): string {
   if (!status) return '請先讀取 DevSpace 狀態。'
   if (!status.installed) return '請先安裝 DevSpace，再重新整理。'
@@ -162,6 +348,9 @@ export const devSpaceTaskLabel = (state: DevSpaceTaskState): string => ({
 }[state])
 
 export async function devSpaceRequest(path: string, body?: unknown, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  if (path === 'run' || path === 'continue') {
+    throw new Error('AI 控制台不再建立或接續 DevSpace 背景工作；請使用 ChatGPT「對話」＋ DevSpace MCP。')
+  }
   const response = await fetch(`/api/devspace/${path}`, body === undefined
     ? { cache: 'no-store', signal }
     : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal })

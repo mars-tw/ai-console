@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('acSetup', {
 contextBridge.exposeInMainWorld('acOpenCode', {
   status: () => ipcRenderer.invoke('opencode:status'),
   open: (input) => ipcRenderer.invoke('opencode:open', input),
+  reconnect: (input) => ipcRenderer.invoke('opencode:reconnect', input),
   stop: () => ipcRenderer.invoke('opencode:stop'),
 })
 contextBridge.exposeInMainWorld('acChatGPT', {

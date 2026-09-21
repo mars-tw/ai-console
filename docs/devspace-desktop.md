@@ -1,14 +1,28 @@
 # DevSpace 對話入口與 OpenCode 工作臺
 
-適用 AI Console v1.6.0。DevSpace 使用 **Chrome ChatGPT「對話」→ DevSpace MCP → 本機成果交接**；OpenCode 是工作臺裡另一個可自行開啟的對話工具。
+適用 AI Console v1.7.0。所有需要讀寫專案或執行指令的編碼工作，統一使用 **ChatGPT「對話」→ DevSpace MCP → 本機成果交接**。OpenCode 是工作臺裡另一個可由使用者明確開啟的對話工具，不是控制台的背景備援，也不會被自動選用。
 
-DevSpace 分頁會準備指示、複製到剪貼簿，並開啟 Chrome 的 ChatGPT 網站。訊息由 ChatGPT 對話送出，模型在對話中直接呼叫已加入的 DevSpace MCP。此流程不使用 ChatGPT「工作」、DevSpace agent 工作或 Codex app-server 對話。
+DevSpace 分頁會準備指示、複製到剪貼簿，並開啟 ChatGPT 網站。訊息由使用者在 ChatGPT 對話送出，模型在對話中直接呼叫已加入的 DevSpace MCP。此流程不使用 ChatGPT「工作」、DevSpace agent 工作、CLI resume、auto-handoff 或 Codex app-server 對話。
+
+## 整個控制台的統一執行路徑
+
+以下入口都只會整理工作內容、專案路徑與必要背景，再帶到 DevSpace 分頁：
+
+- 首頁「交給 AI 執行」與原「派工主控台」的新工作輸入。
+- 對話清單的「在 ChatGPT 對話續作」。最多帶入最近 6 則訊息，每則最多 300 字；不會恢復原工具 session。唯讀匯入與 discovered 紀錄也只作為有限背景，原來源仍維持唯讀。
+- 舊派工紀錄的重做、補充與舊排程內容。
+- 辦公室中控與角色工作按鈕。
+- 手機遙控的新工作、重做與續作。
+
+「問 AI」與辦公室的「說說看」仍可作為純文字問答；地端回答不會被當成編碼執行或改檔路徑。需要讀寫專案時，必須改用上述 ChatGPT 對話流程。
+
+這些入口不會 POST 新派工、重派、補話、排程執行或 `/api/launch`，也不會自動替使用者貼上或送出。舊派工頁面只保留唯讀紀錄，以及停止／取消已存在工作的必要控制。讀取 `/api/dispatches` 不會 flush pending、重試或 auto-handoff；伺服器也不會啟動舊背景排程器。
 
 ## 在 ChatGPT 對話中操作專案
 
 1. 依 [安裝手冊](install-and-run.md)完成 DevSpace 與 ChatGPT MCP 連線設定，再開啟 AI Console，切到「DevSpace」。在「專案資料夾」填入 DevSpace 允許目錄內的完整路徑。
-2. 在「要在對話中完成的內容」寫清楚需求、可修改範圍、驗收方式與成果位置，按「複製對話指示」。可展開「檢視將要複製的指示」確認內容。
-3. 按「開啟 ChatGPT 對話」。確認 Chrome 使用已登入且有 DevSpace 連線的帳號；若開到其他設定檔，請切回正確設定檔。
+2. 在「要在對話中完成的內容」寫清楚需求、可修改範圍、驗收方式與成果位置。可展開「檢視將要複製的指示」確認內容。
+3. 按主要操作「複製指示並開啟 ChatGPT」。只有剪貼簿成功後才會開啟網站；失敗時草稿仍保留，畫面會提供手動複製方式。也可使用分開的「複製對話指示」與「開啟 ChatGPT 對話」。確認瀏覽器使用已登入且有 DevSpace 連線的帳號。
 4. 在 ChatGPT 確認選中「對話」，不要切換到「工作」。從新增內容或工具選單加入已設定的 DevSpace 連接器，再選擇要使用的模型。
 5. 貼上指示，保留 DevSpace 連接器標籤，確認專案路徑後送出。模型應先透過 `open_workspace` 開啟指定專案，再使用 MCP 讀寫檔案或執行指令。
 6. 在同一段 ChatGPT 對話查看工具結果與回覆，需要修改時也在原對話接續。完成後，由原派工者讀回本機檔案、檢查差異並執行必要驗證。
@@ -50,6 +64,8 @@ npm.cmd install --global opencode-ai@1.18.31
 
 Bridge 經由使用者確認的 OAuth PKCE 流程建立自己的 DevSpace client 認證，快取只保存在使用者的 DevSpace 設定目錄；不附帶帳號密碼，也不複製其他 AI 工具的登入檔。首次授權等待最多 150 秒，逾時可停止並重新開啟 OpenCode，再完成授權。MCP 工具綁定所選專案，僅提供所需的檔案與指令工具；這個入口關閉 OpenCode 的背景子代理與 task 操作。
 
+OpenCode 連線狀態以實際 bridge／MCP 心跳為準，不把舊的 `connected` 進度紀錄永久視為已連線。服務停止、bridge 消失或服務重啟時，工作臺會回到可重試狀態並提供重新連接；一般連線故障不會被誤標為 owner 授權失敗。這些檢查只驗證服務與 MCP 連線生命週期，不代表真人 OAuth 已完成或所選模型已成功推論。
+
 「已安裝」、「已啟動」或選單中有模型，只能證明相應設定或服務狀態。所選帳號與模型能否實際回覆，須以真正的對話執行結果確認。OpenCode 的選單也不會改變 Chrome ChatGPT 的模型。
 
 ## 服務與範圍
@@ -80,8 +96,8 @@ npm.cmd run app -- --devspace
 | POST | `/api/devspace/start` | 啟動或沿用 MCP 服務 |
 | POST | `/api/devspace/stop` | 停止此控制台擁有的 MCP 服務 |
 
-舊版 `/api/devspace/tasks`、`run`、`show`、`continue` 與 agent 歷史讀取程式保留相容用途；**目前的對話入口不呼叫這些端點**。新增對話也不會寫入 DevSpace 的 `local_agent_sessions` 工作紀錄。ChatGPT 對話由 ChatGPT 保存，本機交接檔另存於指定專案。
+`/api/devspace/tasks` 與 `show` 僅保留舊紀錄讀取用途。`/api/devspace/run`、`/api/devspace/continue`、`/api/launch`、新派工、批次派工、重派、補話、排程儲存與排程執行端點現在會回覆 HTTP 409、`code: USE_CHATGPT_CONVERSATION`，並指向 DevSpace 分頁；它們不會建立或接續工作。新增對話也不會寫入 DevSpace 的 `local_agent_sessions` 工作紀錄。ChatGPT 對話由 ChatGPT 保存，本機交接檔另存於指定專案。
 
 DevSpace 畫面位於 `src/components/DevSpaceConsole.tsx`，服務管理位於 `server/devspace_console.py`；Chrome 開啟入口位於 `electron/main.cjs`。OpenCode 畫面與桌面服務分別位於 `src/components/OpenCodePanel.tsx`、`electron/opencode.cjs`，內附的 MCP bridge 位於 `electron/devspace-mcp-bridge.cjs`。
 
-[安裝手冊](install-and-run.md)與[快速安裝說明](quick-start.md)提供 v1.6.0 的下載、初始化與啟動步驟。從舊版升級後，DevSpace 分頁改用上述對話流程；其他原有功能仍保留各自入口。
+[安裝手冊](install-and-run.md)與[快速安裝說明](quick-start.md)提供 v1.7.0 的下載、初始化與啟動步驟；[統一執行流程](chatgpt-conversation-workflow.md)整理所有入口、舊 API 邊界與驗收方式。從舊版升級後，新的編碼工作與續作統一走上述 ChatGPT 對話流程；舊派工入口只保留紀錄查看與停止／取消。

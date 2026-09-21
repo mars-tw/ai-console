@@ -22,7 +22,7 @@ FORBIDDEN_FILES = {'config.json', 'connections.json', '_remote.json', 'auth.json
 QUICK_FILES = ('快速安裝.cmd', '快速啟動.cmd', 'scripts/quick-install.ps1',
                'scripts/quick-launch.ps1', 'scripts/quick-payload.ps1', 'scripts/setup-devspace.ps1',
                'scripts/quick-start.json', 'docs/install-and-run.md', 'docs/quick-start.md',
-               'docs/devspace-desktop.md')
+               'docs/devspace-desktop.md', 'docs/chatgpt-conversation-workflow.md')
 
 
 def _parts(name: str) -> tuple[str, ...]:

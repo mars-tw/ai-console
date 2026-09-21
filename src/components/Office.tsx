@@ -5,7 +5,7 @@ import { t, useLang } from '@/i18n'
 import { useReadable } from '@/theme'
 import { isLive, look, stateOf } from '@/lib/dispatchState'
 import type { ConversationSummary, DispatchRecord, HubProject, ToolStatus } from '@/types/data'
-import type { DispatchTool } from '@/components/QuickDispatch'
+import type { DevSpaceConversationPreparation } from '@/lib/devspace'
 import { chatContext, nextChatModel, pickChatAnswer, retryChatHistory } from '@/lib/chatResponse'
 
 // ── 角色人設（名稱與配色統一由 SKINS 提供，這裡只放對話用的人格）──
@@ -84,6 +84,7 @@ interface Props {
   projects: HubProject[]
   conversations: ConversationSummary[]
   onDispatch: (c: ConversationSummary) => void
+  onPrepareConversation: (request: DevSpaceConversationPreparation) => void
   busyId: string
 }
 
@@ -119,7 +120,7 @@ function isAbortError(error: unknown): boolean {
     || (error instanceof Error && error.name === 'AbortError')
 }
 
-export default function Office({ tools, projects, conversations, onDispatch, busyId }: Props) {
+export default function Office({ tools, projects, conversations, onDispatch, onPrepareConversation, busyId }: Props) {
   useLang()
   const tone = useReadable()   // 語言一換就重繪
   const [chatWith, setChatWith] = useState<string | null>(null)
@@ -154,24 +155,8 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
       .catch(() => {})
     return () => controller.abort()
   }, [])
-  // 中控
-  const [cmdTool, setCmdTool] = useState('auto')
-  const [dispatchTools, setDispatchTools] = useState<DispatchTool[]>([])
-  useEffect(() => {
-    const controller = new AbortController()
-    fetch('/api/dispatch/tools', { signal: controller.signal })
-      .then(response => response.ok ? response.json() : null)
-      .then(data => { if (data?.ok && Array.isArray(data.tools)) setDispatchTools(data.tools) })
-      .catch(() => {})
-    return () => controller.abort()
-  }, [])
-  const canDispatch = (tool: string) => tool === 'auto'
-    ? dispatchTools.some(item => !item.limited)
-    : dispatchTools.some(item => item.id === tool && !item.limited)
+  // 中控只準備 ChatGPT 對話，不再挑 CLI 工具或送出背景工單。
   const [cmdInput, setCmdInput] = useState('')
-  const [cmdBusy, setCmdBusy] = useState(false)
-  const [cmdSec, setCmdSec] = useState(0)
-  const cmdAbort = useRef<AbortController | null>(null)
   const [cmdLog, setCmdLog] = useState<string[]>([])
   const [skillStatus, setSkillStatus] = useState<OfficeSkillsResponse | null>(null)
   const [showSkills, setShowSkills] = useState(false)
@@ -182,15 +167,8 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
   const [auditBusy, setAuditBusy] = useState(false)
   const [auditError, setAuditError] = useState('')
 
-  useEffect(() => {
-    if (!cmdBusy) return
-    const timer = setInterval(() => setCmdSec((n) => n + 1), 1000)
-    return () => clearInterval(timer)
-  }, [cmdBusy])
-
   useEffect(() => () => {
     chatAbort.current?.abort()
-    cmdAbort.current?.abort()
   }, [])
 
   // 只有還沒結束的才算「現在正在發生」。整份歷史攤在這裡的話，
@@ -334,103 +312,33 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
     await agentChat(target, text, base, chosenModel)
   }
 
-  /**
-   * 把打好的那句話真的交給這隻龍代表的工具去做。
-   *
-   * 為什麼要有這個：對話框本來就寫著「或叫他去工作」，但在這之前
-   * 框裡唯一的動作是「送出」——那只是叫地端模型扮演這隻龍回話。
-   * 使用者對 GROK 說「幫我把 X 做完」，得到「好的，我這就去做」，
-   * 然後什麼都沒發生。介面承諾了一件它做不到的事，這是最糟的一種壞。
-   *
-   * 派出去走的是跟主控台完全一樣的 /api/dispatch，所以同樣會掛規範與技能、
-   * 同樣寫 log、同樣進派工登錄 —— 不另外做一套。
-   */
-  const dispatchToAgent = async () => {
+  /** Prepare the character instruction for the shared ChatGPT Conversation route. */
+  const dispatchToAgent = () => {
     const text = agentInput.trim()
-    if (!text || !chatWith || chatBusy || !canDispatch(chatWith)) return
-    if (!window.confirm(t('這會真的交給 AI 執行工作，可能讀寫專案檔案。確定要開始嗎？'))) return
+    if (!text || !chatWith || chatBusy) return
     const target = chatWith
-    const name = CHARS[target].name
-    setAgentMsgs((m) => ({
-      ...m, [target]: [...(m[target] || []), { role: 'user', text }],
-    }))
-    setAgentInput('')
-    setChatBusy(true)
-    setChatSec(0)
-    const abort = new AbortController()
-    chatAbort.current = abort
-    try {
-      const d = await fetch('/api/dispatch', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool: target, task: text }),
-        signal: abort.signal,
-      }).then((r) => r.json())
-      const note = d.ok
-        ? `⚡ ${d.note || t('已派給 {name}', { name })}`
-        : `⚠️ ${d.error || t('派工失敗')}`
-      setAgentMsgs((m) => ({
-        ...m, [target]: [...(m[target] || []), { role: 'assistant', text: note }],
-      }))
-    } catch (error) {
-      setAgentMsgs((m) => ({
-        ...m,
-        [target]: [
-          ...(m[target] || []),
-          {
-            role: 'assistant',
-            text: isAbortError(error)
-              ? t('⏹️ 已停止等待；派工可能仍在執行，請看派工清單')
-              : t('⚠️ 控制 API 無回應'),
-          },
-        ],
-      }))
-    } finally {
-      if (chatAbort.current === abort) chatAbort.current = null
-      setChatBusy(false)
-    }
+    onPrepareConversation({
+      task: text,
+      title: t('辦公室角色 {name} 的工作指示', { name: CHARS[target].name }),
+      originalTool: target,
+      source: 'office',
+      context: (agentMsgs[target] || []).slice(-6).map(message => ({
+        role: message.role,
+        text: message.text,
+        label: message.role === 'assistant' ? CHARS[target].name : t('使用者'),
+      })),
+    })
   }
 
   const cancelChat = () => chatAbort.current?.abort()
 
-  // ── 中控派工 ──
-  const sendCommand = async () => {
+  // ── 中控只準備統一 ChatGPT 對話 ──
+  const sendCommand = () => {
     const text = cmdInput.trim()
-    if (!text || cmdBusy || !canDispatch(cmdTool)) return
-    if (!window.confirm(t('這會真的交給 AI 執行工作，可能讀寫專案檔案。確定要開始嗎？'))) return
-    setCmdBusy(true)
-    setCmdSec(0)
-    setCmdLog((l) => [...l, `> [${cmdTool === 'auto' ? t('自動') : cmdTool}] ${text}`])
-    setCmdInput('')
-    const abort = new AbortController()
-    cmdAbort.current = abort
-    try {
-      const r = await fetch('/api/dispatch', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool: cmdTool, task: text }),
-        signal: abort.signal,
-      })
-      const d = await r.json()
-      if (d.ok) {
-        if (d.reply) setCmdLog((l) => [...l, `[${d.model || d.tool}] ${d.reply.slice(0, 500)}`])
-        else setCmdLog((l) => [...l, `✅ ${d.note || t('已派出')}（log: ${d.log}）`])
-      } else {
-        setCmdLog((l) => [...l, `⚠️ ${d.error || t('失敗')}`])
-      }
-      refreshDispatches()
-    } catch (error) {
-      setCmdLog((l) => [
-        ...l,
-        isAbortError(error)
-          ? t('⏹️ 已停止等待；派工可能仍在執行，請看派工清單')
-          : t('⚠️ API 無回應'),
-      ])
-    } finally {
-      if (cmdAbort.current === abort) cmdAbort.current = null
-      setCmdBusy(false)
-    }
+    if (!text) return
+    setCmdLog((lines) => [...lines, `> ${text}`, t('已帶到 DevSpace 分頁；尚未貼上或送出。')])
+    onPrepareConversation({ task: text, title: t('辦公室中控工作'), source: 'office' })
   }
-
-  const cancelCommand = () => cmdAbort.current?.abort()
 
   const legend: [string, string, string][] = [
     ['#34d399', t('工作中'), t('坐在位子上瘋狂打電腦，偶爾找同事辯論')],
@@ -461,64 +369,31 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
         {/* 中控對話框 */}
         <div className="min-w-72 flex-1 rounded border border-line2 bg-elev p-3">
           <div className="mb-2 text-xs font-medium tracking-widest text-mute">{t('🎛️ 中控指揮台')}</div>
-          <p className="mb-2 text-xs text-mute2">{t('這裡會真的開始工作，不是傳送問題。請寫清楚希望 AI 完成什麼。')}</p>
+          <p className="mb-2 text-xs text-mute2">{t('這裡只整理工作內容並切到 DevSpace 分頁；真正執行要在 ChatGPT「對話」加入 DevSpace 後貼上送出。')}</p>
           <div
             className="mb-2 max-h-36 overflow-y-auto rounded bg-app p-2 font-mono text-xs leading-5 text-ink3"
             role="log"
             aria-live="polite"
             aria-relevant="additions"
-            aria-busy={cmdBusy}
           >
-            {cmdLog.length === 0 && <span className="text-mute3">{t('下指令給全體或指定夥伴，例如「整理今天的工作進度」…')}</span>}
+            {cmdLog.length === 0 && <span className="text-mute3">{t('寫下要完成的結果，例如「整理今天的工作進度」…')}</span>}
             {cmdLog.map((l, i) => <div key={i} className="whitespace-pre-wrap break-all">{l}</div>)}
-            {cmdBusy && (
-              <div
-                className="text-mute2"
-                role="progressbar"
-                aria-label={t('中控指令派工進度')}
-                aria-valuetext={t('派工中… {n} 秒', { n: cmdSec })}
-              >
-                {t('派工中… {n} 秒', { n: cmdSec })}
-              </div>
-            )}
           </div>
           <div className="flex gap-2">
-            <select
-              aria-label={t('派給哪個工具')}
-              className="rounded border border-line3 bg-panel px-2 py-1.5 text-xs text-ink2"
-              value={cmdTool}
-              onChange={(e) => setCmdTool(e.target.value)}
-            >
-              {/* agy/Gemini 只供無檔案的一次性推理，不從工作派工 UI 送出。 */}
-              <option value="auto">{t('🤖 自動路由')}</option>
-              {dispatchTools.map(tool => (
-                <option key={tool.id} value={tool.id} disabled={tool.limited}>{tool.label}{tool.limited ? ` — ${t('限流中')}` : ''}</option>
-              ))}
-            </select>
             <input
               className="min-w-0 flex-1 rounded border border-line3 bg-panel px-3 py-1.5 text-sm text-ink outline-none focus:border-line4"
-              placeholder={t('輸入指令，Enter 派出…')}
+              placeholder={t('輸入工作內容，Enter 準備 ChatGPT 對話…')}
               value={cmdInput}
-              disabled={cmdBusy}
               onChange={(e) => setCmdInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') sendCommand() }}
             />
             <button
               className="rounded bg-amber-700 px-4 py-1.5 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-60 dark:disabled:opacity-40"
-              disabled={cmdBusy || !cmdInput.trim() || !canDispatch(cmdTool)}
+              disabled={!cmdInput.trim()}
               onClick={sendCommand}
             >
-              {t('派出')}
+              {t('準備 ChatGPT 對話')}
             </button>
-            {cmdBusy && (
-              <button
-                className="rounded border border-red-300 px-2 py-1.5 text-xs text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-300 dark:hover:bg-red-950/40"
-                title={t('只停止畫面等待；已送到後端的派工可能繼續執行')}
-                onClick={cancelCommand}
-              >
-                {t('不等了')}
-              </button>
-            )}
           </div>
           {/* 派工追蹤：只列還沒結束的。結束的留在主控台分頁看，
               這裡是「現在辦公室裡在發生什麼」，不是歷史紀錄 */}
@@ -599,7 +474,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
                       disabled={busyId === conv.id}
                       onClick={() => onDispatch(conv)}
                     >
-                      {busyId === conv.id ? '…' : t('▶ 繼續工作')}
+                      {busyId === conv.id ? '…' : t('▶ ChatGPT 對話續作')}
                     </button>
                   )}
                 </div>
@@ -681,8 +556,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
                 {t('「說說看」是跟 {name} 聊天，由地端模型代答，不會動到任何檔案。',
                    { name: CHARS[chatWith].name })}
                 <br />
-                {t('要他真的去做，打完之後按「⚡ 交給他做」—— 那會派給真正的 {tool}。',
-                   { tool: chatWith })}
+                {t('要執行專案工作，打完後按「準備執行對話」；內容會帶到 DevSpace 分頁，由你貼入 ChatGPT「對話」。')}
               </p>
             )}
             <div className="flex flex-col gap-2" role="log" aria-live="polite" aria-relevant="additions" aria-busy={chatBusy}>
@@ -729,8 +603,7 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
               value={agentInput}
               disabled={chatBusy}
               onChange={(e) => setAgentInput(e.target.value)}
-              // Enter 走聊天、Ctrl+Enter 才派工。
-              // 反過來的話手一快就會派出一個會改檔案的 agent。
+              // Enter 只做地端文字聊天；Ctrl+Enter 準備統一 ChatGPT 執行對話。
               onKeyDown={(e) => {
                 if (e.key !== 'Enter') return
                 if (e.ctrlKey || e.metaKey) void dispatchToAgent()
@@ -756,11 +629,11 @@ export default function Office({ tools, projects, conversations, onDispatch, bus
             </button>
             <button
               className="flex-none rounded bg-ink px-2 text-xs text-invink hover:bg-white disabled:opacity-60 dark:disabled:opacity-40"
-              disabled={chatBusy || !agentInput.trim() || !canDispatch(chatWith)}
-              title={t('真的派給 {tool} 執行，會掛上規範與技能，跟主控台派工同一條路徑', { tool: chatWith })}
+              disabled={chatBusy || !agentInput.trim()}
+              title={t('準備 ChatGPT「對話」＋ DevSpace MCP 指示；不會在背景建立工單')}
               onClick={dispatchToAgent}
             >
-              {t('⚡ 交給他做')}
+              {t('準備執行對話')}
             </button>
           </div>
         </div>

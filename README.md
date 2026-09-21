@@ -4,30 +4,28 @@
 
 # AI 控制台 · AI Console
 
-給一般使用者與第一次接觸 AI 的人使用的本地控制台：用白話入口找舊對話、同步四個 AI、直接問地端模型、管理技能，或把工作明確派給 AI 執行。
+給一般使用者與第一次接觸 AI 的人使用的本地控制台：用白話入口找舊對話、同步四個 AI、直接問地端模型、管理技能，或準備一份可貼入 ChatGPT「對話」並由 DevSpace MCP 執行的專案工作指示。
 附一間會動的像素辦公室，和一套可以邊工作邊玩的小型 MMORPG。
 
-**索引、搜尋、技能預覽與控制介面都在本機執行。** 問答可選內建 LM Studio，或你自行接入的 OpenAI 相容服務；選擇雲端服務時，問題與該頁聊天紀錄會送到指定服務，可能計費。派工則依所選 AI 工具的服務方式傳送內容。介面支援繁體中文與 English。
+**索引、搜尋、技能預覽與控制介面都在本機執行。** 問答可選內建 LM Studio，或你自行接入的 OpenAI 相容服務；選擇雲端服務時，問題與該頁聊天紀錄會送到指定服務，可能計費。需要讀寫專案時，控制台只整理專案、需求與有限背景，再由你在 ChatGPT「對話」加入 DevSpace、確認模型、貼上並自行送出；不會在背景建立 CLI 工單。介面支援繁體中文與 English。
 
-> A local hub for every AI CLI on your machine — one searchable inbox for all your
-> conversations, one-click resume in the original working directory, and a local-model
-> chat that continues any thread without burning cloud quota. Ships with a pixel office
-> that visualises each tool as a dragon, and a small single-player MMORPG to idle in.
-> The index, search, skill preview, and control UI run on `127.0.0.1`. “Ask AI” uses
-> local LM Studio or an OpenAI-compatible service you explicitly connect. Choosing a cloud
-> service sends your question and the current chat history to that provider and may incur charges.
-> Task dispatch uses the selected AI tool's service.
-> The UI is available in Traditional Chinese and English.
+> A local workbench for searchable AI conversations, text-only local or connected-model Q&A,
+> skill management, and a unified coding workflow: prepare a bounded project prompt, then paste it
+> into ChatGPT Chat with the attached DevSpace MCP. The console does not auto-send the message,
+> auto-select the ChatGPT model, resume a CLI session, or create background coding jobs.
+> Existing legacy job history remains available for status, logs, diffs, and stop/cancel controls.
+> OpenCode is an explicit separate entry, not an automatic fallback. The pixel office and the
+> single-player MMORPG remain available. The UI is available in Traditional Chinese and English.
 
 ## 下載與開始
 
-**[下載快速安裝包 v1.6.0](https://github.com/mars-tw/ai-console/releases/download/v1.6.0/ai-console-quick-start-v1.6.0.zip)**：解壓縮後雙擊 `快速安裝.cmd`，依提示完成準備；以後雙擊桌面「DevSpace 控制台」或 `快速啟動.cmd`。詳見 [快速開始說明](docs/quick-start.md)。
+**[下載快速安裝包 v1.7.0](https://github.com/mars-tw/ai-console/releases/download/v1.7.0/ai-console-quick-start-v1.7.0.zip)**：解壓縮後雙擊 `快速安裝.cmd`，依提示完成準備；以後雙擊桌面「DevSpace 控制台」或 `快速啟動.cmd`。詳見 [快速開始說明](docs/quick-start.md)。
 
 第一次使用請看 **[完整安裝與執行手冊](docs/install-and-run.md)**：從解壓縮、安裝 DevSpace、設定允許目錄，到在 ChatGPT 對話中使用 MCP，依序操作即可。
 
 ### Windows 一般使用者請下載這個
 
-**[⬇ 下載 Windows 免安裝版 v1.6.0（64 位元）](https://github.com/mars-tw/ai-console/releases/download/v1.6.0/ai-console-win32-x64-v1.6.0.zip)**
+**[⬇ 下載 Windows 免安裝版 v1.7.0（64 位元）](https://github.com/mars-tw/ai-console/releases/download/v1.7.0/ai-console-win32-x64-v1.7.0.zip)**
 
 1. 解壓縮整個 ZIP，再開啟資料夾裡的 `AI控制台.exe`。
 2. 按「接入 AI」，依畫面選擇電腦上的 AI、雲端服務或已有的工具。
@@ -35,7 +33,7 @@
 
 Windows 發行包已包含控制台需要的 Python，不必另裝，也不會變更系統 Python。AI 工具、模型與雲端帳號並未預先附送：本機問答需安裝 LM Studio 並下載模型；雲端問答需從選定服務取得 API 金鑰，可能另外計費。控制台不會代你註冊、購買額度或自動下載大型模型。
 
-要讀寫專案或交給 AI 寫程式，可切到「DevSpace」分頁，準備並複製指示，再開啟已登入的 Chrome ChatGPT，選擇「對話」、加入 DevSpace 連接器後送出。模型透過 MCP 操作允許範圍內的專案，成果留在本機。請依 [安裝與執行手冊](docs/install-and-run.md) 完成 DevSpace、Node.js、Git Bash、專案允許目錄及 ChatGPT MCP 連線設定；控制台不會自動建立公開網址或代為登入。
+要讀寫專案或交給 AI 寫程式，可切到「DevSpace」分頁，準備並複製指示，再開啟已登入的 Chrome ChatGPT，選擇「對話」、加入 DevSpace 連接器，確認模型後自行貼上並送出。模型透過 MCP 操作允許範圍內的專案，成果留在本機。請依 [安裝與執行手冊](docs/install-and-run.md) 完成 DevSpace、Node.js、Git Bash、專案允許目錄及 ChatGPT MCP 連線設定；控制台不會自動建立公開網址或代為登入。
 
 工作臺另有「OpenCode」入口，可開啟綁定專案的 OpenCode 對話視窗。OpenCode 1.18.31 需另外安裝並完成模型帳號登入，操作方式見 [DevSpace 與 OpenCode 說明](docs/devspace-desktop.md)。
 
@@ -44,23 +42,23 @@ Windows 發行包已包含控制台需要的 Python，不必另裝，也不會�
 <details>
 <summary>開發者：原始碼下載與自行建置</summary>
 
-[下載 v1.6.0 原始碼](https://github.com/mars-tw/ai-console/releases/download/v1.6.0/ai-console-source-v1.6.0.zip)。原始碼 ZIP 不是可直接執行的 Windows 程式；自行建置仍需 Node.js 與 Python，步驟見下方「快速開始」。
+[下載 v1.7.0 原始碼](https://github.com/mars-tw/ai-console/releases/download/v1.7.0/ai-console-source-v1.7.0.zip)。原始碼 ZIP 不是可直接執行的 Windows 程式；自行建置仍需 Node.js 與 Python，步驟見下方「快速開始」。
 
 </details>
 
-**v1.6.0** 將 DevSpace 分頁改為 ChatGPT「對話」入口，新增 OpenCode 工作臺。DevSpace 的新流程不建立 ChatGPT「工作」或背景 agent 工作；模型須在 ChatGPT 畫面實際選定，工作臺偏好不會遠端切換模型。詳見 [版本說明](docs/releases/v1.6.0.md)。
+**v1.7.0** 將所有編碼啟動與續作入口統一為 ChatGPT「對話」＋ DevSpace MCP：控制台只準備專案、工作內容與有限背景，不會自動貼上、送出、切換 ChatGPT 模型或建立 CLI 工單。舊派工頁面改為唯讀歷史與既有工作的停止／取消控制；OpenCode 保留為獨立入口。詳見 [版本說明](docs/releases/v1.7.0.md)與[統一執行流程](docs/chatgpt-conversation-workflow.md)。
 
-沿用 v1.5.1 的快速安裝與快速啟動：校驗下載包、安裝到使用者目錄、建立捷徑並保留既有 DevSpace 設定。原有派工主控台等功能保留各自入口，不會因開啟新的對話入口而自動執行。
+快速安裝與快速啟動會校驗下載包、安裝到使用者目錄、建立捷徑並保留既有 DevSpace 設定。安裝完成與 DevSpace 設定狀態分開呈現，可選擇稍後設定並先開啟控制台。
 
-保留 v1.4.1 的新手冷啟動流程：沒有模型不會顯示可派工；問題草稿會保留並引導接入；提供持續可見的首頁、可略過的未使用來源、內建入門技能及安裝後使用步驟。相容服務提供預設網址與官方設定入口，並正確處理智譜 `/v4` 網址。
+新手冷啟動流程、四個白話入口、問題草稿保留、可略過的未使用來源、內建入門技能與安裝後指引都保留；「問 AI」仍是純文字問答，不授予專案讀寫能力。
 
-**繼續工作（新手）**：從對話按「繼續工作」會開啟中文對話框；預設是在控制台建立**新工單**（最多帶入最近 6 則、每則 300 字的對話背景），**不是**恢復原 AI 的完整舊 session。原工具預選且不會被自動改換；僅 headless 派工，需手動展開「原工具終端機（進階）」才會開英文終端，並附雙語安全提示。設定往返、草稿保留與焦點還原已一併修正。
+**在 ChatGPT 對話續作**：從任何已索引對話可準備新的續作草稿，最多帶入最近 6 則、每則 300 字的必要背景。這不是恢復原 CLI session，也不會執行舊 `resume`；唯讀匯入仍維持唯讀，只作為有限背景。
 
-以下畫面使用示範資料，不含私人對話或帳號；實際可用的 AI 取決於你完成的安裝與設定。
+以下畫面使用示範資料，不含私人對話或帳號；實際可用的 AI 取決於你完成的安裝與設定。`screenshot-mobile.png`、`screenshot-console.png` 與 `screenshot-continue.png` 是舊版歷史介面，只用來說明曾有的版面；v1.7.0 已不再從這些畫面建立、重派或接續 CLI 工單。
 
 ![接入 AI：安裝檢查與新手指引（示範資料）](docs/screenshot-setup.png)
 
-<img src="docs/screenshot-mobile.png" width="390" alt="手機遙控示範：連線、派工與更新中的日誌">
+<img src="docs/screenshot-mobile.png" width="390" alt="歷史介面：舊版手機遙控曾提供派工；v1.7.0 僅準備 ChatGPT 對話並查看舊紀錄">
 
 ![新手首頁：四個白話入口](docs/screenshot-home.png)
 
@@ -72,19 +70,19 @@ Windows 發行包已包含控制台需要的 Python，不必另裝，也不會�
 
 ![地城戰鬥](docs/screenshot-battle.png)
 
-![主控台派工](docs/screenshot-console.png)
+![歷史介面：舊版派工主控台；v1.7.0 改為 ChatGPT 對話準備與舊紀錄](docs/screenshot-console.png)
 
-![繼續工作：新工單與進階終端選項（示範資料）](docs/screenshot-continue.png)
+![歷史介面：舊版新工單與終端選項；v1.7.0 改為 ChatGPT 對話續作](docs/screenshot-continue.png)
 
 ## 功能
 
 - **DevSpace 對話入口**：查看本機 MCP 服務、選擇允許的專案、複製對話指示並開啟 Chrome ChatGPT。由 ChatGPT「對話」中的模型直接使用 DevSpace MCP，成果寫回本機；後續在同一對話接續。可建立直接開啟此頁的 Windows 桌面捷徑，詳見 [DevSpace 桌面使用說明](docs/devspace-desktop.md)。
-- **OpenCode 工作臺**：選擇專案及 SOL／ASTRA 預設模型，開啟獨立 OpenCode 對話；工具透過綁定專案的 DevSpace MCP 使用。OpenCode 需另行安裝及登入，服務啟動不代表模型已驗證可用。
+- **OpenCode 工作臺**：選擇專案及 SOL／ASTRA 預設模型，開啟獨立 OpenCode 對話；工具透過綁定專案的 DevSpace MCP 使用。連線狀態以實際 bridge／MCP 心跳為準，服務停止、bridge 消失或重啟時可重新連接；一般連線故障不會被誤標為 owner 授權失敗。OpenCode 需另行安裝及登入，服務啟動不代表真人 OAuth 或模型推論已驗證可用。
 
 - **新手首頁**：即使沒有對話索引，也能先按「接入 AI／開始使用」。原有「找回舊對話／直接問 AI／交給 AI 執行／管理 AI 技能」四個入口保留
-- **接入其他 AI**：內建常見工具的安裝檢查與官方說明；「已安裝」不代表已登入或已驗證能派工。另可新增本機 HTTP 或雲端 HTTPS 的 OpenAI 相容 API，依序選擇模型、儲存、測試真正回覆，再進入問答。只有服務明確未提供模型清單端點時才開放手填模型，並持續標示尚未驗證；登入失敗不會被當成可用。不會因接入問答服務就授予它檔案或派工權限
+- **接入其他 AI**：內建常見工具的安裝檢查與官方說明；「已安裝」不代表已登入、已有額度或模型已驗證可用。另可新增本機 HTTP 或雲端 HTTPS 的 OpenAI 相容 API，依序選擇模型、儲存、測試真正回覆，再進入問答。只有服務明確未提供模型清單端點時才開放手填模型，並持續標示尚未驗證；登入失敗不會被當成可用。不會因接入問答服務就授予它檔案或專案執行權限
 - **金鑰不落檔**：手動輸入的 API 金鑰僅留本機背景服務記憶體，關閉視窗不會清除；重新啟動背景服務或移除此連線後需重新提供。進階使用者可填環境變數名稱。連線設定只保存非機密欄位；更換服務網址須新增另一個連線，避免把舊金鑰送到別的服務
-- **文字問答與工具派工**：「💬 問 AI」只回答、不動檔案、不呼叫工具。「🎙️ 派工主控台」交給 CLI 工具的工作可能讀寫專案檔案，送出前會明確提醒；若選本機模型，仍只產生文字回答，不會代你修改檔案
+- **文字問答與專案執行分流**：「💬 問 AI」與地端續聊只回答、不動檔案、不作為編碼執行路徑。需要讀寫專案時，控制台只準備 ChatGPT「對話」＋ DevSpace MCP 指示；使用者仍須在 ChatGPT 確認模型、貼上並自行送出
 - **四工具對話同步**：Codex、Claude、Qwen、Kimi 一次掃描，每個來源分別顯示找到幾份、失敗原因與可行修復。沒安裝、也沒有紀錄的來源可以略過，不算同步失敗；真實權限與格式問題仍會提示。停止按鈕會誠實說明只是停止畫面等待，後端可能仍在完成
 - **AI 技能中心**：不必先找下載網址，可從兩個內建純文字入門技能開始，也能透過 ZIP、資料夾或既有技能進行三步驟匯入。安裝後提供測試提示與原 AI 的使用步驟；檔案安裝成功不等於已在 AI 中執行成功。匯入包一律視為不受信任資料，只檢查與複製，不執行腳本或 hook，不覆寫同名技能；全域治理技能只能作為唯讀來源，不能由新手精靈寫入
 - **預覽後才能安裝**：安裝會比對預覽時的內容指紋；來源中途改變就請你重新預覽。切換來源或取消時，過期回應不會把畫面跳回舊技能。「格式可匯入」只代表檔案檢查通過，與 AI 實際執行相容性分開表示。
@@ -101,58 +99,18 @@ Windows 發行包已包含控制台需要的 Python，不必另裝，也不會�
 - **專案資料夾分組**：保留各工具原本的工作目錄結構，ChatGPT 式側欄
 - **去重**：同一 session UUID 出現多份（跨工具副本 / resume 鏈）自動收攏，保留最新正本
 - **時間收納**：一週未用的對話預設收起，保持清單清爽
-- **控制 API**（僅 127.0.0.1）：
-  - `▶ 派工 / 接續` — 一鍵在原本目錄開終端接續對話（claude --resume / codex resume / kimi -r）
-  - `↻ 重新掃描` — 即時重建索引
-- **主控台派工**：一個輸入框說一句話，系統自動拆成多張工單、決定每張交給哪個 AI CLI，
-  再一次派出去。每張工單都會自動掛上這台機器的規範檔路徑與技能目錄，
-  要求執行者先讀規範、自己比對 frontmatter 啟用該用的技能，不會裸奔執行。
-  - **你指名誰就是誰**：句子裡寫「用 codex…」「叫 qwen…」會直接照做，優先於自動判斷；
-    agy／Gemini（ANTIGRAVITY）也能無頭派工，而且因為走獨立額度池，撞額度自動接力時第一個試它；
-    Claude／Codex 是派工平台，排在接力鏈最後
-  - **一件一件跑**：佇列在伺服器端，前一件的行程真的結束才派下一件 ——
-    多個 agent 同時改同一批檔案會互相蓋掉。切到別的分頁或關掉畫面都不影響
-  - **看得出有沒有在動**：每一件顯示最後一行輸出與已跑多久，不是只有一個「執行中」
-  - **💬 補一句**：工作跑歪了可以中途補指令。無頭執行沒有 stdin 可以插話，
-    所以是用各家的續談旗標再派一次；上一輪還在跑就先排隊，結束後自動送出
-  - **📝 看改了什麼**：派工結束後直接在畫面上看它動了哪些檔案、逐檔展開 patch。
-    指定工作目錄就能用（留空＝家目錄，那裡不是 git 專案所以看不到東西）
-  - **成敗與花費看得出來**：exit code 不能當作成功。實際踩過的案例是
-    agent 撞上 API 529、一個檔都沒改就結束，而行程回傳 0 ——
-    畫面顯示「已完成」，幾小時後才有人發現。現在會分成
-    「已完成／跑完了但沒有改到任何檔案／依規範停下／執行失敗（附原因）」，
-    並顯示這一趟的美金與 token 數。
-    判定會掃**完整** log 而不是尾端：那份 529 的失敗標記落在 1.1 MB 檔案的
-    42%～53% 處，只看最後 64 KiB 永遠抓不到 —— 這個功能一度在它自己的
-    起因案例上是壞的。掃描依 log 大小增量進行，已結束的派工一輩子只掃一次
-  - **「依規範停下」不算失敗**：agent 回報 BLOCKED 是照規範做對了。
-    跟 529、崩潰混在同一個紅色裡的話，使用者會學會忽略紅字，
-    然後真正的失敗也一起被忽略
-  - **↻ 重派**：失敗或沒改到檔的那幾件可以用同一份工單、同一個工具再派一次。
-    529 是伺服器端的暫時性問題，不該讓人把幾十行的工單重打一遍。
-    重派產生新紀錄而不是覆蓋舊的 —— 重試過幾次、每次結果是什麼，本身就是資訊
-  - **↪ 撞額度自動換人**：某個工具回「額度用完」（週額度、429、insufficient_quota），
-    或 cursor 開了終端十分鐘沒人按 Enter，後端自動把同一份工單（含前一個做到哪裡）
-    接力給下一個能無頭跑、沒限流的工具，最多兩手。順序是省錢順序：
-    agy → qwen → kimi → grok → codex → claude。只在額度原因時換 ——
-    程式錯誤換誰都一樣壞，BLOCKED 是規範擋的
-  - **⏹ 停止執行中的派工**：先確認再砍整棵行程樹，停了老實標成「已停止」（不會像用工作管理員殺掉那樣顯示成「已完成」）。agy 派工改走 JSON 模式，成本欄看得到它的 token 數，日誌仍顯示回覆原文。
-  - **額度與今日用量**：派工面板最上面一條，列出每個工具還有沒有額度、什麼時候恢復、今天派了幾件、燒了多少 token；「自動」現在會挑到誰直接標出來。資料來自 `/api/dispatch/usage`。
-  - **agy 在下拉裡、而且排第一**：工具清單照接力鏈的省錢順序（agy → qwen → kimi → grok → codex → claude），終端工具最後。以前「自動」會挑到 agy，下拉卻選不到它。
-  - **拆解的預設執行者不再是 claude**：拆不出來、或整句交給一個人的時候，交給最便宜的可用工具；拆解提示也告訴地端模型各工具的價差。
-  - **📱 手機遙控**：桌面版按「開啟遙控」，後端在 **Tailscale 網卡**上多開一個埠（5178；不開放區網與公網），畫一個 QR；手機掃了就自動配對，之後用手機瀏覽器（可加到主畫面當 App）看派工、派工、補一句、停止、取消、重派、看日誌。每個請求都要帶配對 token（十分鐘內猜錯十次就擋），只開放派工相關的路徑——對話、檔案、技能、設定一律不給。「換一把 token」或「關閉」之後舊手機立刻連不上。
-  - **🔔 系統通知**：派工結束發一則作業系統通知，點擊把視窗叫回前面。
-    這個程式的用法就是派出去之後切去做別的事，不然只能每隔幾分鐘切回來看一眼
-- **⏰ 定時工作**：設定一次就自己跑。每隔 N 分鐘 / 每天 HH:MM / 每週某天 HH:MM。
-  刻意不做 cron 語法（那是給工程師的），也刻意不補跑錯過的
-  —— 電腦關一整夜，早上開機不該一次噴出八份報告
+- **控制 API**（僅 `127.0.0.1`）：重新掃描、狀態與歷史讀取仍可使用；舊 new-work／resume／retry／followup／batch／schedule 與 DevSpace run／continue 執行端點回覆 `409 USE_CHATGPT_CONVERSATION`。`GET /api/dispatches` 只讀，不會 flush pending 或 auto-handoff
+- **ChatGPT 對話準備**：首頁、舊主控台、對話續作、辦公室與手機共用同一條 DevSpace 草稿流程。控制台不自動拆單、不挑 CLI 執行者、不貼上或送出訊息，也不替使用者切換 ChatGPT 模型
+- **舊派工紀錄（唯讀）**：既有紀錄仍可查看狀態、最後輸出、完整日誌、成本與 Git 差異；仍在執行或等待中的舊工作可停止／取消。畫面上的「重做／續作」只整理成新的 ChatGPT 對話草稿，不呼叫 retry／followup API
+- **舊排程紀錄**：內容仍可查看並轉成 ChatGPT 對話草稿；伺服器啟動時不會啟動舊 Scheduler，也不會在背景自動執行
+- **📱 手機遙控**：透過 Tailscale 與配對 token 查看舊紀錄、日誌並停止／取消既有工作；新工作、重做與續作只會複製完整 DevSpace 指示並開啟 ChatGPT，不會從手機 POST 新派工、重派或補話。對話、檔案、技能與設定 API 仍不對遙控端開放
 - **黑色 / 亮色 / 跟隨系統**：三種主題，選擇會記住
 - **垃圾桶**：不是目前在用的工具、太久沒動、或在原本工具裡已封存的對話，
   預設收進垃圾桶。**檔案完全沒有動**，隨時看得回來，也可以單筆「留著」放回主清單
 - **地端續聊**：選一份對話，用 LM Studio 已下載的模型帶著近期上下文繼續聊，不依賴雲端額度。尚未準備好時先引導完成設定，不清掉已打好的問題；在你明確送出後，控制台才檢查條件並準備 CPU 推論服務，不需自行操作 Local Server
 - **像素辦公室**：把每個 AI 工具具象化成一隻龍，在俯視像素辦公室裡走動、工作、開會，狀態一眼看得出來
 - **冒險模式**：內建一套小型 MMORPG，可以邊工作邊掛機練功；純單機，clone 下來就能玩
-- **ai-hub 整合**（選配）：讀取 `~/ai-hub/status.json` 顯示各工具即時限流/活動狀態與專案接力標記
+- **ai-hub 整合**（選配）：讀取 `~/ai-hub/status.json` 顯示各工具即時限流／活動狀態與既有專案狀態標記；不會因此啟動自動接力
 
 ## 搜尋這台電腦的 AI 對話
 
@@ -215,10 +173,7 @@ npm run pack               # 從白名單暫存重打包 → release/clean/；�
 > 少一個 import 都抓不到，直到 `npm run build` 才炸。要嘛 `npm run typecheck`，
 > 要嘛 `npx tsc --noEmit -p tsconfig.app.json`（指定專案）。
 
-後端測試刻意用標準庫的 `unittest` 而不是 pytest —— Python 這一側沒有任何
-pip 依賴，測試不該是第一個引進的。覆蓋的重點是「看程式碼看不出來、
-要壓測才會現形」的那幾類：同一毫秒的 id 撞號、併發讀改寫掉資料、
-排程 tick 期間別的執行緒拿不拿得到鎖、把使用者文字放進命令列會發生什麼事。
+後端測試刻意用標準庫的 `unittest` 而不是 pytest —— Python 這一側沒有任何 pip 依賴。覆蓋重點包括併發與資料完整性、來源及路徑安全、舊執行端點 fail closed、`GET /api/dispatches` 無副作用、停止／取消既有工作，以及發行包的必要檔案與隱私稽核。
 
 地端續聊：安裝 LM Studio、下載完整模型，並在 LM Studio 的 Runtime Manager（`Ctrl+Shift+R`）準備 **CPU llama.cpp (Windows) 2.24.0**。此版的內建安全檢查固定使用該 CPU runtime，不會改用 NVIDIA 推論引擎；不支援或無法確認的硬體狀態會說明原因。若電腦已有 ai-hub 安全檢查或你明確指定檢查程式，會以原設定為準，失敗時不繞過它。只查看設定頁不會載入模型；送出問題後才檢查安全使用條件並準備服務與模型。不要把 LM Studio 的 1234 埠另接成自訂服務。
 
@@ -234,7 +189,7 @@ pip 依賴，測試不該是第一個引進的。覆蓋的重點是「看程式�
 | `active` | 坐回自己桌前**瘋狂打電腦**（角色抖動、螢幕跑碼）；兩成機率走去找同事**辯論**（互冒 💢 與對白） |
 | `idle` | 在辦公室**偷懶**：上廁所（人消失在門後）、看書、走來走去、泡咖啡、種花 |
 | `rate_limited` | 走去沙發**躺下睡覺**，頭上對話框寫明**休息到幾點**（從派工 log 解析工具自己回報的恢復時間） |
-| 有 alive 派工 | 走到白板前**執行任務**，白板亮起並跑進度條 |
+| 升級前仍在執行的舊派工 | 走到白板前**顯示既有任務狀態**，白板亮起並跑進度條 |
 | `unknown` | 灰階淡出 |
 | 三人以上在工作 | 定期自動**開會**：全員走進玻璃會議室就座 |
 
@@ -246,7 +201,7 @@ pip 依賴，測試不該是第一個引進的。覆蓋的重點是「看程式�
 
 戰鬥是**回合制**（吞食天地／軒轅劍天之痕那種）：一回合裡你先下令要打誰、用哪招，
 全場再依速度依序出手。不想動手時切成「沉浸自動」，它會自己打 ——
-你切去派工、看對話的時候它照打，切回來隨時接手。
+你切去工作臺、看對話的時候它照打，切回來隨時接手。
 
 - **沒有職業**：近戰／遠程／魔法／信仰四條線共 16 個技能，各線投點到門檻才解鎖下一階
 - **三組套裝**：裝備 + 技能配點 + 屬性配點各存一份，一鍵整組換（坦組／輸出組／補師組）。
@@ -337,9 +292,9 @@ tools/imagegen.py          # 共用產圖層：多 AI 後端探測與派工
 tools/gen_office_art.py    # 環境材質與家具生成
 tools/pack_props.py        # 家具 → 引擎用素材
 server/api.py              # 整合伺服器：dist 靜態 + /data 即時資料 + /api 控制端點
-server/planner.py          # 一句話 → 派工計畫（指名優先、地端模型拆解、失敗一定有退路）
-server/rules.py            # 工單前置：掛規範與技能目錄，中和偽裝成系統指示的內容
-server/schedule.py         # 定時工作：JSON 存檔 + 一條背景執行緒，30 秒一個 tick
+server/planner.py          # 舊派工計畫相容邏輯；v1.7.0 公開執行入口不再呼叫
+server/rules.py            # 舊工單相容與歷史解析邏輯
+server/schedule.py         # 舊排程紀錄格式；啟動時不再開背景 Scheduler
 server/tests/              # 後端測試（unittest，無 pip 依賴）
 src/components/AskAI.tsx   # 只回答問題的地端模型入口，不派工、不動檔案
 src/components/ConversationSync.tsx # 四工具對話同步與逐來源真實狀態
@@ -357,32 +312,22 @@ src/                       # React + TypeScript + Tailwind 前端
 `scripts/audit_release.py` 能檢查資料夾或 ZIP 的版本、必要檔案、本機路徑、配對碼、私密檔名和 Windows 路徑／大小寫衝突。壓縮包通過檢查後，才把本機專屬設定放回本地安裝。
 
 ```bash
-python scripts/audit_release.py release/clean/AI控制台-win32-x64 --kind windows --version 1.6.0
-python scripts/audit_release.py release/ai-console-source-v1.6.0.zip --kind source --version 1.6.0
+python scripts/audit_release.py release/clean/AI控制台-win32-x64 --kind windows --version 1.7.0
+python scripts/audit_release.py release/ai-console-source-v1.7.0.zip --kind source --version 1.7.0
 ```
 
 發佈者可加 `--check-local-pairing`，只在記憶體中比對本機配對碼是否誤入成品；一般檢查與測試不會讀取配對設定。
 
-- 桌面資料與 API 綁定 `127.0.0.1`；只有你開啟手機遙控後，才在 Tailscale 網卡另開受 token 保護的派工入口，不開放對話、檔案、技能或設定 API
+- 桌面資料與 API 綁定 `127.0.0.1`；只有你開啟手機遙控後，才在 Tailscale 網卡另開受 token 保護的入口。遙控端可準備 ChatGPT 指示、查看舊紀錄並停止／取消既有工作，不開放對話內容、檔案、技能或設定 API
 - 索引器對原始對話檔**只讀不寫**
 - 清理工具（`tools/cleanup_old.py`）採「封存 → 驗證 → 刪除」流程
 
-只綁 loopback 不等於安全 —— **你用瀏覽器打開的任何網頁都能對 `127.0.0.1` 發請求**，
-而這個 API 能派工、能開終端。所以還有幾層：
+只綁 loopback 不等於安全 —— **你用瀏覽器打開的任何網頁都能對 `127.0.0.1` 發請求**。因此所有會產生副作用的端點都要求 Origin 來自本應用自己的頁面；完全沒有 Origin 的請求也會被拒絕。會啟動外部稽核流程的 GET 同樣需要同源檢查。
 
-- **同源檢查**：所有會產生副作用的端點都要求 Origin 來自本應用自己的頁面。
-  連「完全沒有 Origin」也擋 —— 本機任何程式（某個套件的安裝腳本、下載來的執行檔）
-  都能發請求，而瀏覽器跨來源時一定會帶 Origin，所以要求它不影響正常使用。
-  會啟動外部流程的 GET（`/api/audit`）同樣要過這關
-- **工具白名單**：派工的 `tool` 必須是已知工具名。沒有這一層的話，
-  任意字串會掉進「開終端」分支被當成執行檔名跑，還能用 `..\` 把 log 寫到目錄外
-- **使用者文字不進命令列**：工單一律寫成 UTF-8 檔案，命令列只帶一行 ASCII 的
-  「去讀這個檔」。理由不只是安全 —— 經過 `cmd.exe` 的文字會在第一個雙引號被截斷、
-  `%VAR%` 會被展開成本機絕對路徑（然後跟著送進雲端模型）、含換行會整個不執行。
-  寫不了工單檔就直接失敗，不會退回把原始文字塞進批次檔
-- **請求上限**：body 2 MB、一批 20 件、單件工單 20000 字。
-  沒有上限的話一次幾千件會在幾秒內開出幾千個 CLI 行程
-- **對話 id 白名單**：`--resume <id>` 的 id 收斂成 `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`
+- **舊執行入口失效關閉**：new-work、resume、retry、followup、batch、schedule 與 DevSpace run／continue 公開端點只回覆 `409 USE_CHATGPT_CONVERSATION`，不建立工單、不開終端、不啟動子行程
+- **讀取歷史沒有副作用**：`GET /api/dispatches` 不 flush pending、不重派、不 auto-handoff；啟動伺服器也不啟動舊 Scheduler
+- **DevSpace 範圍受限**：專案必須位於 `allowedRoots`；控制台只準備文字與開啟 ChatGPT，不會自動貼上、送出或替使用者切換模型
+- **遙控配對**：手機請求須帶配對 token，錯誤嘗試會限速；停止／取消只作用於已存在的舊工作，不會建立新工作
 - **金鑰只在記憶體裡**傳給 SDK，不印出、不寫進 log
 - **技能包不受信任**：限制檔案數、單檔／總大小、路徑深度與 ZIP 壓縮比；拒絕路徑穿越、symlink/junction、巢狀壓縮檔、敏感憑證檔名、明文金鑰／token／密碼與同名覆寫。預覽與安裝都不執行技能內容；每次只安裝到一個 AI，先寫暫存再原子換入，失敗會清理暫存
 - **宣傳截圖有防洩漏閘門**：`scripts/shot.cjs` 拍之前會把畫面上的絕對路徑

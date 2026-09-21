@@ -94,6 +94,18 @@ class TestRemoteServer(unittest.TestCase):
         code, _ = self._req("/api/health")
         self.assertEqual(code, 200)
 
+    def test_舊新增重派補話端點只回ChatGPT對話導引(self):
+        for path, body in (
+            ("/api/dispatch", {"task": "work", "tool": "auto"}),
+            ("/api/dispatch/retry", {"id": "old"}),
+            ("/api/dispatch/followup", {"id": "old", "text": "next"}),
+        ):
+            with self.subTest(path=path):
+                code, obj = self._req(path, token=self.token, method="POST", body=body)
+                self.assertEqual(code, 409)
+                self.assertEqual(obj.get("code"), "USE_CHATGPT_CONVERSATION")
+                self.assertEqual(obj.get("view"), "devspace")
+
     # ── 白名單 ──
     def test_對話索引與其他路徑一律不給(self):
         for path in ("/api/status", "/api/index", "/api/conv/tail?id=x", "/api/skills", "/data/index.json"):
