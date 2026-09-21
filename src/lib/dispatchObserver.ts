@@ -1,24 +1,19 @@
-import { isConversationWorkbench } from './workbenchView'
+import type { WorkbenchView } from './workbenchView'
 import type { DispatchRecord } from '@/types/data'
 
-/** The legacy read endpoint may hand work to another agent; conversation clients must never poll it. */
-export function watchLegacyDispatches(view: string, receive: (records: DispatchRecord[]) => void): () => void {
-  if (isConversationWorkbench(view)) return () => {}
-  const controller = new AbortController()
-  let pulling = false
-  const pull = async () => {
-    if (pulling || controller.signal.aborted) return
-    pulling = true
-    try {
-      const response = await fetch('/api/dispatches', { signal: controller.signal })
-      if (!response.ok) return
-      const data = await response.json()
-      if (!controller.signal.aborted && Array.isArray(data?.dispatches)) receive(data.dispatches)
-    } catch {
-      // Completion notifications cannot block the workbench when a read fails or is cancelled.
-    } finally { pulling = false }
-  }
-  void pull()
-  const timer = setInterval(() => { void pull() }, 3000)
-  return () => { controller.abort(); clearInterval(timer) }
+/**
+ * Legacy dispatch polling is intentionally disabled for every workbench view.
+ * `/api/dispatches` is still available when a read-only history panel explicitly requests it,
+ * but mounting or switching the application must never create a background observer that can
+ * trigger legacy queue flushing or auto-handoff behavior.
+ */
+export function watchLegacyDispatches(
+  _view: WorkbenchView,
+  _receive: (records: DispatchRecord[]) => void,
+  fetcher: typeof fetch = fetch,
+  delay = 3000,
+): () => void {
+  void fetcher
+  void delay
+  return () => undefined
 }

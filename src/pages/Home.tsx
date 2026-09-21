@@ -20,6 +20,8 @@ import { canOpenContinueWork } from '@/lib/continuationHelp'
 import SkillCenter from '@/components/SkillCenter'
 import { t, useLang } from '@/i18n'
 import LangSwitch from '@/components/LangSwitch'
+import { createDevSpaceDraft, prepareDevSpaceConversationDraft } from '@/lib/devspace'
+import type { DevSpaceConversationPreparation, DevSpaceDraft } from '@/lib/devspace'
 import { initialWorkbenchView, isConversationWorkbench } from '@/lib/workbenchView'
 import type { WorkbenchView } from '@/lib/workbenchView'
 
@@ -54,7 +56,7 @@ export const BEGINNER_ACTIONS = [
 ] as const
 
 export function originalAiActionLabel(): string {
-  return '繼續工作'
+  return '在 ChatGPT 對話續作'
 }
 
 interface ConversationFilters {
@@ -428,7 +430,6 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
   const [apiOk, setApiOk] = useState(false)
   const [liveTools, setLiveTools] = useState<IndexData['tools'] | null>(null)
   const [continueTarget, setContinueTarget] = useState<ConversationSummary | null>(null)
-  const [continueSetupId, setContinueSetupId] = useState<string | null>(null)
   const [toast, setToast] = useState('')
   /**
    * 地端能不能用，只認 /api/setup 的 local。
@@ -511,6 +512,11 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
    * 一樣不寫 localStorage：任務常含專案路徑與內部細節。
    */
   const [consoleDraft, setConsoleDraft] = useState('')
+  /**
+   * DevSpace 的工作內容、專案與模型由 Home 持有，所以切到其他工作臺頁籤再回來不會消失。
+   * 工作內容與專案只留在本次執行期間；模型沿用既有的偏好設定，不另存 prompt。
+   */
+  const [devSpaceDraft, setDevSpaceDraft] = useState<DevSpaceDraft>(() => createDevSpaceDraft())
   const [syncOpen, setSyncOpen] = useState(false)
   /** 從哪一份對話按「去設定 AI」進來的。設定完要回得去，而且中途不清任何草稿。 */
   const [setupOrigin, setSetupOrigin] = useState<string | null>(null)
@@ -564,6 +570,17 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
   useEffect(() => { localStorage.setItem('ac_activeDays', String(activeDays)) }, [activeDays])
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 4000) }
+
+  /**
+   * 所有會讀寫專案的入口都只準備同一份 DevSpace 草稿，再切到 ChatGPT 對話入口。
+   * 這裡不 POST 舊派工 API、不恢復 CLI session，也不宣稱已送出或已執行。
+   */
+  const prepareChatGPTConversation = (request: DevSpaceConversationPreparation) => {
+    setDevSpaceDraft(current => prepareDevSpaceConversationDraft(current, request))
+    setContinueTarget(null)
+    setViewMode('devspace')
+    showToast(t('已準備 ChatGPT 對話草稿；請確認專案與內容後複製並開啟 ChatGPT。'))
+  }
 
   /**
    * 離開一份對話之前先把它的草稿收好。
@@ -868,36 +885,10 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
   }
 
   const openContinueWork = useCallback((c: ConversationSummary) => {
-    if (!canOpenContinueWork(c)) {
-      showToast(t('匯入的對話僅供閱讀，請在原本的 AI 操作。'))
-      return
-    }
-    setContinueSetupId(null)
     setContinueTarget(c)
   }, [])
 
   const closeContinueWork = useCallback(() => setContinueTarget(null), [])
-
-  const openSetupFromContinueWork = useCallback(() => {
-    if (!continueTarget) return
-    setContinueSetupId(continueTarget.id)
-    setContinueTarget(null)
-    setViewMode('setup')
-  }, [continueTarget])
-
-  const returnToContinueWork = useCallback(() => {
-    const id = continueSetupId
-    if (!id || !index) return
-    const conv = index.conversations.find((c) => c.id === id)
-    if (!conv) return
-    setContinueSetupId(null)
-    setSyncOpen(false)
-    setViewMode('list')
-    selectConversation(id)
-    setContinueTarget(conv)
-    // selectConversation 來自同一元件、行為穩定；列入 deps 會在每次 render 換參考
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable selectConversation
-  }, [continueSetupId, index])
 
   /**
    * 換對話時重置聊天串，並還原本機暫存。
@@ -1398,7 +1389,6 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
     selectConversation(null)
     setSyncOpen(false)
     setSetupOrigin(null)
-    setContinueSetupId(null)
     setViewMode('list')
     // 390px 的手機上側欄是蓋住主區的浮層：不收起來，回到首頁也只看得到清單。
     // 只動這個暫時旗標，桌面那份「側欄要開著」的偏好不碰。
@@ -1448,15 +1438,6 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
           ↩ {t('返回原對話接續')}
         </button>
       )}
-      {continueSetupId && (
-        <button
-          type="button"
-          className="flex-none rounded-md border border-line px-3 py-1 text-xs font-medium text-ink2 hover:bg-elev focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
-          onClick={returnToContinueWork}
-        >
-          ↩ {t('返回繼續工作')}
-        </button>
-      )}
       <span className="min-w-0 flex-1 truncate text-xs text-mute3">{t('隨時可以回到這裡重新開始，已經打好的問題不會消失。')}</span>
     </div>
   )
@@ -1465,8 +1446,8 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
     <div className="flex flex-none items-center gap-1 overflow-x-auto border-b border-line px-3 py-1.5">
       {([
         ['setup', t('🔌 接入 AI')],
-        ['list', t('📋 對話')], ['ask', t('💬 問 AI')], ['console', t('🎙️ 派工主控台')],
-        ['devspace', 'DevSpace'],
+        ['list', t('📋 對話')], ['ask', t('💬 問 AI')], ['console', t('📚 舊派工紀錄')],
+        ['devspace', t('💬 ChatGPT 執行')],
         ['opencode', 'OpenCode'],
         ['office', t('🎮 辦公室')], ['rpg', t('⚔️ 冒險')],
         ['skills', t('🧩 AI 技能')],
@@ -1496,14 +1477,15 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
           <Console
             draft={consoleDraft}
             onDraftChange={setConsoleDraft}
+            onPrepareConversation={prepareChatGPTConversation}
             onSetup={() => setViewMode('setup')}
           />
         ) : viewMode === 'devspace' ? (
-          <DevSpaceConsole />
+          <DevSpaceConsole draft={devSpaceDraft} onDraftChange={setDevSpaceDraft} />
         ) : viewMode === 'opencode' ? (
           <OpenCodePanel />
         ) : viewMode === 'office' ? (
-          <Office tools={liveTools ?? {}} projects={[]} conversations={[]} onDispatch={openContinueWork} busyId="" />
+          <Office tools={liveTools ?? {}} projects={[]} conversations={[]} onDispatch={openContinueWork} onPrepareConversation={prepareChatGPTConversation} busyId="" />
         ) : viewMode === 'rpg' ? (
           <Adventure tools={liveTools ?? {}} />
         ) : viewMode === 'skills' ? (
@@ -1515,7 +1497,7 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
                 <SetupWelcome onStart={() => setViewMode('setup')} />
                 <p role="status" className="text-sm text-mute2">{t('還沒有對話清單，也能先接入 AI 或直接開始提問。')}</p>
                 <div className="grid gap-3 sm:grid-cols-2">
-                  {BEGINNER_ACTIONS.map((action, i) => <button key={action} type="button" className="rounded-xl border border-line p-4 text-left text-sm hover:bg-elev" onClick={() => { if (i === 0) setSyncOpen(true); else setViewMode(i === 1 ? 'ask' : i === 2 ? 'console' : 'skills') }}>{t(action)}</button>)}
+                  {BEGINNER_ACTIONS.map((action, i) => <button key={action} type="button" className="rounded-xl border border-line p-4 text-left text-sm hover:bg-elev" onClick={() => { if (i === 0) setSyncOpen(true); else setViewMode(i === 1 ? 'ask' : i === 2 ? 'devspace' : 'skills') }}>{t(action)}</button>)}
                 </div>
                 <details className="text-xs text-mute2"><summary className="cursor-pointer">{t('對話清單狀態')}</summary><p className="mt-2 break-words">{t('對話清單尚未建立：{err}', { err: error })}</p></details>
               </div>
@@ -1814,13 +1796,13 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
                     {apiOk && convs.some((c) => c.resume) && (
                       <button
                         className="flex-none rounded border border-line px-1.5 py-1 text-xs hover:bg-elev"
-                        title={t('派工：接續此資料夾最新的對話')}
+                        title={t('在 ChatGPT 對話接續此資料夾最新的對話')}
                         onClick={() => {
                           const target = convs.find((c) => c.resume)
                           if (target) openContinueWork(target)
                         }}
                       >
-                        {t('▶ 派工')}
+                        {t('▶ ChatGPT 對話續作')}
                       </button>
                     )}
                   </div>
@@ -1919,10 +1901,11 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
             <Console
               draft={consoleDraft}
               onDraftChange={setConsoleDraft}
+              onPrepareConversation={prepareChatGPTConversation}
               onSetup={() => setViewMode('setup')}
             />
           ) : viewMode === 'devspace' ? (
-            <DevSpaceConsole />
+            <DevSpaceConsole draft={devSpaceDraft} onDraftChange={setDevSpaceDraft} />
           ) : viewMode === 'opencode' ? (
             <OpenCodePanel />
           ) : viewMode === 'office' ? (
@@ -1931,6 +1914,7 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
               projects={index.projects}
               conversations={index.conversations}
               onDispatch={openContinueWork}
+              onPrepareConversation={prepareChatGPTConversation}
               busyId=""
             />
           ) : viewMode === 'rpg' ? (
@@ -1977,10 +1961,10 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
                   </button>
                   <button
                     className="min-h-28 rounded-xl border border-line bg-panel p-4 text-left shadow-sm hover:border-line3 hover:bg-elev focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
-                    onClick={() => setViewMode('console')}
+                    onClick={() => setViewMode('devspace')}
                   >
-                    <span className="block text-lg font-medium text-ink">⚡ {t(BEGINNER_ACTIONS[2])}</span>
-                    <span className="mt-2 block text-sm leading-5 text-mute2">{t('把想完成的結果寫清楚，再確認交給 AI 動手。')}</span>
+                    <span className="block text-lg font-medium text-ink">💬 {t(BEGINNER_ACTIONS[2])}</span>
+                    <span className="mt-2 block text-sm leading-5 text-mute2">{t('把結果與專案路徑寫清楚，再貼到 ChatGPT「對話」使用 DevSpace MCP 執行。')}</span>
                   </button>
                   <button
                     className="min-h-28 rounded-xl border border-line bg-panel p-4 text-left shadow-sm hover:border-line3 hover:bg-elev focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
@@ -2014,26 +1998,20 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
                 </div>
                 <div className="flex flex-wrap items-center gap-3 text-xs text-mute3">
                   <span>{relTime(selected.mtime)}</span>
-                  {selected.resume && (
-                    <button
-                      className="rounded-md bg-ink px-3 py-1.5 text-sm font-medium text-invink hover:bg-ink2 disabled:opacity-40"
-                      disabled={!apiOk || !canOpenContinueWork(selected)}
-                      onClick={() => openContinueWork(selected)}
-                    >
-                      {t(originalAiActionLabel())}
-                    </button>
-                  )}
-                  {!apiOk && selected.resume && <span className="text-amber-600">{t('控制 API 離線，重開控制台後即可繼續工作。')}</span>}
+                  <button
+                    className="rounded-md bg-ink px-3 py-1.5 text-sm font-medium text-invink hover:bg-ink2 disabled:opacity-40"
+                    disabled={!canOpenContinueWork(selected)}
+                    onClick={() => openContinueWork(selected)}
+                  >
+                    {t(originalAiActionLabel())}
+                  </button>
+                  {!apiOk && <span className="text-amber-600">{t('控制 API 離線時仍可先準備 ChatGPT 對話；近期背景可能無法載入。')}</span>}
                 </div>
                 <details className="mt-2 text-xs text-mute3">
                   <summary className="cursor-pointer hover:text-ink3">{t('進階資訊')}</summary>
                   <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-elev p-2">
                     <span className="max-w-full break-all" title={selected.path}>{selected.path}</span>
-                    {selected.resume && (
-                      <button className="rounded border border-line px-2 py-1 hover:bg-panel" onClick={() => copy(selected.resume, 'resume')}>
-                        {copied === 'resume' ? t('已複製 ✓') : t('複製原 AI 開啟指令')}
-                      </button>
-                    )}
+                    {selected.resume && <span className="text-mute3">{t('舊版原工具 resume 指令僅供紀錄；控制台不再用它啟動或續作。')}</span>}
                     <button className="rounded border border-line px-2 py-1 hover:bg-panel" onClick={() => copy(selected.path, 'path')}>
                       {copied === 'path' ? t('已複製 ✓') : t('複製檔案路徑')}
                     </button>
@@ -2048,9 +2026,9 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
               >
                 {!selected.hasMessages ? (
                   <section aria-labelledby="large-conversation-title" className="mx-auto max-w-xl rounded-xl border border-line bg-elev p-5">
-                    <h3 id="large-conversation-title" className="font-medium text-ink">{t('這份對話請回原本的 AI 查看')}</h3>
+                    <h3 id="large-conversation-title" className="font-medium text-ink">{t('這份大型對話仍可建立 ChatGPT 續作')}</h3>
                     <p className="mt-2 text-sm leading-6 text-mute2">
-                      {t('對話檔較大（{size}），控制台沒有複製訊息內容。請按上方「在原本的 AI 開啟」，對話就會回到原處。', { size: fmtSize(selected.size) })}
+                      {t('對話檔較大（{size}），控制台沒有複製訊息內容。可按上方「在 ChatGPT 對話續作」準備專案與新工作，但不會自動帶入舊訊息。', { size: fmtSize(selected.size) })}
                     </p>
                   </section>
                 ) : detailLoading ? (
@@ -2094,9 +2072,7 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
                       </p>
                     ) : detailTailState === 'fallback' ? (
                       <p role="alert" className="text-center text-xs text-amber-600 dark:text-amber-400">
-                        {selected.resume
-                          ? t('最新訊息載入失敗：{err}。目前顯示索引匯出的前段；仍可用「在原本的 AI 開啟」回原處查看。', { err: detailTailError })
-                          : t('最新訊息載入失敗：{err}。目前顯示索引匯出的前段；可從「進階資訊」複製檔案路徑。', { err: detailTailError })}
+                        {t('最新訊息載入失敗：{err}。目前顯示索引匯出的前段；仍可準備 ChatGPT 續作，但不會自動帶入真正尾端。', { err: detailTailError })}
                       </p>
                     ) : detail.truncated ? (
                       <p className="text-center text-xs text-mute3">
@@ -2280,9 +2256,9 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
                         text: m.text,
                       }))}
                       onToast={showToast}
+                      onPrepareConversation={prepareChatGPTConversation}
                       draft={quickDrafts[selected?.id ?? ''] ?? ''}
                       onDraftChange={(v) => setQuickDrafts((m) => ({ ...m, [selected?.id ?? '']: v }))}
-                      onSetup={() => setViewMode('setup')}
                     />}
                   </div>
                 )}
@@ -2305,7 +2281,7 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
           conversation={continueTarget}
           onClose={closeContinueWork}
           onToast={showToast}
-          onSetup={openSetupFromContinueWork}
+          onPrepareConversation={prepareChatGPTConversation}
           apiOk={apiOk}
           draft={quickDrafts[continueTarget.id] ?? ''}
           onDraftChange={(v) => setQuickDrafts((m) => ({ ...m, [continueTarget.id]: v }))}

@@ -14,6 +14,9 @@ spec.loader.exec_module(release_audit)
 
 
 class ReleaseArtifactTests(unittest.TestCase):
+    def test_quick_inventory_includes_linked_conversation_workflow_guide(self):
+        self.assertIn('docs/chatgpt-conversation-workflow.md', release_audit.QUICK_FILES)
+
     def test_payload_inventory_detects_missing_or_corrupt_files(self):
         with tempfile.TemporaryDirectory(prefix='ac_payload_audit_') as tmp:
             artifact = Path(tmp) / 'windows.zip'

@@ -98,6 +98,15 @@ class DevSpaceQuickSetupTests(unittest.TestCase):
         self.assert_ok(result)
         self.assertEqual(json.loads(result.stdout), [False, True, True, True, False, False, False])
 
+    def test_unattended_confirmation_never_prompts_or_implicitly_grants(self):
+        result = self.run_ps(
+            "function Read-Host { throw 'UNEXPECTED_PROMPT' }\n"
+            "if (Confirm-DevSpaceAction 'fixture' -Unattended) { throw 'UNEXPECTED_GRANT' }\n"
+            "Write-Output 'DECLINED_WITHOUT_PROMPT'"
+        )
+        self.assert_ok(result)
+        self.assertEqual(result.stdout.strip(), 'DECLINED_WITHOUT_PROMPT')
+
     def test_existing_json_and_jsonc_are_reused_without_touching_credentials(self):
         for name in ("config.json", "config.jsonc"):
             with self.subTest(name=name):

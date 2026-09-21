@@ -31,6 +31,7 @@ const quickFiles = [
   'scripts/quick-install.ps1', 'scripts/quick-launch.ps1', 'scripts/setup-devspace.ps1', 'scripts/quick-start.json',
   'scripts/quick-payload.ps1',
   'docs/install-and-run.md', 'docs/quick-start.md', 'docs/devspace-desktop.md',
+  'docs/chatgpt-conversation-workflow.md',
 ]
 const scratch = mkdtempSync(path.join(os.tmpdir(), 'ai-console-package-'))
 const stage = path.join(scratch, 'app')
@@ -76,7 +77,7 @@ try {
   const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' }).split('\0').filter(Boolean)
   const included = tracked.filter((file) => (
     /^(electron\/[^/]+\.cjs|server\/[^/]+\.py|tools\/[^/]+\.(py|json)|build\/icon\.(ico|png)|docs\/[^/]+\.png)$/.test(file)
-    || ['README.md', 'LICENSE', 'docs/devspace-desktop.md', 'docs/install-and-run.md', 'docs/quick-start.md', 'scripts/find-python.cjs'].includes(file)
+    || ['README.md', 'LICENSE', 'docs/devspace-desktop.md', 'docs/chatgpt-conversation-workflow.md', 'docs/install-and-run.md', 'docs/quick-start.md', 'scripts/find-python.cjs'].includes(file)
   ))
   for (const file of included) copy(file)
   copy('dist', (relative) => relative !== 'data' && !relative.startsWith('data/'))

@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   devSpaceRequest, devSpaceRunProblem, parseDevSpaceStatus, parseDevSpaceTask,
   parseDevSpaceTasks, pollDevSpace, withinDevSpaceRoots,
-  DEVSPACE_MODELS, devSpaceDispatchBody, devSpaceModelLabel, readDevSpaceModel,
+  DEVSPACE_MODELS, boundedDevSpaceConversationContext, buildDevSpaceConversationInstructions,
+  buildDevSpaceConversationPrompt, clearDevSpaceInstructions, copyThenOpenDevSpace,
+  createDevSpaceDraft, devSpaceDispatchBody, devSpaceModelLabel, devSpaceWorkbenchState,
+  prepareDevSpaceConversationDraft, readDevSpaceModel, resolveDevSpaceDirectory,
+  updateDevSpaceDraft,
 } from './devspace'
 
 const status = () => parseDevSpaceStatus({
@@ -99,6 +103,110 @@ describe('DevSpace readiness boundaries', () => {
   })
 })
 
+describe('DevSpace conversation workbench behavior', () => {
+  it('keeps a Home-owned draft across a tab round trip and clears only the instructions', () => {
+    const entered = updateDevSpaceDraft(createDevSpaceDraft('gpt-5.6-sol'), {
+      workspace: 'C:\\使用者\\行銷 專案',
+      model: 'gpt-6-astra',
+      instructions: '保留這份工作內容',
+    })
+    const afterTabRoundTrip = updateDevSpaceDraft(entered, {})
+    expect(afterTabRoundTrip).toEqual(entered)
+    expect(clearDevSpaceInstructions(afterTabRoundTrip)).toEqual({
+      workspace: 'C:\\使用者\\行銷 專案',
+      model: 'gpt-6-astra',
+      instructions: '',
+    })
+  })
+
+  it('keeps the previous path when the desktop directory picker is cancelled', () => {
+    const previous = 'C:\\使用者\\既有 專案'
+    expect(resolveDevSpaceDirectory(previous, null)).toBe(previous)
+    expect(resolveDevSpaceDirectory(previous, '')).toBe(previous)
+    expect(resolveDevSpaceDirectory(previous, 'C:\\使用者\\新 專案')).toBe('C:\\使用者\\新 專案')
+  })
+
+  it('never opens ChatGPT when clipboard copying fails', async () => {
+    const copy = vi.fn().mockRejectedValue(new Error('clipboard denied'))
+    const open = vi.fn().mockResolvedValue(undefined)
+    await expect(copyThenOpenDevSpace(copy, open)).resolves.toMatchObject({ ok: false, stage: 'copy' })
+    expect(copy).toHaveBeenCalledTimes(1)
+    expect(open).not.toHaveBeenCalled()
+  })
+
+  it('reports an open failure only after a successful copy', async () => {
+    const copy = vi.fn().mockResolvedValue(undefined)
+    const open = vi.fn().mockRejectedValue(new Error('popup blocked'))
+    await expect(copyThenOpenDevSpace(copy, open)).resolves.toMatchObject({ ok: false, stage: 'open' })
+    expect(copy).toHaveBeenCalledTimes(1)
+    expect(open).toHaveBeenCalledTimes(1)
+  })
+
+  it('distinguishes every actionable readiness reason and allows drafting before MCP starts', () => {
+    const data = status()
+    expect(devSpaceWorkbenchState(null, '', '', '')).toMatchObject({ reason: 'loading', canCopy: false })
+    expect(devSpaceWorkbenchState(data, 'offline', 'C:\\work\\project', 'Review')).toMatchObject({ reason: 'unreadable', canCopy: false })
+    expect(devSpaceWorkbenchState({ ...data, installed: false }, '', 'C:\\work\\project', 'Review').reason).toBe('uninstalled')
+    expect(devSpaceWorkbenchState({ ...data, configured: false }, '', 'C:\\work\\project', 'Review').reason).toBe('missing-configuration')
+    expect(devSpaceWorkbenchState(data, '', 'C:\\elsewhere', 'Review').reason).toBe('invalid-project')
+    expect(devSpaceWorkbenchState(data, '', 'C:\\work\\project', '   ').reason).toBe('empty-instructions')
+    expect(devSpaceWorkbenchState(data, '', 'C:\\work\\project', 'Review')).toEqual({
+      reason: 'mcp-stopped', canCopy: true, canStartMcp: true, executionReady: false,
+    })
+    expect(devSpaceWorkbenchState({ ...data, service: { ...data.service, running: true } }, '', 'C:\\work\\project', 'Review')).toEqual({
+      reason: 'mcp-running', canCopy: true, canStartMcp: false, executionReady: true,
+    })
+  })
+
+  it('caps imported conversation context at six recent messages and 300 characters each', () => {
+    const context = boundedDevSpaceConversationContext(Array.from({ length: 8 }, (_, index) => ({
+      role: index % 2 ? 'assistant' : 'tool',
+      text: `${index}: ${'x'.repeat(400)}`,
+      label: `source-${index}`,
+    })))
+    expect(context).toHaveLength(6)
+    expect(context[0].text.startsWith('2:')).toBe(true)
+    expect(context.every(message => message.text.length <= 300)).toBe(true)
+    expect(context[0].role).toBe('user')
+    expect(context[1].role).toBe('assistant')
+  })
+
+  it('converts every entry point into a new ChatGPT Conversation draft instead of a CLI resume', () => {
+    const initial = updateDevSpaceDraft(createDevSpaceDraft('gpt-6-astra'), {
+      workspace: 'C:\\old',
+      instructions: 'old draft',
+    })
+    const prepared = prepareDevSpaceConversationDraft(initial, {
+      task: '修正錯誤並跑測試',
+      workspace: 'C:\\work\\project',
+      title: '舊對話',
+      originalTool: 'Claude Code',
+      source: 'continuation',
+      context: [{ role: 'assistant', text: '舊結果' }],
+    })
+    expect(prepared.workspace).toBe('C:\\work\\project')
+    expect(prepared.model).toBe('gpt-6-astra')
+    expect(prepared.instructions).toContain('修正錯誤並跑測試')
+    expect(prepared.instructions).toContain('Claude Code')
+    expect(prepared.instructions).toContain('ChatGPT「對話」')
+    expect(prepared.instructions).toContain('不要恢復、重派或接力任何舊 CLI 工單')
+    expect(prepared.instructions).not.toContain('claude resume')
+  })
+
+  it('builds the exact copy payload with project and model preference but no send claim', () => {
+    const draft = updateDevSpaceDraft(createDevSpaceDraft('gpt-6-astra'), {
+      workspace: 'C:\\work\\project',
+      instructions: buildDevSpaceConversationInstructions({ task: '更新文件' }),
+    })
+    const prompt = buildDevSpaceConversationPrompt(draft)
+    expect(prompt).toContain('ChatGPT「對話」')
+    expect(prompt).toContain('C:\\work\\project')
+    expect(prompt).toContain('GPT-6 ASTRA')
+    expect(prompt).toContain('open_workspace')
+    expect(prompt).not.toContain('已送出')
+  })
+})
+
 describe('DevSpace reads are serial and cannot update an abandoned view', () => {
   it('waits for a read to settle before scheduling the next one', async () => {
     vi.useFakeTimers()
@@ -151,17 +259,25 @@ describe('DevSpace reads are serial and cannot update an abandoned view', () => 
 })
 
 describe('DevSpace request contract', () => {
-  it('posts structured task input and forwards cancellation', async () => {
+  it('refuses background run and continuation before making a network request', async () => {
+    const fetcher = vi.fn()
+    vi.stubGlobal('fetch', fetcher)
+    await expect(devSpaceRequest('run', { cwd: 'C:\\work', prompt: 'task' })).rejects.toThrow('ChatGPT')
+    await expect(devSpaceRequest('continue', { id: 'old', prompt: 'next' })).rejects.toThrow('ChatGPT')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it('posts structured service-control input and forwards cancellation', async () => {
     const fetcher = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) })
     vi.stubGlobal('fetch', fetcher)
     const signal = new AbortController().signal
-    await devSpaceRequest('run', { cwd: 'C:\\work', prompt: 'literal $() `text`', target: 'codex' }, signal)
-    expect(fetcher).toHaveBeenCalledWith('/api/devspace/run', expect.objectContaining({ method: 'POST', signal, body: JSON.stringify({ cwd: 'C:\\work', prompt: 'literal $() `text`', target: 'codex' }) }))
+    await devSpaceRequest('start', { requestedBy: 'workbench' }, signal)
+    expect(fetcher).toHaveBeenCalledWith('/api/devspace/start', expect.objectContaining({ method: 'POST', signal, body: JSON.stringify({ requestedBy: 'workbench' }) }))
   })
 
   it('requires both HTTP and application success', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: false, error: 'Provider disabled' }) }))
-    await expect(devSpaceRequest('run', {})).rejects.toThrow('Provider disabled')
+    await expect(devSpaceRequest('start', {})).rejects.toThrow('Provider disabled')
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }))
     await expect(devSpaceRequest('status')).rejects.toThrow()
   })

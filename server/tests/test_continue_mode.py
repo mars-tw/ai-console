@@ -205,19 +205,23 @@ class ContinueModeHttpTest(unittest.TestCase):
         spawn.assert_not_called()
         self.assertEqual(list(self.log_dir.glob("*")), [])
 
-    def test_http_headless_match_200_still_spawns(self):
-        with mock.patch.object(api.Handler, "_load_registry"), \
-                mock.patch.object(api.Handler, "_resolve_ready_dispatch",
-                                  return_value=(HEADLESS_SNAPSHOT, "claude", HEADLESS_ROW, None)), \
-                mock.patch.object(api.Handler, "_reg_append"), \
+    def test_http_headless_match_is_redirected_without_spawn(self):
+        with mock.patch.object(api.Handler, "_load_registry") as load_registry, \
+                mock.patch.object(api.Handler, "_resolve_ready_dispatch") as resolve, \
+                mock.patch.object(api.Handler, "_reg_append") as register, \
                 mock.patch("subprocess.Popen") as spawn:
-            spawn.return_value.pid = 4321
             status, payload = self._post_dispatch({
                 "task": "work", "tool": "claude", "expectedMode": "headless", "raw": True,
             })
-        self.assertEqual(status, 200)
-        self.assertTrue(payload["ok"])
-        spawn.assert_called()
+        self.assertEqual(status, 409)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["code"], "USE_CHATGPT_CONVERSATION")
+        self.assertEqual(payload["view"], "devspace")
+        load_registry.assert_not_called()
+        resolve.assert_not_called()
+        register.assert_not_called()
+        spawn.assert_not_called()
+        self.assertEqual(list(self.log_dir.glob("*")), [])
 
 
 if __name__ == "__main__":

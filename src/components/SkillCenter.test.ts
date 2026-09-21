@@ -26,10 +26,10 @@ describe('提問與執行意圖分離', () => {
       onToast: () => {},
     }))
 
-    expect(html).toContain('交給 AI 執行')
+    expect(html).toContain('準備 ChatGPT 執行對話')
     expect(html).toContain('id="qd-task"')
-    expect(html).toContain('開始執行')
-    expect(html).toContain('不是傳送問題')
+    expect(html).toContain('準備 ChatGPT 對話')
+    expect(html).toContain('不會在背景建立 CLI 工單')
   })
 })
 

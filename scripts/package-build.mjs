@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 
-export const FRESH_MARKERS = ['expectedMode', '不用操作英文視窗']
+export const FRESH_MARKERS = ['chatgpt-conversation-devspace-v1', 'copy-before-open']
 export const STALE_ASSET_HINTS = ['index-DrDEtqsP.js', 'index-CzY6O1JB.css']
 
 export function verifyDistFreshness(distDir) {

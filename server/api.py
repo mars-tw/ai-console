@@ -8,8 +8,8 @@ AI 控制台 · 整合伺服器（僅綁定 127.0.0.1，無外部存取）
   GET  /data/*               — 索引資料（即時從 public/data 讀，不經 dist 副本）
   GET  /api/health           — 活著檢查
   POST /api/refresh          — 重跑索引器（掃描最新對話）
-  POST /api/launch           — 接續對話 / 派工：開一個終端機執行原工具的 resume 指令
-                               body: {"id": "<conv_id>", "dryRun": false}
+  POST /api/launch           — 舊執行入口；回覆 USE_CHATGPT_CONVERSATION，不啟動終端機
+  POST /api/dispatch*        — 新工作／重派／補話入口已停用；只保留 stop／cancel 舊工作
   GET  /api/status           — ai-hub status.json 即時內容
   GET  /api/conv/tail?id=... — 從 canonical index 安全讀取對話真正尾端
 """
@@ -4340,12 +4340,8 @@ class Handler(BaseHTTPRequestHandler):
             return False           # 兩個都沒有 → 不是從本應用頁面來的
         return True
 
-    def _devspace_request(self, action: str, post: bool = False):
-        """DevSpace controls are desktop-only, with exact origin/host checks.
-
-        Do not add these endpoints to the mobile proxy allowlist. Parsing the
-        Referer avoids accepting a hostname that merely starts with localhost.
-        """
+    def _trusted_devspace_request(self) -> bool:
+        """Exact desktop origin/host check shared by every DevSpace endpoint."""
         allowed_hosts = {urllib.parse.urlsplit(o).netloc for o in self.ALLOWED_ORIGINS}
         host = self.headers.get('Host', '')
         origin = self.headers.get('Origin')
@@ -4358,7 +4354,20 @@ class Handler(BaseHTTPRequestHandler):
                            and f'{parsed.scheme}://{parsed.netloc}' in self.ALLOWED_ORIGINS)
             except ValueError:
                 trusted = False
-        if host not in allowed_hosts or not trusted:
+        return host in allowed_hosts and trusted
+
+    def _conversation_route_required(self):
+        return self._json({
+            'ok': False,
+            'code': 'USE_CHATGPT_CONVERSATION',
+            'error': 'AI 控制台已改用 ChatGPT「對話」＋ DevSpace MCP。請在 DevSpace 分頁準備並複製指示；此端點不會建立、重派、接力或接續 CLI 工單。',
+            'nextAction': 'chatgpt_conversation',
+            'view': 'devspace',
+        }, 409)
+
+    def _devspace_request(self, action: str, post: bool = False):
+        """DevSpace service controls are desktop-only, with exact origin/host checks."""
+        if not self._trusted_devspace_request():
             return self._json({'ok': False, 'code': 'DESKTOP_ONLY',
                                'error': 'DevSpace 只接受本機控制台的操作。'}, 403)
         body = None
@@ -4381,14 +4390,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path.startswith('/api/devspace/'):
+            if self.path in {'/api/devspace/run', '/api/devspace/continue'}:
+                if not self._trusted_devspace_request():
+                    return self._json({'ok': False, 'code': 'DESKTOP_ONLY',
+                                       'error': 'DevSpace 只接受本機控制台的操作。'}, 403)
+                return self._conversation_route_required()
             actions = {
                 '/api/devspace/doctor': 'doctor',
                 '/api/devspace/start': 'start',
                 '/api/devspace/stop': 'stop',
                 '/api/devspace/tasks': 'tasks',
-                '/api/devspace/run': 'run',
                 '/api/devspace/show': 'show',
-                '/api/devspace/continue': 'continue_task',
             }
             action = actions.get(self.path)
             if not action:
@@ -4397,6 +4409,18 @@ class Handler(BaseHTTPRequestHandler):
         if not self._same_origin():
             return self._json({"ok": False, "error":
                                "跨來源請求已拒絕（此 API 只接受本應用自己的呼叫）"}, 403)
+
+        legacy_execution_routes = {
+            '/api/launch',
+            '/api/schedule/save',
+            '/api/schedule/run',
+            '/api/dispatch',
+            '/api/dispatch/batch',
+            '/api/dispatch/followup',
+            '/api/dispatch/retry',
+        }
+        if self.path in legacy_execution_routes:
+            return self._conversation_route_required()
 
         connection_actions = {
             '/api/ai-connections/probe': 'probe', '/api/ai-connections/save': 'save',
@@ -6311,23 +6335,16 @@ class Handler(BaseHTTPRequestHandler):
             # 使用者會學會不按它，然後真的有改動的那一次也不會去看。
             d["canDiff"] = _has_git(d.get("cwd") or "")
             out.append(d)
-        # 排隊中的續談：上一輪一結束就送出去。放在輪詢裡而不是另開執行緒，
-        # 是因為主控台本來就每 8 秒問一次，不需要再多一個背景迴圈。
-        #
-        # 但這一步會啟動子行程 —— 是副作用，不是讀取。跨來源的 <img> 也能打
-        # 到這個 GET，所以只在同源時才送；跨來源就純粹回報狀態。
-        if self._same_origin():
-            self._flush_pending(out)
-            # 撞額度／終端沒人按的，自動換下一個工具。也是副作用，同樣只在同源時做。
-            self._auto_handoff(out)
+        # GET is strictly observational. It must never flush queued text, retry work, start a
+        # subprocess, or auto-hand off to another tool merely because a desktop/mobile view polls.
         return self._json({"ok": True, "dispatches": out})
 
 
 # ── 手機遙控 ─────────────────────────────────────────────
 #
-# 使用者要在手機上看派工、派工、停工。做法不是另寫一個 app，而是同一個後端再開一個埠，
-# 只綁在 Tailscale 網卡上（WireGuard 已經加密、不開放區網與公網），每個請求都要帶配對
-# token，而且只開放派工相關的少數路徑——對話索引、檔案、技能、設定一律不給。
+# 手機端只查看舊紀錄、停止／取消既有工作，並在瀏覽器準備 ChatGPT 對話指示。
+# 後端仍只綁在 Tailscale 網卡上，每個 API 請求都要帶配對 token；舊的新工作、
+# 重派與補話路徑會回覆 USE_CHATGPT_CONVERSATION，不再啟動 CLI 或 auto-handoff。
 # 這裡的每一條限制都對應主控台原本的安全假設：主控台假設 127.0.0.1 上的頁面就是自己人，
 # 遙控埠沒有這個假設，所以 token 與白名單都不能省。
 REMOTE_PORT = PORT + 1
@@ -6584,26 +6601,10 @@ if __name__ == "__main__":
         print(f"手機遙控 於 http://{_r.get('bind')}:{REMOTE_PORT}/m/ （僅 Tailscale）" if _r.get("ok")
               else f"手機遙控沒開：{_r.get('error')}", flush=True)
 
-    # 定時工作的背景排程。
-    #
-    # 到期時用 HTTP 打回自己的 /api/dispatch —— 這樣定時工作走的是跟手動派工
-    # 一模一樣的路徑（掛規範、寫 log、進派工登錄、自動路由），不會有兩套行為。
-    # 用 daemon 執行緒，關掉伺服器就跟著結束，不需要另外處理收尾。
-    def _fire(job: dict) -> str:
-        payload = json.dumps({"task": job.get("task", ""),
-                              "tool": job.get("tool") or "auto"},
-                             ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{PORT}/api/dispatch", data=payload,
-            headers={"Content-Type": "application/json; charset=utf-8",
-                     "Origin": f"http://127.0.0.1:{PORT}"})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            d = json.loads(r.read())
-        return d.get("note") or ("已派出" if d.get("ok") else str(d.get("error")))
-
-    sched = schedule.Scheduler(_fire)
-    sched.start()
+    # Existing schedule records stay readable, but the server no longer starts a background
+    # scheduler for coding work. Each item must be reviewed and pasted into ChatGPT Conversation
+    # with DevSpace MCP; merely starting or polling the API cannot launch it.
     jobs = [j for j in schedule.load() if j.get("enabled")]
-    print(f"定時工作：{len(jobs)} 件啟用中", flush=True)
+    print(f"舊定時工作：{len(jobs)} 件（已停用自動執行，請改用 ChatGPT 對話）", flush=True)
 
     srv.serve_forever()

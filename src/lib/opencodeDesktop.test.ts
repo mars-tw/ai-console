@@ -9,6 +9,7 @@ import type { OpenCodeDesktopStatus } from '@/types/opencode'
 interface Manager {
   status(): Promise<OpenCodeDesktopStatus>
   open(input: { cwd: string; model?: string }): Promise<OpenCodeDesktopStatus>
+  reconnect(input: { cwd: string; model?: string; confirmInterrupt?: boolean }): Promise<OpenCodeDesktopStatus>
   stop(): Promise<OpenCodeDesktopStatus>
   dispose(): Promise<void>
   connectionForVerification(): { origin: string; authorization: string; cwd: string } | null
@@ -22,6 +23,7 @@ const desktop = require('../../electron/opencode.cjs') as {
   launchSpec(input: Record<string, unknown>): { file: string; args: string[]; options: { shell: boolean; windowsHide: boolean; env: Record<string, string> } }
   createManager(options: Record<string, unknown>): Manager
   wireOpenCode(options: Record<string, unknown>): Manager
+  readBridgeProgress(session: string, io: unknown, temporary?: string, now?: number, maxAge?: number): { state: string; updatedAt: number; fresh: boolean } | null
 }
 
 class FakeChild extends EventEmitter {
@@ -53,6 +55,7 @@ class FakeWindow extends EventEmitter {
 
 const root = 'C:\\Projects'
 const project = 'C:\\Projects\\中文專案'
+const bridgeSession = '11111111-1111-4111-8111-111111111111'
 function makeManager(overrides: Record<string, unknown> = {}) {
   const child = new FakeChild()
   const spawn = vi.fn(() => child)
@@ -65,6 +68,9 @@ function makeManager(overrides: Record<string, unknown> = {}) {
     getRoots: () => [root],
     discover: () => ({ nativeBin: 'C:\\Apps\\opencode.exe', node: 'C:\\Apps\\node.exe', bridge: 'C:\\Apps\\devspace-mcp-bridge.cjs', devspaceRoot: 'C:\\Apps\\node_modules\\@waishnav\\devspace' }),
     io: { statSync: () => ({ isDirectory: () => true }), realpathSync: (value: string) => value },
+    devspaceConfig: () => ({ directory: 'C:\\Config', origin: 'http://127.0.0.1:17676', resource: 'https://devspace.example/mcp' }),
+    devspaceHealth: vi.fn(async () => true),
+    now: () => 100,
     spawn, execFile: execute, freePort: async () => 41111, health: async () => true, sleep: async () => undefined,
     ...overrides,
   }
@@ -104,7 +110,7 @@ describe('OpenCode desktop boundaries', () => {
   })
 
   it('builds only a native serve command with process-scoped, restricted MCP conversation settings', () => {
-    const spec = desktop.launchSpec({ nativeBin: 'C:\\Apps\\opencode.exe', node: 'C:\\Apps\\node.exe', bridge: 'C:\\Apps\\bridge.js', cwd: project, port: 41111, password: 'secret', model: 'gpt-6-astra', env: { OPENCODE_DISABLE_EMBEDDED_WEB_UI: 'true' } })
+    const spec = desktop.launchSpec({ nativeBin: 'C:\\Apps\\opencode.exe', node: 'C:\\Apps\\node.exe', bridge: 'C:\\Apps\\bridge.js', cwd: project, port: 41111, password: 'secret', bridgeSession, model: 'gpt-6-astra', env: { OPENCODE_DISABLE_EMBEDDED_WEB_UI: 'true' } })
     expect(spec.args).toEqual(['serve', '--hostname', '127.0.0.1', '--port', '41111', '--no-mdns', '--pure'])
     expect(spec.args.join(' ')).not.toContain('secret')
     expect(spec.options.shell).toBe(false)
@@ -116,7 +122,7 @@ describe('OpenCode desktop boundaries', () => {
     expect(config.enabled_providers).toEqual(['openai'])
     expect(config.provider.openai.whitelist).toEqual(['gpt-5.6-sol', 'gpt-6-astra'])
     expect(config.permission).toMatchObject({ task: 'deny', bash: 'deny', edit: 'deny', 'devspace_*': 'ask' })
-    expect(config.mcp.devspace.environment).toEqual({ DEVSPACE_MCP_WORKSPACE: project, DEVSPACE_MCP_WRITE_MODE: 'allowed' })
+    expect(config.mcp.devspace.environment).toEqual({ DEVSPACE_MCP_WORKSPACE: project, DEVSPACE_MCP_WRITE_MODE: 'allowed', AI_CONSOLE_BRIDGE_SESSION: bridgeSession })
     expect(config.mcp.devspace.command).toEqual(['C:\\Apps\\node.exe', 'C:\\Apps\\bridge.js'])
     expect(config.share).toBe('disabled')
     expect(() => desktop.launchSpec({ model: 'unlisted' })).toThrow()
@@ -125,10 +131,125 @@ describe('OpenCode desktop boundaries', () => {
   it('status reads never start a service or AI conversation and never expose credentials', async () => {
     const { manager, spawn, execute } = makeManager()
     const status = await manager.status()
-    expect(status).toMatchObject({ installed: true, version: '1.18.31', configured: true, running: false })
+    expect(status).toMatchObject({
+      installed: true, version: '1.18.31', configured: true, devspaceService: 'reachable',
+      authorization: 'not_started', mcp: 'stopped', running: false,
+    })
     expect(spawn).not.toHaveBeenCalled()
     expect(execute.mock.calls[0][1]).toEqual(['--version'])
-    expect(JSON.stringify(status)).not.toMatch(/password|authorization/i)
+    expect(JSON.stringify(status)).not.toMatch(/password|Basic |Bearer |access_token|refresh_token/i)
+  })
+
+  it('keeps invalid DevSpace configuration separate from service reachability', async () => {
+    const { manager, spawn } = makeManager({ devspaceConfig: () => { throw new Error('private path') } })
+    await expect(manager.status()).resolves.toMatchObject({
+      installed: true, configured: false, bridgeReady: true, devspaceService: 'not_configured',
+      authorization: 'not_started', mcp: 'stopped',
+    })
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
+  it('reports an unreachable DevSpace service without starting OpenCode or consent', async () => {
+    const devspaceHealth = vi.fn(async () => false)
+    const { manager, spawn } = makeManager({ devspaceHealth })
+    await expect(manager.status()).resolves.toMatchObject({
+      installed: true, configured: true, bridgeReady: true, devspaceService: 'unreachable',
+      authorization: 'not_started', mcp: 'stopped',
+    })
+    await expect(manager.open({ cwd: project })).rejects.toMatchObject({ code: 'service' })
+    expect(devspaceHealth).toHaveBeenCalled()
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
+  it('marks MCP connected only from the exact owned bridge progress session', async () => {
+    let state: string | null = null
+    let seenSession = ''
+    const readProgress = vi.fn((session: string) => {
+      seenSession = session
+      return state ? { state, updatedAt: 10 } : null
+    })
+    const { manager } = makeManager({ readProgress })
+    const opening = await manager.open({ cwd: project })
+    expect(opening).toMatchObject({ authorization: 'checking', mcp: 'connecting' })
+    expect(seenSession).toMatch(/^[0-9a-f-]{36}$/i)
+    state = 'connected'
+    await expect(manager.status()).resolves.toMatchObject({ authorization: 'authorized', mcp: 'connected', connectionIssue: null })
+    state = 'authorization_timeout'
+    await expect(manager.status()).resolves.toMatchObject({ authorization: 'timed_out', mcp: 'failed', connectionIssue: 'authorization_timeout' })
+    state = 'connection_failed'
+    await expect(manager.status()).resolves.toMatchObject({ authorization: 'authorized', mcp: 'failed', connectionIssue: 'connection_failed' })
+    state = 'service_unreachable'
+    await expect(manager.status()).resolves.toMatchObject({ authorization: 'authorized', mcp: 'failed', connectionIssue: 'service_unreachable' })
+    state = 'bridge_failed'
+    await expect(manager.status()).resolves.toMatchObject({ authorization: 'authorized', mcp: 'failed', connectionIssue: 'bridge_failed' })
+    await manager.dispose()
+  })
+
+  it('never reports MCP connected while DevSpace is offline and requires reconnect after a service restart', async () => {
+    let current = 100
+    let reachable = true
+    let progressState = 'connected'
+    const devspaceHealth = vi.fn(async () => reachable)
+    const readProgress = vi.fn(() => ({ state: progressState, updatedAt: current }))
+    const { manager } = makeManager({ now: () => current, devspaceHealth, readProgress })
+    await expect(manager.open({ cwd: project })).resolves.toMatchObject({
+      devspaceService: 'reachable', authorization: 'authorized', mcp: 'connected',
+    })
+
+    current = 200
+    reachable = false
+    progressState = 'service_unreachable'
+    await expect(manager.status()).resolves.toMatchObject({
+      devspaceService: 'unreachable', authorization: 'authorized', mcp: 'failed', connectionIssue: 'service_unreachable',
+    })
+
+    current = 300
+    reachable = true
+    await expect(manager.status()).resolves.toMatchObject({
+      devspaceService: 'reachable', authorization: 'authorized', mcp: 'failed', connectionIssue: 'disconnected',
+    })
+    await manager.dispose()
+  })
+
+  it('expires a historic connected heartbeat even while the OpenCode parent and DevSpace service remain healthy', async () => {
+    let current = 100
+    const readProgress = vi.fn(() => ({ state: 'connected', updatedAt: 100 }))
+    const { manager } = makeManager({ now: () => current, progressMaxAge: 1000, readProgress })
+    await expect(manager.open({ cwd: project })).resolves.toMatchObject({ authorization: 'authorized', mcp: 'connected' })
+    current = 1200
+    await expect(manager.status()).resolves.toMatchObject({
+      running: true, devspaceService: 'reachable', authorization: 'authorized', mcp: 'failed', connectionIssue: 'disconnected',
+    })
+    await manager.dispose()
+  })
+
+  it('turns a vanished bridge into a bounded retry state while the OpenCode parent stays alive', async () => {
+    let current = 100
+    let bridgePresent = true
+    const readProgress = vi.fn(() => bridgePresent ? { state: 'connected', updatedAt: 100 } : null)
+    const { manager } = makeManager({ now: () => current, progressMaxAge: 1000, readProgress })
+    await expect(manager.open({ cwd: project })).resolves.toMatchObject({ mcp: 'connected' })
+
+    bridgePresent = false
+    current = 500
+    await expect(manager.status()).resolves.toMatchObject({ running: true, mcp: 'connected' })
+    current = 1200
+    await expect(manager.status()).resolves.toMatchObject({
+      running: true, authorization: 'authorized', mcp: 'failed', connectionIssue: 'disconnected',
+    })
+    await manager.dispose()
+  })
+
+  it('rejects malformed, foreign and oversized bridge progress files', () => {
+    const value = (body: unknown, size = 100) => ({
+      statSync: () => ({ size }),
+      readFileSync: () => JSON.stringify(body),
+    })
+    expect(desktop.readBridgeProgress(bridgeSession, value({ version: 1, session: bridgeSession, state: 'connected', updatedAt: 10 }), 'C:\\Temp', 20)).toEqual({ state: 'connected', updatedAt: 10, fresh: true })
+    expect(desktop.readBridgeProgress(bridgeSession, value({ version: 1, session: bridgeSession, state: 'connected', updatedAt: 10 }), 'C:\\Temp', 13000, 1000)).toEqual({ state: 'connected', updatedAt: 10, fresh: false })
+    expect(desktop.readBridgeProgress(bridgeSession, value({ version: 1, session: '22222222-2222-4222-8222-222222222222', state: 'connected', updatedAt: 10 }), 'C:\\Temp')).toBeNull()
+    expect(desktop.readBridgeProgress(bridgeSession, value({ version: 1, session: bridgeSession, state: 'connected', updatedAt: 10 }, 5000), 'C:\\Temp')).toBeNull()
+    expect(desktop.readBridgeProgress('../escape', value({}), 'C:\\Temp')).toBeNull()
   })
 
   it('launches one isolated window and injects auth only for its exact managed origin', async () => {
@@ -145,7 +266,7 @@ describe('OpenCode desktop boundaries', () => {
     expect(callback).toHaveBeenLastCalledWith({ requestHeaders: {} })
     authHandler({ url: 'http://127.0.0.1:41111/global/health', requestHeaders: {} }, callback)
     expect(callback.mock.calls[1][0].requestHeaders.Authorization).toMatch(/^Basic /)
-    expect(JSON.stringify(status)).not.toMatch(/Basic|authorization|password/)
+    expect(JSON.stringify(status)).not.toMatch(/Basic |Bearer |password|access_token|refresh_token/i)
     await manager.open({ cwd: project })
     expect(spawn).toHaveBeenCalledTimes(1)
     expect(FakeWindow.instances).toHaveLength(1)
@@ -168,6 +289,41 @@ describe('OpenCode desktop boundaries', () => {
     expect(child.kill).toHaveBeenCalledTimes(1)
     expect(stopped.running).toBe(false)
     expect(FakeWindow.instances[1].isDestroyed()).toBe(true)
+  })
+
+  it('recovers from authorization timeout only after explicit restart and preserves project and model', async () => {
+    const children: FakeChild[] = []
+    const launches: { env: Record<string, string> }[] = []
+    const spawn = vi.fn((file: string, args: string[], options: { env: Record<string, string> }) => {
+      expect(file).toBe('C:\\Apps\\opencode.exe')
+      expect(args[0]).toBe('serve')
+      launches.push(options)
+      const child = new FakeChild()
+      children.push(child)
+      return child
+    })
+    let progress = 'authorization_timeout'
+    const { manager } = makeManager({
+      spawn,
+      readProgress: () => ({ state: progress, updatedAt: 10 }),
+    })
+    const timedOut = await manager.open({ cwd: project, model: 'gpt-6-astra' })
+    expect(timedOut).toMatchObject({ model: 'gpt-6-astra', authorization: 'timed_out', mcp: 'failed' })
+    await expect(manager.reconnect({ cwd: 'C:\\Projects\\different', model: 'gpt-5.6-sol' })).rejects.toMatchObject({ code: 'confirm' })
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(children[0].kill).not.toHaveBeenCalled()
+
+    progress = 'connected'
+    const recovered = await manager.reconnect({ cwd: 'C:\\Projects\\different', model: 'gpt-5.6-sol', confirmInterrupt: true })
+    expect(recovered).toMatchObject({ cwd: project, model: 'gpt-6-astra', authorization: 'authorized', mcp: 'connected' })
+    expect(children[0].kill).toHaveBeenCalledOnce()
+    expect(spawn).toHaveBeenCalledTimes(2)
+    const firstConfig = JSON.parse(launches[0].env.OPENCODE_CONFIG_CONTENT)
+    const secondConfig = JSON.parse(launches[1].env.OPENCODE_CONFIG_CONTENT)
+    expect(secondConfig.model).toBe('openai/gpt-6-astra')
+    expect(secondConfig.mcp.devspace.environment.DEVSPACE_MCP_WORKSPACE).toBe(project)
+    expect(secondConfig.mcp.devspace.environment.AI_CONSOLE_BRIDGE_SESSION).not.toBe(firstConfig.mcp.devspace.environment.AI_CONSOLE_BRIDGE_SESSION)
+    await manager.dispose()
   })
 
   it('cancels a start that is still waiting for a port without spawning later', async () => {
@@ -221,7 +377,7 @@ describe('OpenCode desktop boundaries', () => {
     const mainFrame = { url: 'http://127.0.0.1:4321/' }
     const window = { webContents: { mainFrame } }
     desktop.wireOpenCode({ ...setup.options, ipcMain: { handle: (channel: string, callback: (event: unknown, input?: unknown) => Promise<unknown>) => handlers.set(channel, callback) }, mainWindow: () => window, appUrl: mainFrame.url })
-    expect([...handlers.keys()]).toEqual(['opencode:status', 'opencode:open', 'opencode:stop'])
+    expect([...handlers.keys()]).toEqual(['opencode:status', 'opencode:open', 'opencode:reconnect', 'opencode:stop'])
     for (const handler of handlers.values()) expect(await handler({ sender: {}, senderFrame: mainFrame }, { cwd: project })).toMatchObject({ ok: false, code: 'forbidden' })
     expect(setup.spawn).not.toHaveBeenCalled()
     expect(setup.execute).not.toHaveBeenCalled()
