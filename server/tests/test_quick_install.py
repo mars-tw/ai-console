@@ -13,7 +13,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 POWERSHELL = shutil.which('powershell.exe')
-VERSION = '1.5.1'
+VERSION = '1.6.0'
 ASSET = f'ai-console-win32-x64-v{VERSION}.zip'
 REQUIRED = (
     'AI控制台.exe', 'icudtl.dat', 'resources.pak', 'locales/en-US.pak',
@@ -21,6 +21,7 @@ REQUIRED = (
     'resources/app/server/api.py', 'resources/app/server/devspace_console.py',
     'resources/app/scripts/find-python.cjs', 'resources/app/runtime/python/python.exe',
     'resources/app/electron/pty.cjs', 'resources/app/electron/preload.cjs',
+    'resources/app/electron/opencode.cjs', 'resources/app/electron/devspace-mcp-bridge.cjs',
     'resources/app/runtime/python/python3.dll', 'resources/app/runtime/python/python314.dll',
     'resources/app/runtime/python/python314.zip', 'resources/app/runtime/python/python314._pth',
     'resources/app/runtime/python/runtime.json',
@@ -165,7 +166,8 @@ if ($first -cne $second) {{ throw 'Idempotent path changed' }}
         pointer = self.install / 'current.json'
         original = '{"version":"1.5.0","executable":"versions/1.5.0/AI控制台.exe"}'
         pointer.write_text(original, encoding='utf-8')
-        for missing in ('resources/app/electron/pty.cjs', 'resources/app/runtime/python/python314.dll'):
+        for missing in ('resources/app/electron/pty.cjs', 'resources/app/runtime/python/python314.dll',
+                        'resources/app/electron/opencode.cjs', 'resources/app/electron/devspace-mcp-bridge.cjs'):
             with self.subTest(missing=missing):
                 self.make_payload()
                 (self.bundle / missing).unlink()

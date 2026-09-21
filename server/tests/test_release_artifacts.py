@@ -58,7 +58,7 @@ class ReleaseArtifactTests(unittest.TestCase):
             for filename in ('.claude/launch.json', 'dist/data/conv/a.json',
                              'server/config.json', 'public/data/index.json',
                              'logs/_remote.json', '__pycache__/api.pyc', '.env.local',
-                             '.ai-console/connections.json'):
+                             '.ai-console/connections.json', '.devspace/ai-console-mcp-oauth.json'):
                 with self.subTest(name=prefix + filename):
                     self.assertTrue(release_audit.forbidden_path(prefix + filename))
 

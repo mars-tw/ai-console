@@ -11,6 +11,7 @@ import { askBlockMessage, askPreflight, localModels, pickSetupLocal, planAskSubm
 import { chatContext, nextChatModel, pickChatAnswer, retryChatHistory } from '@/lib/chatResponse'
 import Console from '@/components/Console'
 import DevSpaceConsole from '@/components/DevSpaceConsole'
+import OpenCodePanel from '@/components/OpenCodePanel'
 import ConversationSync from '@/components/ConversationSync'
 import Office from '@/components/Office'
 import QuickDispatch from '@/components/QuickDispatch'
@@ -19,6 +20,8 @@ import { canOpenContinueWork } from '@/lib/continuationHelp'
 import SkillCenter from '@/components/SkillCenter'
 import { t, useLang } from '@/i18n'
 import LangSwitch from '@/components/LangSwitch'
+import { initialWorkbenchView, isConversationWorkbench } from '@/lib/workbenchView'
+import type { WorkbenchView } from '@/lib/workbenchView'
 
 /** python 存的是秒，JS 要毫秒。純函式，跟元件狀態無關，所以放在模組層級 */
 const normalize = (d: IndexData): IndexData => {
@@ -374,7 +377,7 @@ function markHits(text: string, q: string): ReactNode[] {
   return out
 }
 
-export default function Home() {
+export default function Home({ onViewChange }: { onViewChange?: (view: WorkbenchView) => void }) {
   useLang()   // 語言一換就整頁重繪
   const [index, setIndex] = useState<IndexData | null>(null)
   const [error, setError] = useState('')
@@ -489,8 +492,8 @@ export default function Home() {
     () => new Map((index?.conversations ?? []).map((c) => [c.id, c])),
     [index],
   )
-  const [viewMode, setViewMode] = useState<'list' | 'ask' | 'console' | 'devspace' | 'office' | 'rpg' | 'skills' | 'setup'>(() =>
-    typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('view') === 'devspace' ? 'devspace' : 'list')
+  const [viewMode, setViewMode] = useState(() => initialWorkbenchView(typeof window === 'undefined' ? '' : window.location.search))
+  useEffect(() => { onViewChange?.(viewMode) }, [onViewChange, viewMode])
   const [askSession, setAskSession] = useState<AskSession>({ model: 'auto', messages: [], input: '' })
   /**
    * 快速派工的工作草稿，依對話 id 分開存。
@@ -1464,6 +1467,7 @@ export default function Home() {
         ['setup', t('🔌 接入 AI')],
         ['list', t('📋 對話')], ['ask', t('💬 問 AI')], ['console', t('🎙️ 派工主控台')],
         ['devspace', 'DevSpace'],
+        ['opencode', 'OpenCode'],
         ['office', t('🎮 辦公室')], ['rpg', t('⚔️ 冒險')],
         ['skills', t('🧩 AI 技能')],
       ] as const).map(([m, label]) => (
@@ -1496,6 +1500,8 @@ export default function Home() {
           />
         ) : viewMode === 'devspace' ? (
           <DevSpaceConsole />
+        ) : viewMode === 'opencode' ? (
+          <OpenCodePanel />
         ) : viewMode === 'office' ? (
           <Office tools={liveTools ?? {}} projects={[]} conversations={[]} onDispatch={openContinueWork} busyId="" />
         ) : viewMode === 'rpg' ? (
@@ -1917,6 +1923,8 @@ export default function Home() {
             />
           ) : viewMode === 'devspace' ? (
             <DevSpaceConsole />
+          ) : viewMode === 'opencode' ? (
+            <OpenCodePanel />
           ) : viewMode === 'office' ? (
             <Office
               tools={liveTools ?? index.tools}
@@ -2290,7 +2298,7 @@ export default function Home() {
           {toast}
         </div>
       )}
-      {continueTarget && (
+      {continueTarget && !isConversationWorkbench(viewMode) && (
         <ContinueWorkDialog
           key={continueTarget.id}
           open

@@ -1,6 +1,8 @@
 ﻿#requires -Version 5.1
 <#!
-Guided, loopback-only setup for the pinned DevSpace 1.0.8 contract.
+Guided setup for the pinned DevSpace 1.0.8 contract.
+Fresh interactive installs use official ChatGPT onboarding. Explicit -Provider
+retains the legacy loopback-only Coding Agents setup.
 Existing configuration, auth and patched installations are never overwritten.
 Sources: https://github.com/Waishnav/devspace/tree/v1.0.8/src
          https://git-scm.com/install/windows
@@ -241,10 +243,32 @@ function New-DevSpaceConfiguration {
 }
 
 function Show-DevSpaceProviderNextSteps {
-    Write-Host 'DevSpace 設定完成。請在桌面控制台選擇專案，再送出工作。'
-    Write-Host '派工前仍需安裝並登入所選的 AI 工具；本步驟不會呼叫模型，也不代表帳號有可用額度。'
-    Write-Host 'Codex：https://developers.openai.com/codex/cli/'
-    Write-Host 'Claude Code：https://code.claude.com/docs/en/setup'
+    Write-Host 'DevSpace 設定已保留。執行 devspace serve，確認你設定的公開 HTTPS MCP 入口可以連線。'
+    Write-Host '在 Chrome 的 ChatGPT 選擇「對話」、加入 DevSpace，於模型選單選定模型後送出指示。'
+    Write-Host '127.0.0.1 只供本機使用；ChatGPT 需要你自行設定的公開 HTTPS 入口與正常授權。'
+    Write-Host 'OpenCode 可從工作臺的獨立分頁使用。設定完成不代表模型帳號已登入或有可用額度。'
+}
+
+function Invoke-DevSpaceChatGPTInit {
+    param($Runtime, [string]$ConfigDirectory, [string]$Directory)
+    if ((Get-DevSpaceExistingFiles $ConfigDirectory).HasAny) { throw '已有 DevSpace 設定，已保留原檔；請依官方文件調整既有連線。' }
+    Assert-DevSpacePlainDirectoryAncestry $ConfigDirectory
+    if ($Directory) { $Directory = Resolve-DevSpaceProjectRoot $Directory }
+    Write-Host '接著開啟官方 DevSpace 設定精靈。Where will you use DevSpace? 請選 ChatGPT。'
+    Write-Host '請確認允許的專案資料夾、公開 HTTPS 網址及 owner 授權設定；本程式不代建 tunnel。'
+    $previousConfig = $env:DEVSPACE_CONFIG_DIR
+    try {
+        $env:DEVSPACE_CONFIG_DIR = $ConfigDirectory
+        if ($Directory) { Push-Location -LiteralPath $Directory }
+        try {
+            # Inherit the real interactive console; official init handles consent
+            # and credentials. Never pass --force or capture its secret output.
+            & $Runtime.NodePath $Runtime.CliPath 'init'
+            if ($LASTEXITCODE -ne 0) { throw '官方 DevSpace 設定未完成，請執行 devspace init 再試一次。' }
+        } finally { if ($Directory) { Pop-Location } }
+    } finally { $env:DEVSPACE_CONFIG_DIR = $previousConfig }
+    if (-not (Get-DevSpaceExistingFiles $ConfigDirectory).Complete) { throw 'DevSpace 設定未完成；未建立有效的設定與認證檔。' }
+    Show-DevSpaceProviderNextSteps
 }
 
 function Invoke-DevSpaceSetup {
@@ -301,12 +325,16 @@ function Invoke-DevSpaceSetup {
         return
     }
     Assert-DevSpaceFreshVersion $runtime
+    if (-not $SelectedProvider) {
+        if ($Unattended) { throw 'ChatGPT 設定需要互動式 devspace init。請重新執行互動式快速安裝並選 ChatGPT；舊 Coding Agents 自動設定須明確指定 -Configure -ProjectRoot <專案> -Provider codex|claude。' }
+        Invoke-DevSpaceChatGPTInit -Runtime $runtime -ConfigDirectory $ConfigDirectory -Directory $Directory
+        return
+    }
     if ($Unattended -and -not $AllowConfiguration) {
         throw '尚未設定 DevSpace。請重新執行互動式快速安裝，或明確指定 -Configure -ProjectRoot <已存在的專案完整路徑> -Provider codex|claude。'
     }
     if (-not $Directory -and -not $Unattended) { $Directory = Read-Host '允許 DevSpace 存取哪個專案？請輸入已存在的資料夾完整路徑' }
     $Directory = Resolve-DevSpaceProjectRoot $Directory
-    if (-not $SelectedProvider -and -not $Unattended) { $SelectedProvider = (Read-Host '要使用哪個執行者？輸入 codex 或 claude').Trim().ToLowerInvariant() }
     if ($SelectedProvider -notin @('codex', 'claude')) { throw '請明確選擇 -Provider codex 或 -Provider claude。' }
     New-DevSpaceConfiguration -ConfigDirectory $ConfigDirectory -Directory $Directory -SelectedProvider $SelectedProvider
     Write-Host "已建立本機設定：$ConfigDirectory；允許目錄：$Directory；執行者：$SelectedProvider。"

@@ -141,6 +141,28 @@ class DevSpaceQuickSetupTests(unittest.TestCase):
         self.assertIn("-Configure", result.stderr)
         self.assertFalse(self.config.exists())
 
+    def test_fresh_interactive_setup_uses_official_chatgpt_onboarding(self):
+        result = self.setup_mock(
+            "function New-DevSpaceConfiguration { throw 'UNEXPECTED_LEGACY_PROVIDER_CONFIG' }\n"
+            "function Invoke-DevSpaceChatGPTInit { param($Runtime, $ConfigDirectory, $Directory) "
+            "if ($Runtime.CliPath -ne 'cli.js' -or $ConfigDirectory -ne $env:DEVSPACE_TEST_CONFIG) { throw 'Wrong init context' }; "
+            "Write-Output 'OFFICIAL_CHATGPT_INIT' }\n"
+            "Invoke-DevSpaceSetup -ConfigDirectory $env:DEVSPACE_TEST_CONFIG"
+        )
+        self.assert_ok(result)
+        self.assertIn('OFFICIAL_CHATGPT_INIT', result.stdout)
+        self.assertFalse(self.config.exists())
+
+    def test_noninteractive_chatgpt_setup_requires_human_onboarding(self):
+        result = self.setup_mock(
+            "function Invoke-DevSpaceChatGPTInit { throw 'UNEXPECTED_INTERACTIVE_INIT' }\n"
+            "Invoke-DevSpaceSetup -Unattended -AllowConfiguration -ConfigDirectory $env:DEVSPACE_TEST_CONFIG"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('互動式 devspace init', result.stderr)
+        self.assertNotIn('UNEXPECTED_INTERACTIVE_INIT', result.stderr)
+        self.assertFalse(self.config.exists())
+
     def test_noninteractive_missing_node_does_not_install_or_prompt(self):
         result = self.setup_mock(
             "Invoke-DevSpaceSetup -Unattended -ConfigDirectory $env:DEVSPACE_TEST_CONFIG",
