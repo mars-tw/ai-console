@@ -34,3 +34,7 @@ GEMINI.md
 .playwright-cli/
 # 稽核者的暫存（快照、輸出）
 .audit-tmp/
+
+# Per-user OAuth cache for the OpenCode -> DevSpace connection.
+ai-console-mcp-oauth.json
+ai-console-mcp-oauth.json.*.tmp

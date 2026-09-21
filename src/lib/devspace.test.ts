@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   devSpaceRequest, devSpaceRunProblem, parseDevSpaceStatus, parseDevSpaceTask,
   parseDevSpaceTasks, pollDevSpace, withinDevSpaceRoots,
+  DEVSPACE_MODELS, devSpaceDispatchBody, devSpaceModelLabel, readDevSpaceModel,
 } from './devspace'
 
 const status = () => parseDevSpaceStatus({
@@ -10,6 +11,7 @@ const status = () => parseDevSpaceStatus({
   service: { running: false, managed: false },
   daemon: { running: false, state: 'unavailable', activeTurns: 0 },
   targets: [{ name: 'codex', kind: 'provider' }, { name: 'claude', kind: 'provider' }, { name: 'local', kind: 'provider' }],
+  models: [...DEVSPACE_MODELS], defaultModel: 'gpt-5.6-sol',
 })
 
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
@@ -21,23 +23,59 @@ describe('DevSpace readiness boundaries', () => {
     expect(() => parseDevSpaceStatus({ ...status(), allowedRoots: null })).toThrow()
   })
 
-  it('only offers the three retained configured providers', () => {
+  it('only offers the configured Codex provider', () => {
     const data = parseDevSpaceStatus({ ...status(), targets: [{ name: 'local', kind: 'provider' }, { name: 'old-provider', kind: 'provider' }, { name: 'codex', kind: 'profile' }] })
-    expect(data.targets.map(item => item.name)).toEqual(['local'])
+    expect(data.targets.map(item => item.name)).toEqual([])
     expect(devSpaceRunProblem(data, 'C:\\work\\project', 'codex', 'Review this')).not.toBe('')
   })
 
   it('requires installed, configured, allowed root, enabled provider and a prompt', () => {
     const data = status()
-    expect(devSpaceRunProblem(data, 'C:\\work\\project', 'local', 'Review this')).toBe('')
-    expect(devSpaceRunProblem(null, 'C:\\work\\project', 'local', 'Review')).not.toBe('')
-    expect(devSpaceRunProblem({ ...data, installed: false }, 'C:\\work\\project', 'local', 'Review')).not.toBe('')
-    expect(devSpaceRunProblem({ ...data, configured: false }, 'C:\\work\\project', 'local', 'Review')).not.toBe('')
-    expect(devSpaceRunProblem(data, 'C:\\elsewhere', 'local', 'Review')).not.toBe('')
-    expect(devSpaceRunProblem(data, 'C:\\work\\project', 'local', '  ')).not.toBe('')
+    expect(devSpaceRunProblem(data, 'C:\\work\\project', 'codex', 'Review this')).toBe('')
+    expect(devSpaceRunProblem(data, 'C:\\work\\project', 'codex', 'Review this', 'gpt-6-astra')).toBe('')
+    expect(devSpaceRunProblem(data, 'C:\\work\\project', 'codex', 'Review this', 'unknown')).not.toBe('')
+    expect(devSpaceRunProblem(data, 'C:\\work\\project', 'local', 'Review this')).not.toBe('')
+    expect(devSpaceRunProblem(null, 'C:\\work\\project', 'codex', 'Review')).not.toBe('')
+    expect(devSpaceRunProblem({ ...data, installed: false }, 'C:\\work\\project', 'codex', 'Review')).not.toBe('')
+    expect(devSpaceRunProblem({ ...data, configured: false }, 'C:\\work\\project', 'codex', 'Review')).not.toBe('')
+    expect(devSpaceRunProblem(data, 'C:\\elsewhere', 'codex', 'Review')).not.toBe('')
+    expect(devSpaceRunProblem(data, 'C:\\work\\project', 'codex', '  ')).not.toBe('')
     // Neither a stopped HTTP server nor a stopped task daemon prevents an explicit run.
     expect(data.service.running).toBe(false)
     expect(data.daemon.running).toBe(false)
+  })
+
+  it('refuses a legacy backend that cannot confirm the selected model contract', () => {
+    const data = status()
+    expect(() => parseDevSpaceStatus({ ...data, models: undefined })).toThrow('背景服務')
+    expect(() => parseDevSpaceStatus({ ...data, defaultModel: 'unlisted' })).toThrow()
+    expect(() => parseDevSpaceStatus({ ...data, models: [] })).toThrow()
+  })
+
+  it('defaults to SOL but preserves an explicit ASTRA preference without trusting invalid saved values', () => {
+    expect(readDevSpaceModel({ getItem: () => null })).toBe('gpt-5.6-sol')
+    expect(readDevSpaceModel({ getItem: () => 'gpt-6-astra' })).toBe('gpt-6-astra')
+    expect(readDevSpaceModel({ getItem: () => 'unknown' })).toBe('gpt-5.6-sol')
+    expect(readDevSpaceModel({ getItem: () => { throw new Error('blocked') } })).toBe('gpt-5.6-sol')
+  })
+
+  it('always sends the selected model for both new and continued tasks', () => {
+    for (const model of DEVSPACE_MODELS) {
+      expect(devSpaceDispatchBody('C:/work', ' task ', model.id)).toEqual({ cwd: 'C:/work', target: 'codex', prompt: 'task', model: model.id })
+      expect(devSpaceDispatchBody('C:/work', ' next ', model.id, 'agt_1234')).toEqual({ cwd: 'C:/work', id: 'agt_1234', prompt: 'next', model: model.id })
+    }
+    expect(() => devSpaceDispatchBody('C:/work', 'task', 'unlisted')).toThrow()
+    expect(parseDevSpaceTask({ id: 'agt_1234', status: 'running', model: 'gpt-6-astra' }).model).toBe('gpt-6-astra')
+    expect(devSpaceModelLabel('gpt-6-astra')).toBe('GPT-6 ASTRA')
+  })
+
+  it('keeps the panel usable when obtaining browser storage itself throws', () => {
+    vi.stubGlobal('localStorage', undefined)
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get() { throw new Error('SecurityError: storage access blocked') },
+    })
+    expect(readDevSpaceModel()).toBe('gpt-5.6-sol')
   })
 
   it('supports subdirectories without confusing sibling prefixes or traversal', () => {

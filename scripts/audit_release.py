@@ -17,11 +17,12 @@ TEXT_EXTENSIONS = {'.json', '.py', '.js', '.cjs', '.mjs', '.ts', '.tsx', '.md', 
 PYTHON_PIN = json.loads(Path(__file__).with_name('python-runtime.json').read_text(encoding='utf-8'))
 FORBIDDEN_PARTS = {'.claude', '.codex', '.gemini', '.qwen', '.grok', '.agents', '.git',
                    '.playwright-cli', '.audit-tmp', '__pycache__', 'output', 'private'}
-FORBIDDEN_FILES = {'config.json', 'connections.json', '_remote.json', 'auth.json', '.env', '.graphify-project.json',
+FORBIDDEN_FILES = {'config.json', 'connections.json', '_remote.json', 'auth.json', 'ai-console-mcp-oauth.json', '.env', '.graphify-project.json',
                    'graphify-boot.md', 'gemini.md'}
 QUICK_FILES = ('快速安裝.cmd', '快速啟動.cmd', 'scripts/quick-install.ps1',
                'scripts/quick-launch.ps1', 'scripts/quick-payload.ps1', 'scripts/setup-devspace.ps1',
-               'scripts/quick-start.json', 'docs/install-and-run.md', 'docs/quick-start.md')
+               'scripts/quick-start.json', 'docs/install-and-run.md', 'docs/quick-start.md',
+               'docs/devspace-desktop.md')
 
 
 def _parts(name: str) -> tuple[str, ...]:
@@ -137,6 +138,8 @@ def audit(path: Path, kind: str, version: str, private_home: str | None = None,
         required = ['server/api.py', 'server/ai_connections.py', 'server/setup_catalog.py',
                     'server/devspace_console.py',
                     'electron/main.cjs', 'scripts/find-python.cjs']
+        if tuple(map(int, version.split('.'))) >= (1, 6, 0):
+            required += ['electron/opencode.cjs', 'electron/devspace-mcp-bridge.cjs']
         if kind != 'source':
             required += ['dist/index.html', 'dist/m/manifest.webmanifest',
                          'node_modules/node-pty/prebuilds/win32-x64/conpty.node']

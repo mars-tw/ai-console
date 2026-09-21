@@ -21,13 +21,13 @@
 
 ## 下載與開始
 
-**[下載快速安裝包 v1.5.1](https://github.com/mars-tw/ai-console/releases/download/v1.5.1/ai-console-quick-start-v1.5.1.zip)**：解壓縮後雙擊 `快速安裝.cmd`，依提示完成準備；以後雙擊桌面「DevSpace 控制台」或 `快速啟動.cmd`。詳見 [快速開始說明](docs/quick-start.md)。
+**[下載快速安裝包 v1.6.0](https://github.com/mars-tw/ai-console/releases/download/v1.6.0/ai-console-quick-start-v1.6.0.zip)**：解壓縮後雙擊 `快速安裝.cmd`，依提示完成準備；以後雙擊桌面「DevSpace 控制台」或 `快速啟動.cmd`。詳見 [快速開始說明](docs/quick-start.md)。
 
-第一次使用請看 **[完整安裝與執行手冊](docs/install-and-run.md)**：從解壓縮、安裝 DevSpace、設定允許目錄，到送出第一個工作，依序操作即可。
+第一次使用請看 **[完整安裝與執行手冊](docs/install-and-run.md)**：從解壓縮、安裝 DevSpace、設定允許目錄，到在 ChatGPT 對話中使用 MCP，依序操作即可。
 
 ### Windows 一般使用者請下載這個
 
-**[⬇ 下載 Windows 免安裝版 v1.5.1（64 位元）](https://github.com/mars-tw/ai-console/releases/download/v1.5.1/ai-console-win32-x64-v1.5.1.zip)**
+**[⬇ 下載 Windows 免安裝版 v1.6.0（64 位元）](https://github.com/mars-tw/ai-console/releases/download/v1.6.0/ai-console-win32-x64-v1.6.0.zip)**
 
 1. 解壓縮整個 ZIP，再開啟資料夾裡的 `AI控制台.exe`。
 2. 按「接入 AI」，依畫面選擇電腦上的 AI、雲端服務或已有的工具。
@@ -35,18 +35,22 @@
 
 Windows 發行包已包含控制台需要的 Python，不必另裝，也不會變更系統 Python。AI 工具、模型與雲端帳號並未預先附送：本機問答需安裝 LM Studio 並下載模型；雲端問答需從選定服務取得 API 金鑰，可能另外計費。控制台不會代你註冊、購買額度或自動下載大型模型。
 
-要讀寫專案或交給 AI 寫程式，可切到新增的「DevSpace」分頁。請依 [安裝與執行手冊](docs/install-and-run.md) 安裝 DevSpace、Node.js 與 Windows 所需的 Git Bash，完成允許目錄及 provider 設定，再選擇專案送出工作。這些工具未包含在控制台下載包內。標準上游 DevSpace 沒有 `local` provider；「本機 AI」需使用另外提供並啟用該 provider 的 DevSpace 安裝。
+要讀寫專案或交給 AI 寫程式，可切到「DevSpace」分頁，準備並複製指示，再開啟已登入的 Chrome ChatGPT，選擇「對話」、加入 DevSpace 連接器後送出。模型透過 MCP 操作允許範圍內的專案，成果留在本機。請依 [安裝與執行手冊](docs/install-and-run.md) 完成 DevSpace、Node.js、Git Bash、專案允許目錄及 ChatGPT MCP 連線設定；控制台不會自動建立公開網址或代為登入。
+
+工作臺另有「OpenCode」入口，可開啟綁定專案的 OpenCode 對話視窗。OpenCode 1.18.31 需另外安裝並完成模型帳號登入，操作方式見 [DevSpace 與 OpenCode 說明](docs/devspace-desktop.md)。
 
 第一次只用電腦即可；手機遙控是選配，另需在電腦與手機安裝並登入同一個 Tailscale 網路。
 
 <details>
 <summary>開發者：原始碼下載與自行建置</summary>
 
-[下載 v1.5.1 原始碼](https://github.com/mars-tw/ai-console/releases/download/v1.5.1/ai-console-source-v1.5.1.zip)。原始碼 ZIP 不是可直接執行的 Windows 程式；自行建置仍需 Node.js 與 Python，步驟見下方「快速開始」。
+[下載 v1.6.0 原始碼](https://github.com/mars-tw/ai-console/releases/download/v1.6.0/ai-console-source-v1.6.0.zip)。原始碼 ZIP 不是可直接執行的 Windows 程式；自行建置仍需 Node.js 與 Python，步驟見下方「快速開始」。
 
 </details>
 
-v1.5.1 新增快速安裝與快速啟動：自動校驗下載包、安裝到使用者目錄、建立捷徑，並引導第一次 DevSpace 設定。已有設定會沿用。DevSpace 桌面控制台可查看服務狀態、選擇允許的專案、派工、查看結果及接續任務。
+**v1.6.0** 將 DevSpace 分頁改為 ChatGPT「對話」入口，新增 OpenCode 工作臺。DevSpace 的新流程不建立 ChatGPT「工作」或背景 agent 工作；模型須在 ChatGPT 畫面實際選定，工作臺偏好不會遠端切換模型。詳見 [版本說明](docs/releases/v1.6.0.md)。
+
+沿用 v1.5.1 的快速安裝與快速啟動：校驗下載包、安裝到使用者目錄、建立捷徑並保留既有 DevSpace 設定。原有派工主控台等功能保留各自入口，不會因開啟新的對話入口而自動執行。
 
 保留 v1.4.1 的新手冷啟動流程：沒有模型不會顯示可派工；問題草稿會保留並引導接入；提供持續可見的首頁、可略過的未使用來源、內建入門技能及安裝後使用步驟。相容服務提供預設網址與官方設定入口，並正確處理智譜 `/v4` 網址。
 
@@ -74,7 +78,8 @@ v1.5.1 新增快速安裝與快速啟動：自動校驗下載包、安裝到使�
 
 ## 功能
 
-- DevSpace 桌面控制台：查看本機 MCP 服務、選擇允許的專案目錄、派工給 Codex／Claude／本機 AI、讀取結果與續接任務。可建立直接開啟此頁的 Windows 桌面捷徑，詳見 [DevSpace 桌面使用說明](docs/devspace-desktop.md)。
+- **DevSpace 對話入口**：查看本機 MCP 服務、選擇允許的專案、複製對話指示並開啟 Chrome ChatGPT。由 ChatGPT「對話」中的模型直接使用 DevSpace MCP，成果寫回本機；後續在同一對話接續。可建立直接開啟此頁的 Windows 桌面捷徑，詳見 [DevSpace 桌面使用說明](docs/devspace-desktop.md)。
+- **OpenCode 工作臺**：選擇專案及 SOL／ASTRA 預設模型，開啟獨立 OpenCode 對話；工具透過綁定專案的 DevSpace MCP 使用。OpenCode 需另行安裝及登入，服務啟動不代表模型已驗證可用。
 
 - **新手首頁**：即使沒有對話索引，也能先按「接入 AI／開始使用」。原有「找回舊對話／直接問 AI／交給 AI 執行／管理 AI 技能」四個入口保留
 - **接入其他 AI**：內建常見工具的安裝檢查與官方說明；「已安裝」不代表已登入或已驗證能派工。另可新增本機 HTTP 或雲端 HTTPS 的 OpenAI 相容 API，依序選擇模型、儲存、測試真正回覆，再進入問答。只有服務明確未提供模型清單端點時才開放手填模型，並持續標示尚未驗證；登入失敗不會被當成可用。不會因接入問答服務就授予它檔案或派工權限
@@ -352,8 +357,8 @@ src/                       # React + TypeScript + Tailwind 前端
 `scripts/audit_release.py` 能檢查資料夾或 ZIP 的版本、必要檔案、本機路徑、配對碼、私密檔名和 Windows 路徑／大小寫衝突。壓縮包通過檢查後，才把本機專屬設定放回本地安裝。
 
 ```bash
-python scripts/audit_release.py release/clean/AI控制台-win32-x64 --kind windows --version 1.5.1
-python scripts/audit_release.py release/ai-console-source-v1.5.1.zip --kind source --version 1.5.1
+python scripts/audit_release.py release/clean/AI控制台-win32-x64 --kind windows --version 1.6.0
+python scripts/audit_release.py release/ai-console-source-v1.6.0.zip --kind source --version 1.6.0
 ```
 
 發佈者可加 `--check-local-pairing`，只在記憶體中比對本機配對碼是否誤入成品；一般檢查與測試不會讀取配對設定。

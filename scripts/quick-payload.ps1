@@ -1,6 +1,7 @@
 ﻿# Shared, read-only validation for both installation and quick launch.
 function Get-QuickPayloadRequiredFiles {
-    return @(
+    param([string]$Version = '1.5.1')
+    $required = @(
         'AI控制台.exe', 'icudtl.dat', 'resources.pak', 'locales/en-US.pak',
         'resources/app/package.json', 'resources/app/electron/main.cjs',
         'resources/app/electron/pty.cjs', 'resources/app/electron/preload.cjs',
@@ -10,6 +11,10 @@ function Get-QuickPayloadRequiredFiles {
         'resources/app/runtime/python/python314.dll', 'resources/app/runtime/python/python314.zip',
         'resources/app/runtime/python/python314._pth', 'resources/app/runtime/python/runtime.json'
     )
+    if ([version]$Version -ge [version]'1.6.0') {
+        $required += @('resources/app/electron/opencode.cjs', 'resources/app/electron/devspace-mcp-bridge.cjs')
+    }
+    return $required
 }
 
 function Assert-QuickPayloadPath([string]$Path) {
@@ -75,7 +80,7 @@ function Assert-QuickPayload {
         }
         if ($VerifyHashes -and (Get-QuickPayloadHash $path) -cne $entry.sha256) { throw 'Payload checksum mismatch.' }
     }
-    foreach ($required in Get-QuickPayloadRequiredFiles) {
+    foreach ($required in (Get-QuickPayloadRequiredFiles -Version $Version)) {
         if (-not $seen.ContainsKey($required) -or $seen[$required].size -le 0) { throw 'Payload manifest omits a required app or runtime file.' }
     }
     $packagePath = Join-Path $base 'resources/app/package.json'

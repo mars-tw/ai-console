@@ -12,6 +12,15 @@ contextBridge.exposeInMainWorld('acSetup', {
   chooseDirectory: () => ipcRenderer.invoke('setup:choose-directory'),
 })
 
+contextBridge.exposeInMainWorld('acOpenCode', {
+  status: () => ipcRenderer.invoke('opencode:status'),
+  open: (input) => ipcRenderer.invoke('opencode:open', input),
+  stop: () => ipcRenderer.invoke('opencode:stop'),
+})
+contextBridge.exposeInMainWorld('acChatGPT', {
+  open: () => ipcRenderer.invoke('conversation:open-chatgpt'),
+})
+
 /** 每個 session 的資料回呼。用 Map 而不是單一 listener，才能同時開多個終端 */
 const dataSubs = new Map()
 const exitSubs = new Map()

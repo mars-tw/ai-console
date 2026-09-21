@@ -30,7 +30,7 @@ const quickFiles = [
   '快速安裝.cmd', '快速啟動.cmd',
   'scripts/quick-install.ps1', 'scripts/quick-launch.ps1', 'scripts/setup-devspace.ps1', 'scripts/quick-start.json',
   'scripts/quick-payload.ps1',
-  'docs/install-and-run.md', 'docs/quick-start.md',
+  'docs/install-and-run.md', 'docs/quick-start.md', 'docs/devspace-desktop.md',
 ]
 const scratch = mkdtempSync(path.join(os.tmpdir(), 'ai-console-package-'))
 const stage = path.join(scratch, 'app')

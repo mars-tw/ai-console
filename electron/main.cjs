@@ -6,6 +6,7 @@
 // 出事時只會看到一個白視窗，很難查。日誌位置會顯示在錯誤畫面上。
 const { app, BrowserWindow, Menu, shell, ipcMain, Notification, dialog } = require('electron')
 const ptyMgr = require('./pty.cjs')
+const { wireOpenCode } = require('./opencode.cjs')
 const { spawn } = require('child_process')
 const path = require('path')
 const fs = require('fs')
@@ -107,6 +108,7 @@ function errorPage(reason) {
 }
 
 let win = null
+let openCode = null
 
 function openOfficialPage(url) {
   try {
@@ -115,6 +117,27 @@ function openOfficialPage(url) {
       void shell.openExternal(parsed.href)
     }
   } catch { /* Invalid external links are ignored. */ }
+}
+
+function wireChatGPT() {
+  ipcMain.handle('conversation:open-chatgpt', async (event) => {
+    if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) return { ok: false }
+    try {
+      if (new URL(event.senderFrame.url).origin !== new URL(APP_URL).origin) return { ok: false }
+      const candidates = [
+        path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      ]
+      const chrome = candidates.find(file => fs.existsSync(file))
+      if (!chrome) return { ok: false, error: '找不到 Chrome，請手動在已登入的瀏覽器開啟 chatgpt.com。' }
+      return await new Promise(resolve => {
+        const child = spawn(chrome, ['https://chatgpt.com/'], { windowsHide: true, stdio: 'ignore' })
+        child.once('spawn', () => { child.unref(); resolve({ ok: true }) })
+        child.once('error', () => resolve({ ok: false, error: '無法開啟 ChatGPT，請手動開啟已登入的 Chrome。' }))
+      })
+    } catch { return { ok: false, error: '無法開啟 ChatGPT。' } }
+  })
 }
 
 function wireSetup() {
@@ -275,6 +298,11 @@ async function createWindow() {
   wirePty()
   wireNotify()
   wireSetup()
+  wireChatGPT()
+  if (!openCode) openCode = wireOpenCode({
+    ipcMain, BrowserWindow, mainWindow: () => win, appUrl: APP_URL,
+    openExternal: (url) => shell.openExternal(url),
+  })
   win = new BrowserWindow({
     width: 1280,
     height: 840,
@@ -331,9 +359,21 @@ app.whenReady()
   .then(createWindow)
   .catch((e) => log(`createWindow 例外：${e && e.stack}`))
 
-app.on('before-quit', () => {
+let quitCleanupStarted = false
+let quitCleanupDone = false
+app.on('before-quit', (event) => {
+  if (quitCleanupDone) return
+  event.preventDefault()
+  if (quitCleanupStarted) return
+  quitCleanupStarted = true
   // 不收的話那些 CLI 會變成孤兒行程繼續佔著資源
   try { ptyMgr.killAll() } catch { /* 關閉流程不要因為這個中斷 */ }
+  Promise.resolve(openCode?.dispose()).catch(() => {
+    log('OpenCode 結束清理未正常完成')
+  }).finally(() => {
+    quitCleanupDone = true
+    app.quit()
+  })
 })
 app.on('window-all-closed', () => app.quit())
 app.on('activate', () => {

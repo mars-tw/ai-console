@@ -1,5 +1,12 @@
-export const DEVSPACE_TARGETS = ['codex', 'claude', 'local'] as const
+export const DEVSPACE_TARGETS = ['codex'] as const
 export type DevSpaceTarget = typeof DEVSPACE_TARGETS[number]
+export const DEVSPACE_MODELS = [
+  { id: 'gpt-5.6-sol', label: 'GPT-5.6 SOL' },
+  { id: 'gpt-6-astra', label: 'GPT-6 ASTRA' },
+] as const
+export type DevSpaceModel = typeof DEVSPACE_MODELS[number]['id']
+export const DEFAULT_DEVSPACE_MODEL: DevSpaceModel = 'gpt-5.6-sol'
+const MODEL_PREFERENCE = 'ai-console.devspace-model'
 export type DevSpaceTaskState = 'running' | 'completed' | 'failed' | 'stopped'
 
 export interface DevSpaceStatus {
@@ -12,13 +19,16 @@ export interface DevSpaceStatus {
   service: { running: boolean; managed: boolean; pid?: number }
   daemon: { running: boolean; state: string; activeTurns: number }
   targets: { name: DevSpaceTarget; kind: 'provider'; model?: string }[]
+  models: { id: DevSpaceModel; label: string }[]
+  defaultModel: DevSpaceModel
 }
 
 export interface DevSpaceTask {
   id: string
   status: DevSpaceTaskState
   target?: string
-  provider?: DevSpaceTarget
+  provider?: string
+  model?: string
   response?: string
   stale?: boolean
   error?: { code: string; message: string; retryable?: boolean }
@@ -31,6 +41,32 @@ export function isDevSpaceTarget(value: unknown): value is DevSpaceTarget {
   return DEVSPACE_TARGETS.some(target => target === value)
 }
 
+export function isDevSpaceModel(value: unknown): value is DevSpaceModel {
+  return DEVSPACE_MODELS.some(model => model.id === value)
+}
+
+export function devSpaceModelLabel(model?: string): string {
+  return DEVSPACE_MODELS.find(item => item.id === model)?.label || model || '模型尚未記錄'
+}
+
+export function readDevSpaceModel(store?: Pick<Storage, 'getItem'>): DevSpaceModel {
+  try {
+    // Accessing the storage object itself can throw in restricted contexts.
+    const storage = store ?? (typeof localStorage === 'undefined' ? undefined : localStorage)
+    const value = storage?.getItem(MODEL_PREFERENCE)
+    return isDevSpaceModel(value) ? value : DEFAULT_DEVSPACE_MODEL
+  } catch { return DEFAULT_DEVSPACE_MODEL }
+}
+
+export function saveDevSpaceModel(model: DevSpaceModel): void {
+  try { localStorage.setItem(MODEL_PREFERENCE, model) } catch { /* Keep the current selection even if storage is unavailable. */ }
+}
+
+export function devSpaceDispatchBody(cwd: string, prompt: string, model: unknown, id?: string) {
+  if (!isDevSpaceModel(model)) throw new Error('請選擇 GPT-5.6 SOL 或 GPT-6 ASTRA。')
+  return id ? { cwd, id, prompt: prompt.trim(), model } : { cwd, target: 'codex', prompt: prompt.trim(), model }
+}
+
 /** Unknown or incomplete status must never become a positive readiness signal. */
 export function parseDevSpaceStatus(value: unknown): DevSpaceStatus {
   const data = record(value)
@@ -41,6 +77,14 @@ export function parseDevSpaceStatus(value: unknown): DevSpaceStatus {
     || typeof daemon.running !== 'boolean' || !Array.isArray(data.allowedRoots) || !Array.isArray(data.targets)) {
     throw new Error('DevSpace 回傳的狀態格式無法辨識，請重新整理。')
   }
+  if (!Array.isArray(data.models) || !isDevSpaceModel(data.defaultModel)) {
+    throw new Error('背景服務尚未支援模型選擇，請重新啟動新版控制台。')
+  }
+  const models = data.models.flatMap(value => {
+    const model = record(value)
+    return isDevSpaceModel(model.id) ? [{ id: model.id, label: devSpaceModelLabel(model.id) }] : []
+  })
+  if (!models.some(model => model.id === data.defaultModel)) throw new Error('DevSpace 回傳的狀態格式無法辨識，請重新整理。')
   return {
     installed: data.installed,
     version: typeof data.version === 'string' ? data.version : null,
@@ -56,6 +100,8 @@ export function parseDevSpaceStatus(value: unknown): DevSpaceStatus {
         ? [{ name: item.name, kind: 'provider' as const, ...(typeof item.model === 'string' ? { model: item.model } : {}) }]
         : []
     }),
+    models,
+    defaultModel: data.defaultModel,
   }
 }
 
@@ -70,7 +116,8 @@ export function parseDevSpaceTask(value: unknown): DevSpaceTask {
     status: task.status as DevSpaceTaskState,
     stale: task.stale === true,
     ...(typeof task.target === 'string' ? { target: task.target } : {}),
-    ...(isDevSpaceTarget(task.provider) ? { provider: task.provider } : {}),
+    ...(typeof task.provider === 'string' ? { provider: task.provider } : {}),
+    ...(typeof task.model === 'string' ? { model: task.model } : {}),
     ...(typeof task.response === 'string' ? { response: task.response } : {}),
     ...(typeof failure.message === 'string' ? { error: { code: typeof failure.code === 'string' ? failure.code : '', message: failure.message, retryable: failure.retryable === true } } : {}),
   }
@@ -98,12 +145,13 @@ export function withinDevSpaceRoots(cwd: string, roots: string[]): boolean {
   })
 }
 
-export function devSpaceRunProblem(status: DevSpaceStatus | null, cwd: string, target: string, prompt: string): string {
+export function devSpaceRunProblem(status: DevSpaceStatus | null, cwd: string, target: string, prompt: string, model: string = DEFAULT_DEVSPACE_MODEL): string {
   if (!status) return '請先讀取 DevSpace 狀態。'
   if (!status.installed) return '請先安裝 DevSpace，再重新整理。'
   if (!status.configured) return '請先完成 DevSpace 設定，再重新整理。'
   if (!withinDevSpaceRoots(cwd, status.allowedRoots)) return '請選擇允許的工作目錄，或其中的子目錄。'
-  if (!status.targets.some(item => item.name === target)) return '請選擇已在 DevSpace 啟用的執行者。'
+  if (target !== 'codex' || !status.targets.some(item => item.name === target)) return '請先在 DevSpace 啟用 Codex。'
+  if (!isDevSpaceModel(model) || !status.models.some(item => item.id === model)) return '請選擇 GPT-5.6 SOL 或 GPT-6 ASTRA。'
   if (!prompt.trim()) return '請寫下要執行的工作。'
   if (prompt.length > 24000) return '請輸入 1 到 24,000 字的任務內容。'
   return ''

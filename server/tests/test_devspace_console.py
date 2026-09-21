@@ -29,7 +29,8 @@ class DevSpaceConsoleTest(unittest.TestCase):
         self.config = {"host": "127.0.0.1", "port": 7676,
                        "allowedRoots": [str(self.project.parent)], "stateDir": str(self.state),
                        "subagents": {"enabled": True, "providers": [
-                           {"id": "codex", "enabled": True}, {"id": "claude", "enabled": True},
+                           {"id": "codex", "enabled": True, "model": "config-is-not-availability"},
+                           {"id": "claude", "enabled": True},
                            {"id": "local", "enabled": True, "model": "lmstudio-auto"},
                            {"id": "grok", "enabled": True}]}}
         self.write_config()
@@ -44,17 +45,18 @@ class DevSpaceConsoleTest(unittest.TestCase):
     def make_history(self):
         with sqlite3.connect(self.state / "devspace.sqlite") as conn:
             conn.execute("""CREATE TABLE local_agent_sessions (
-                id TEXT, workspace_root TEXT, profile_name TEXT, provider TEXT,
+                id TEXT, workspace_root TEXT, profile_name TEXT, provider TEXT, model TEXT,
                 status TEXT, latest_response TEXT, error_code TEXT,
                 error_retryable TEXT, updated_at TEXT)""")
             records = [
-                ("agt_12345678", str(self.project), "codex", "codex", "idle", "完成 ✓", None, None, "2026-09-18"),
-                ("agt_22345678", str(self.project), "local-reviewer", "local", "error", None, "MODEL_ERROR", "true", "2026-09-17"),
-                ("agt_32345678", str(self.project.parent), "codex", "codex", "idle", "另一個專案", None, None, "2026-09-16"),
-                ("agt_42345678", str(self.project), "grok", "grok", "idle", "Retired", None, None, "2026-09-15"),
-                ("agt_52345678", str(self.project), "claude", "claude", "running", None, None, None, "2026-09-14"),
+                ("agt_12345678", str(self.project), "codex", "codex", "gpt-5.6-sol", "idle", "完成 ✓", None, None, "2026-09-18"),
+                ("agt_22345678", str(self.project), "local-reviewer", "local", "lmstudio-auto", "error", None, "MODEL_ERROR", "true", "2026-09-17"),
+                ("agt_32345678", str(self.project.parent), "codex", "codex", "gpt-6-astra", "idle", "另一個專案", None, None, "2026-09-16"),
+                ("agt_42345678", str(self.project), "grok", "grok", "grok-legacy", "idle", "Retired", None, None, "2026-09-15"),
+                ("agt_52345678", str(self.project), "claude", "claude", "claude-legacy", "running", None, None, None, "2026-09-14"),
+                ("agt_62345678", str(self.project), "codex", "codex", "gpt-6-astra", "running", None, None, None, "2026-09-13"),
             ]
-            conn.executemany("INSERT INTO local_agent_sessions VALUES (?,?,?,?,?,?,?,?,?)", records)
+            conn.executemany("INSERT INTO local_agent_sessions VALUES (?,?,?,?,?,?,?,?,?,?)", records)
         conn.close()
 
     def test_status_passive_missing_cli_no_auth_content(self):
@@ -63,7 +65,13 @@ class DevSpaceConsoleTest(unittest.TestCase):
         self.assertTrue(value["ok"])
         self.assertFalse(value["installed"])
         self.assertTrue(value["configured"])
-        self.assertEqual([t["name"] for t in value["targets"]], ["codex", "claude", "local"])
+        self.assertEqual(value["targets"], [{"name": "codex", "kind": "provider"}])
+        self.assertEqual(value["models"], [
+            {"id": "gpt-5.6-sol", "label": "GPT-5.6 SOL"},
+            {"id": "gpt-6-astra", "label": "GPT-6 ASTRA"},
+        ])
+        self.assertEqual(value["defaultModel"], "gpt-5.6-sol")
+        self.assertNotIn("config-is-not-availability", json.dumps(value))
         self.assertNotIn("AUTH_CONTENT", json.dumps(value))
         self.assertNotIn("auth.json", json.dumps(value))
         execute.assert_not_called()
@@ -125,7 +133,10 @@ class DevSpaceConsoleTest(unittest.TestCase):
             value = self.console.tasks(self.body)
         self.assertTrue(value["ok"], value)
         self.assertFalse(value["daemonRunning"])
-        self.assertEqual([t["id"] for t in value["tasks"]], ["agt_12345678", "agt_22345678", "agt_52345678"])
+        self.assertEqual([t["id"] for t in value["tasks"]],
+                         ["agt_12345678", "agt_22345678", "agt_52345678", "agt_62345678"])
+        self.assertEqual([t["model"] for t in value["tasks"]],
+                         ["gpt-5.6-sol", "lmstudio-auto", "claude-legacy", "gpt-6-astra"])
         self.assertTrue(value["tasks"][-1]["stale"])
         self.assertEqual(db.read_bytes(), before)
         execute.assert_not_called()
@@ -134,7 +145,9 @@ class DevSpaceConsoleTest(unittest.TestCase):
         self.make_history()
         value = self.console.show({**self.body, "id": "agt_12345678"})
         self.assertEqual(value["task"]["response"], "完成 ✓")
+        self.assertEqual(value["task"]["model"], "gpt-5.6-sol")
         value = self.console.show({**self.body, "id": "agt_22345678"})
+        self.assertEqual(value["task"]["model"], "lmstudio-auto")
         self.assertEqual(value["task"]["error"]["code"], "MODEL_ERROR")
         self.assertTrue(value["task"]["error"]["retryable"])
         for agent_id in ("agt_32345678", "agt_42345678"):
@@ -152,6 +165,17 @@ class DevSpaceConsoleTest(unittest.TestCase):
             conn.execute("CREATE TABLE unrelated (id TEXT)")
         conn.close()
         self.assertEqual(self.console.tasks(self.body)["code"], "HISTORY_UNAVAILABLE")
+
+    def test_history_schema_without_model_is_explicitly_incompatible(self):
+        with sqlite3.connect(self.state / "devspace.sqlite") as conn:
+            conn.execute("""CREATE TABLE local_agent_sessions (
+                id TEXT, workspace_root TEXT, profile_name TEXT, provider TEXT,
+                status TEXT, latest_response TEXT, error_code TEXT,
+                error_retryable TEXT, updated_at TEXT)""")
+        conn.close()
+        result = self.console.tasks(self.body)
+        self.assertEqual(result["code"], "HISTORY_UNAVAILABLE")
+        self.assertIn("格式不相容", result["error"])
 
     def test_cwd_rejects_relative_traversal_sibling_and_missing_path(self):
         for path in ("relative", str(self.home), str(self.project.parent / ".."), str(self.home / "projects-evil")):
@@ -173,35 +197,116 @@ class DevSpaceConsoleTest(unittest.TestCase):
         with mock.patch.object(dc.shutil, "which", return_value="git"), mock.patch.object(dc.subprocess, "run", return_value=git_result):
             self.assertEqual(self.console.tasks(self.body)["code"], "WORKSPACE_NOT_ALLOWED")
 
-    def test_run_literal_unicode_prompt_and_provider_catalog(self):
+    def test_run_always_passes_allowed_model_and_returns_selection(self):
+        catalog = {"targets": [{"name": "codex", "kind": "provider"}]}
+        prompt = "執行這項工作"
+        for model in ("gpt-5.6-sol", "gpt-6-astra"):
+            with self.subTest(model=model), mock.patch.object(
+                    self.console, "_json", side_effect=[catalog, {"id": "agt_12345678", "status": "running"}]) as call:
+                result = self.console.run({**self.body, "target": "codex", "model": model, "prompt": prompt})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["task"]["model"], model)
+            self.assertEqual(call.call_args_list[1].args[0],
+                             ["agents", "run", "codex", "--model", model, "--json", "--", prompt])
+            self.assertEqual(call.call_args_list[1].kwargs["cwd"], self.project)
+
+    def test_run_without_model_defaults_and_keeps_prompt_literal(self):
         prompt = '--model evil\n請讀檔案 & echo bad | $(whoami) `quoted` "單引號\'"'
-        replies = [{"targets": [{"name": "codex", "kind": "provider"}]}, {"id": "agt_12345678", "status": "running"}]
+        replies = [{"targets": [{"name": "codex", "kind": "provider"}]},
+                   {"id": "agt_12345678", "status": "running"}]
         with mock.patch.object(self.console, "_json", side_effect=replies) as call:
             result = self.console.run({**self.body, "target": "codex", "prompt": prompt})
         self.assertTrue(result["ok"], result)
-        args = call.call_args.args[0]
-        self.assertEqual(args, ["agents", "run", "codex", "--json", "--", prompt])
-        self.assertEqual(call.call_args.kwargs["cwd"], self.project)
+        self.assertEqual(result["task"]["model"], "gpt-5.6-sol")
+        self.assertEqual(call.call_args.args[0],
+                         ["agents", "run", "codex", "--model", "gpt-5.6-sol", "--json", "--", prompt])
 
-    def test_run_rejects_disabled_retired_and_shadowed_targets(self):
-        for target in ("grok", "custom-profile", "--help"):
-            self.assertEqual(self.console.run({**self.body, "target": target, "prompt": "x"})["code"], "TARGET_NOT_ALLOWED")
-        catalog = {"targets": [{"name": "codex", "kind": "provider"}, {"name": "codex", "kind": "profile", "provider": "grok"}]}
+    def test_invalid_model_fails_before_any_devspace_cli_call(self):
+        for model in ("gpt-4", "gpt-5.6-sol ", None, {"id": "gpt-6-astra"}):
+            with self.subTest(model=model), mock.patch.object(self.console, "_json") as call:
+                run = self.console.run({**self.body, "target": "codex", "model": model, "prompt": "x"})
+                continued = self.console.continue_task(
+                    {**self.body, "id": "agt_12345678", "model": model, "prompt": "x"})
+            self.assertEqual(run["code"], "MODEL_NOT_ALLOWED")
+            self.assertEqual(continued["code"], "MODEL_NOT_ALLOWED")
+            call.assert_not_called()
+
+    def test_run_rejects_noncodex_disabled_and_shadowed_targets(self):
+        with mock.patch.object(self.console, "_json") as call:
+            for target in ("claude", "local", "grok", "custom-profile", "--help", None):
+                with self.subTest(target=target):
+                    result = self.console.run({**self.body, "target": target, "model": "gpt-5.6-sol", "prompt": "x"})
+                    self.assertEqual(result["code"], "TARGET_NOT_ALLOWED")
+            call.assert_not_called()
+        self.config["subagents"]["providers"][0]["enabled"] = False
+        self.write_config()
+        with mock.patch.object(self.console, "_json") as call:
+            self.assertEqual(self.console.run({**self.body, "target": "codex", "model": "gpt-5.6-sol",
+                                               "prompt": "x"})["code"], "TARGET_NOT_ALLOWED")
+            call.assert_not_called()
+        self.config["subagents"]["providers"][0]["enabled"] = True
+        self.write_config()
+        catalog = {"targets": [{"name": "codex", "kind": "provider"},
+                               {"name": "codex", "kind": "profile", "provider": "grok"}]}
         with mock.patch.object(self.console, "_json", return_value=catalog) as call:
-            self.assertEqual(self.console.run({**self.body, "target": "codex", "prompt": "x"})["code"], "TARGET_SHADOWED")
+            self.assertEqual(self.console.run({**self.body, "target": "codex", "model": "gpt-5.6-sol",
+                                               "prompt": "x"})["code"], "TARGET_SHADOWED")
             self.assertEqual(call.call_count, 1)
 
-    def test_continue_checks_provider_project_running_and_prompt(self):
+    def test_continue_always_passes_allowed_model_or_default(self):
         self.make_history()
-        with mock.patch.object(self.console, "_json", return_value={"id": "agt_22345678", "status": "running"}) as call:
-            result = self.console.continue_task({**self.body, "id": "agt_22345678", "prompt": "再檢查"})
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(call.call_args.args[0], ["agents", "continue", "agt_22345678", "--json", "--", "再檢查"])
-        self.assertEqual(self.console.continue_task({**self.body, "id": "agt_32345678", "prompt": "x"})["code"], "TASK_NOT_FOUND")
-        self.assertEqual(self.console.continue_task({**self.body, "id": "agt_52345678", "prompt": "x"})["code"], "TASK_RUNNING")
-        self.config["subagents"]["providers"][2]["enabled"] = False
+        cases = ((None, "gpt-5.6-sol"), ("gpt-5.6-sol", "gpt-5.6-sol"),
+                 ("gpt-6-astra", "gpt-6-astra"))
+        for requested, expected in cases:
+            body = {**self.body, "id": "agt_12345678", "prompt": "再檢查"}
+            if requested is not None:
+                body["model"] = requested
+            with self.subTest(model=requested), mock.patch.object(
+                    self.console, "_json", return_value={"id": "agt_12345678", "status": "running"}) as call:
+                result = self.console.continue_task(body)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["task"]["model"], expected)
+            self.assertEqual(call.call_args.args[0],
+                             ["agents", "continue", "agt_12345678", "--model", expected,
+                              "--json", "--", "再檢查"])
+
+    def test_continue_rejects_noncodex_disabled_cross_project_and_running(self):
+        self.make_history()
+        with mock.patch.object(self.console, "_json") as call:
+            self.assertEqual(self.console.continue_task({**self.body, "id": "agt_32345678", "model": "gpt-5.6-sol",
+                                                         "prompt": "x"})["code"], "TASK_NOT_FOUND")
+            for agent_id in ("agt_22345678", "agt_52345678"):
+                self.assertEqual(self.console.continue_task({**self.body, "id": agent_id, "model": "gpt-5.6-sol",
+                                                             "prompt": "x"})["code"], "TARGET_NOT_ALLOWED")
+            self.assertEqual(self.console.continue_task({**self.body, "id": "agt_62345678", "model": "gpt-5.6-sol",
+                                                         "prompt": "x"})["code"], "TASK_RUNNING")
+            call.assert_not_called()
+        self.config["subagents"]["providers"][0]["enabled"] = False
         self.write_config()
-        self.assertEqual(self.console.continue_task({**self.body, "id": "agt_22345678", "prompt": "x"})["code"], "TARGET_NOT_ALLOWED")
+        with mock.patch.object(self.console, "_json") as call:
+            self.assertEqual(self.console.continue_task({**self.body, "id": "agt_12345678", "model": "gpt-5.6-sol",
+                                                         "prompt": "x"})["code"], "TARGET_NOT_ALLOWED")
+            call.assert_not_called()
+
+    def test_provider_failure_propagates_without_model_fallback(self):
+        catalog = {"targets": [{"name": "codex", "kind": "provider"}]}
+        failure = dc._Failure("RATE_LIMITED", "DevSpace 未完成這項操作。")
+        with mock.patch.object(self.console, "_json", side_effect=[catalog, failure]) as call:
+            result = self.console.run({**self.body, "target": "codex", "model": "gpt-6-astra", "prompt": "x"})
+        self.assertEqual(result["code"], "RATE_LIMITED")
+        self.assertEqual(call.call_count, 2)
+        self.assertIn("gpt-6-astra", call.call_args_list[1].args[0])
+        self.assertNotIn("gpt-5.6-sol", call.call_args_list[1].args[0])
+
+        self.make_history()
+        with mock.patch.object(self.console, "_json", side_effect=dc._Failure(
+                "RATE_LIMITED", "DevSpace 未完成這項操作。")) as call:
+            result = self.console.continue_task({**self.body, "id": "agt_12345678", "model": "gpt-6-astra",
+                                                 "prompt": "x"})
+        self.assertEqual(result["code"], "RATE_LIMITED")
+        self.assertEqual(call.call_count, 1)
+        self.assertIn("gpt-6-astra", call.call_args.args[0])
+        self.assertNotIn("gpt-5.6-sol", call.call_args.args[0])
 
     def test_cli_override_rejects_shell_wrapper_and_command_string(self):
         wrapper = self.home / "devspace.cmd"

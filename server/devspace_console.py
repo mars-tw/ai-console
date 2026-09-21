@@ -21,6 +21,13 @@ import urllib.request
 
 
 PROVIDERS = frozenset(("codex", "claude", "local"))
+DISPATCH_PROVIDER = "codex"
+MODEL_OPTIONS = (
+    {"id": "gpt-5.6-sol", "label": "GPT-5.6 SOL"},
+    {"id": "gpt-6-astra", "label": "GPT-6 ASTRA"},
+)
+MODEL_IDS = frozenset(option["id"] for option in MODEL_OPTIONS)
+DEFAULT_MODEL = "gpt-5.6-sol"
 _ID = re.compile(r"agt_[A-Za-z0-9_-]{4,100}\Z")
 _VERSION = re.compile(r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?\Z")
 _STATUS = {"starting": "running", "running": "running", "idle": "completed",
@@ -197,15 +204,13 @@ class DevSpaceConsole:
         targets = []
         if enabled and isinstance(entries, list):
             for entry in entries:
-                if (not isinstance(entry, dict) or entry.get("id") not in PROVIDERS
+                if (not isinstance(entry, dict) or entry.get("id") != DISPATCH_PROVIDER
                         or entry.get("enabled") is not True):
                     continue
-                target = {"name": entry["id"], "kind": "provider"}
-                for field in ("model", "effort"):
-                    value = entry.get(field)
-                    if isinstance(value, str) and 0 < len(value) <= 200 and not any(c in value for c in "\r\n\x00"):
-                        target[field] = value
-                targets.append(target)
+                # Configuration only enables the provider. It is not evidence
+                # that either permitted model is currently available upstream.
+                targets.append({"name": DISPATCH_PROVIDER, "kind": "provider"})
+                break
         storage = raw.get("storage") if isinstance(raw.get("storage"), dict) else raw
         state_dir = self.env.get("DEVSPACE_STATE_DIR", storage.get("stateDir", str(self.home / ".local" / "share" / "devspace")))
         if not isinstance(state_dir, str):
@@ -403,6 +408,7 @@ class DevSpaceConsole:
                 "configured": cfg["configured"], "configPath": str(cfg["path"]),
                 "allowedRoots": [str(p) for p in cfg["allowed"]], "endpoint": cfg["endpoint"],
                 "service": service, "daemon": self._daemon(cfg), "targets": cfg["targets"],
+                "models": [dict(option) for option in MODEL_OPTIONS], "defaultModel": DEFAULT_MODEL,
                 "capabilities": {"perTaskStop": False},
                 "compatibility": {"testedVersion": "1.0.8", "configFormat": cfg["configFormat"],
                                   "historySchema": "local_agent_sessions",
@@ -521,9 +527,11 @@ class DevSpaceConsole:
             return []
         # Selected columns avoid unrelated tables (including OAuth and loaded
         # instruction content). No library import that could migrate the DB.
-        columns = "id, profile_name, provider, status"
+        columns = "id, profile_name, provider, model, status"
+        required = {"id", "workspace_root", "profile_name", "provider", "model", "status", "updated_at"}
         if agent_id:
             columns += ", substr(latest_response, 1, 1048576) AS latest_response, error_code, error_retryable"
+            required.update(("latest_response", "error_code", "error_retryable"))
         query = f"SELECT {columns} FROM local_agent_sessions WHERE workspace_root = ?"
         values = [str(cwd)]
         if agent_id:
@@ -532,6 +540,9 @@ class DevSpaceConsole:
         query += " ORDER BY updated_at DESC LIMIT 200"
         try:
             with contextlib.closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as conn:
+                schema = {row[1] for row in conn.execute("PRAGMA table_info(local_agent_sessions)")}
+                if not required.issubset(schema):
+                    raise _Failure("HISTORY_UNAVAILABLE", "DevSpace 任務紀錄格式不相容，請更新 DevSpace 後再試。")
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(query, values).fetchall()
             return [dict(row) for row in rows if row["provider"] in PROVIDERS
@@ -543,6 +554,10 @@ class DevSpaceConsole:
     def _task(record: dict, *, detail: bool = False) -> dict:
         task = {"id": record["id"], "target": record["profile_name"], "provider": record["provider"],
                 "status": _STATUS.get(record["status"], "failed")}
+        model = record.get("model")
+        if (isinstance(model, str) and 0 < len(model) <= 200
+                and not any(char in model for char in "\r\n\x00")):
+            task["model"] = model
         if detail and task["status"] == "completed" and isinstance(record.get("latest_response"), str):
             task["response"] = record["latest_response"][:1024 * 1024]
         if detail and task["status"] == "failed":
@@ -583,61 +598,77 @@ class DevSpaceConsole:
         return {"ok": True, "cwd": str(cwd), "task": task}
 
     @staticmethod
-    def _prompt_args(body: dict) -> list[str]:
+    def _model(body: dict) -> str:
+        value = body.get("model", DEFAULT_MODEL)
+        if not isinstance(value, str) or value not in MODEL_IDS:
+            raise _Failure("MODEL_NOT_ALLOWED", "請選擇 GPT-5.6 SOL 或 GPT-6 ASTRA。")
+        return value
+
+    @staticmethod
+    def _prompt_args(body: dict, model: str) -> list[str]:
         prompt = body.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 24000 or "\x00" in prompt:
             raise _Failure("INVALID_PROMPT", "請輸入 1 到 24,000 字的任務內容。")
-        args = ["--json"]
-        for key in ("model", "effort"):
-            value = body.get(key)
-            if value is None or value == "":
-                continue
-            if (not isinstance(value, str) or len(value) > 200 or not value.strip()
-                    or value.startswith("-") or any(c in value for c in "\r\n\x00")):
-                raise _Failure("INVALID_OPTIONS", "模型或推理設定無效。")
-            args.extend((f"--{key}", value))
+        if model not in MODEL_IDS:
+            raise _Failure("MODEL_NOT_ALLOWED", "請選擇 GPT-5.6 SOL 或 GPT-6 ASTRA。")
+        # The selected model is always explicit. Configuration defaults cannot
+        # silently reroute a task, and a provider failure is never retried with
+        # the other model.
+        args = ["--model", model, "--json"]
+        effort = body.get("effort")
+        if effort is not None and effort != "":
+            if (not isinstance(effort, str) or len(effort) > 200 or not effort.strip()
+                    or effort.startswith("-") or any(c in effort for c in "\r\n\x00")):
+                raise _Failure("INVALID_OPTIONS", "推理設定無效。")
+            args.extend(("--effort", effort))
         # Prompt is one argv item and follows the option terminator. Shell
         # metacharacters and a prompt containing --model stay ordinary text.
         return args + ["--", prompt]
 
     @staticmethod
-    def _receipt(value) -> dict:
+    def _receipt(value, model: str) -> dict:
         if (not isinstance(value, dict) or not isinstance(value.get("id"), str)
                 or not _ID.fullmatch(value["id"]) or value.get("status") not in set(_STATUS.values())):
             raise _Failure("INVALID_RESPONSE", "DevSpace 未回傳有效的任務識別碼，請重新整理任務清單。")
-        return {"id": value["id"], "status": value["status"]}
+        # This is the submitted selection. Polling history later returns the
+        # model actually recorded by DevSpace for the session.
+        return {"id": value["id"], "status": value["status"], "model": model}
 
     @staticmethod
     def _enabled(target: str, cfg: dict):
-        if target not in PROVIDERS or target not in {t["name"] for t in cfg["targets"]}:
-            raise _Failure("TARGET_NOT_ALLOWED", "請選擇已啟用的 Codex、Claude 或本機代理程式。")
+        if target != DISPATCH_PROVIDER or target not in {t["name"] for t in cfg["targets"]}:
+            raise _Failure("TARGET_NOT_ALLOWED", "只允許使用已啟用的 Codex 代理程式。")
         if not cfg["configured"]:
             raise _Failure("NOT_CONFIGURED", "請先執行 devspace init，完成本機設定。")
 
     @_guard
     def run(self, body: dict) -> dict:
-        cfg = self._config()
-        cwd = self._cwd(self._body(body), cfg)
+        body = self._body(body)
         target = body.get("target")
-        if not isinstance(target, str):
-            raise _Failure("TARGET_NOT_ALLOWED", "請選擇已啟用的代理程式。")
+        if target != DISPATCH_PROVIDER:
+            raise _Failure("TARGET_NOT_ALLOWED", "只允許使用已啟用的 Codex 代理程式。")
+        model = self._model(body)
+        cfg = self._config()
+        cwd = self._cwd(body, cfg)
         self._enabled(target, cfg)
         catalog = self._json(["agents", "targets", "--json"], cwd=cwd, timeout=10)
         entries = catalog.get("targets", []) if isinstance(catalog, dict) else []
         if any(isinstance(t, dict) and t.get("name") == target and t.get("kind") == "profile" for t in entries):
             raise _Failure("TARGET_SHADOWED", "專案的同名代理設定覆蓋了此提供者，請先更改代理設定名稱。")
         if not any(isinstance(t, dict) and t.get("name") == target and t.get("kind") == "provider" for t in entries):
-            raise _Failure("TARGET_UNAVAILABLE", "此代理程式目前無法使用，請先完成安裝與登入。")
-        value = self._json(["agents", "run", target] + self._prompt_args(body), cwd=cwd, timeout=40)
-        return {"ok": True, "cwd": str(cwd), "task": self._receipt(value)}
+            raise _Failure("TARGET_UNAVAILABLE", "Codex 目前無法使用，請先完成安裝與登入。")
+        value = self._json(["agents", "run", target] + self._prompt_args(body, model), cwd=cwd, timeout=40)
+        return {"ok": True, "cwd": str(cwd), "task": self._receipt(value, model)}
 
     @_guard
     def continue_task(self, body: dict) -> dict:
+        body = self._body(body)
+        model = self._model(body)
         cfg = self._config()
-        cwd = self._cwd(self._body(body), cfg)
+        cwd = self._cwd(body, cfg)
         record = self._find(body, cfg, cwd)
         self._enabled(record["provider"], cfg)
         if record["status"] in ("starting", "running"):
             raise _Failure("TASK_RUNNING", "這個任務仍在執行，完成後才能接續。")
-        value = self._json(["agents", "continue", record["id"]] + self._prompt_args(body), cwd=cwd, timeout=40)
-        return {"ok": True, "cwd": str(cwd), "task": self._receipt(value)}
+        value = self._json(["agents", "continue", record["id"]] + self._prompt_args(body, model), cwd=cwd, timeout=40)
+        return {"ok": True, "cwd": str(cwd), "task": self._receipt(value, model)}
