@@ -9,6 +9,7 @@ describe('unified ChatGPT workbench route', () => {
   it('keeps explicit conversation workbenches and rejects unknown values', () => {
     expect(initialWorkbenchView('?view=devspace')).toBe('devspace')
     expect(initialWorkbenchView('?view=opencode')).toBe('opencode')
+    expect(initialWorkbenchView('?view=mindmap')).toBe('mindmap')
     expect(initialWorkbenchView('?view=unknown')).toBe('list')
     expect(isConversationWorkbench('devspace')).toBe(true)
     expect(isConversationWorkbench('opencode')).toBe(true)

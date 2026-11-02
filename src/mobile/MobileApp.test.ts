@@ -107,9 +107,41 @@ describe('legacy record controls', () => {
     expect(result.posted).toBe(false)
     expect(fetcher).not.toHaveBeenCalled()
   })
+
+  it('treats a lost stop response as unknown and does not resend', async () => {
+    const fetcher = vi.fn().mockRejectedValue(new TypeError('connection lost'))
+    const result = await attemptControl('stop', record, { fetch: fetcher as unknown as typeof fetch, confirm: () => true })
+    expect(result).toMatchObject({ posted: true, ok: false, uncertain: true })
+    expect(result.message).toContain('操作結果未知')
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps an explicit 409 rejection distinct from an unknown receipt', async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response('{"ok":false,"error":"not running"}', { status: 409 }))
+    const result = await attemptControl('cancel', record, { fetch: fetcher as unknown as typeof fetch })
+    expect(result).toMatchObject({ posted: true, ok: false, uncertain: false, message: 'not running' })
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([409, 503])('keeps cancellation receipt %s unknown without retry', async status => {
+    const fetcher = vi.fn().mockResolvedValue(new Response('{"ok":false,"code":"CANCELLATION_RESULT_UNKNOWN"}', { status }))
+    const result = await attemptControl('cancel', record, { fetch: fetcher as unknown as typeof fetch })
+    expect(result).toMatchObject({ posted: true, ok: false, uncertain: true })
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('mobile unified ChatGPT UI', () => {
+  it('shows pending cancellation as unconfirmed and disables new drafts', () => {
+    const html = renderToStaticMarkup(createElement(MobileApp, {
+      initialPaired: true,
+      initialDispatches: [{ ...record, state: 'cancelled', cancelOrderPending: true }],
+    }))
+    expect(html).toContain('取消結果待確認')
+    expect(html).not.toContain('已取消')
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>在 ChatGPT 對話重做<\/button>/)
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>在 ChatGPT 對話續作<\/button>/)
+  })
   it('renders copy-and-open preparation with project and model selection', () => {
     const html = renderToStaticMarkup(createElement(MobileApp, {
       initialPaired: true,
@@ -138,8 +170,9 @@ describe('mobile unified ChatGPT UI', () => {
   })
 
   it('keeps authenticated polling read-only and preserves stop/cancel endpoints', () => {
-    expect(src).toContain("fetch('/api/dispatches')")
-    expect(src).toContain('`/api/dispatch/${action}`')
+    expect(src).toContain('createSnapshotFetch(pairing')
+    expect(src).toContain("})('/api/dispatches', { signal })")
+    expect(src).toContain('requestControlReceipt(deps.fetch, action, record.id)')
     expect(src).toContain("action === 'retry' || action === 'followup'")
   })
 })

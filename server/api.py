@@ -17,6 +17,7 @@ import contextlib
 import base64
 import binascii
 import datetime as _dt
+import email.utils
 import hashlib
 import io
 import json
@@ -43,6 +44,28 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 
 APP_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _health_identity_at_start() -> dict:
+    """Identify the code loaded at startup, not a later mutable disk readback."""
+    root = os.path.normcase(os.path.realpath(str(APP_ROOT)))
+    try:
+        package = json.loads((APP_ROOT / "package.json").read_text(encoding="utf-8"))
+        version = package.get("version") if isinstance(package, dict) else None
+        if not isinstance(version, str) or not version.strip():
+            version = None
+    except (OSError, ValueError, UnicodeError):
+        version = None
+    try:
+        code_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except OSError:
+        code_hash = None
+    return {"service": "ai-console", "version": version,
+            "appRootHash": hashlib.sha256(root.encode("utf-8")).hexdigest(),
+            "serverCodeSha256": code_hash}
+
+
+_HEALTH_IDENTITY = _health_identity_at_start()
 
 # 機器專屬設定（server/config.json，可被打包版指向工作區的即時資料）
 _CFG = {}
@@ -3968,6 +3991,36 @@ def enrich_reset_times(data: dict) -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _drain_small_rejected_post(self):
+        """Bound the drain of a rejected POST so Windows can deliver its 4xx."""
+        if getattr(self, "command", "") != "POST":
+            return
+        self.close_connection = True
+        headers = self.headers
+        lengths = headers.get_all("Content-Length", []) if hasattr(headers, "get_all") else [headers.get("Content-Length")]
+        if (len(lengths) != 1 or not isinstance(lengths[0], str) or len(lengths[0]) > 5
+                or not lengths[0].isdigit() or headers.get("Transfer-Encoding")):
+            return
+        size = int(lengths[0])
+        connection = getattr(self, "connection", None)
+        if not 0 < size <= 4096 or connection is None:
+            return
+        previous_timeout = None
+        timeout_read = False
+        try:
+            previous_timeout = connection.gettimeout()
+            timeout_read = True
+            connection.settimeout(0.5)
+            self.rfile.read(size)
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                if timeout_read:
+                    connection.settimeout(previous_timeout)
+            except OSError:
+                pass
+
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
@@ -4010,7 +4063,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/api/health":
-            return self._json({"ok": True, "ts": time.time()})
+            return self._json({"ok": True, "ts": time.time(), **_HEALTH_IDENTITY})
         if self.path == '/api/devspace/status':
             return self._devspace_request('status')
         if self.path in {'/api/setup', '/api/ai-connections'}:
@@ -4270,24 +4323,38 @@ class Handler(BaseHTTPRequestHandler):
         # 於是「目前選取的對話」換了身分，正在讀的那份對話跟著被重新抓一次，
         # 畫面還會自動捲回最底 —— 捲上去讀舊訊息的人每 60 秒被打斷一次。
         try:
-            st = f.stat()
-            body = f.read_bytes()
+            # Stat and read the same opened file, including across atomic replace.
+            with f.open("rb") as handle:
+                st = os.fstat(handle.fileno())
+                etag = f'W/"{st.st_mtime_ns:x}-{st.st_size:x}"'
+                last_mod = _dt.datetime.fromtimestamp(
+                    st.st_mtime, _dt.timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+                inm = self.headers.get("If-None-Match")
+                not_modified = False
+                if inm is not None:
+                    # A present ETag condition takes precedence over the date.
+                    opaque = etag.removeprefix("W/")
+                    not_modified = any(tag.strip() == "*" or tag.strip().removeprefix("W/") == opaque
+                                       for tag in inm.split(","))
+                else:
+                    ims = self.headers.get("If-Modified-Since")
+                    if ims:
+                        try:
+                            parsed = email.utils.parsedate_to_datetime(ims)
+                            if parsed.tzinfo is not None:
+                                not_modified = int(st.st_mtime) <= int(parsed.timestamp())
+                        except (ValueError, TypeError, OverflowError):
+                            pass
+                if not_modified:
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.send_header("Last-Modified", last_mod)
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    return
+                body = handle.read()
         except OSError:
             return self._json({"ok": False, "error": "read fail"}, 500)
-        # 用 mtime + 大小組 ETag，不用內容雜湊：這個檔 1.4 MB，
-        # 每次輪詢都算一次 sha 反而把省下來的 I/O 又花回去。
-        etag = f'W/"{int(st.st_mtime)}-{st.st_size}"'
-        last_mod = _dt.datetime.fromtimestamp(
-            st.st_mtime, _dt.timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-
-        if self.headers.get("If-None-Match") == etag \
-                or self.headers.get("If-Modified-Since") == last_mod:
-            self.send_response(304)
-            self.send_header("ETag", etag)
-            self.send_header("Last-Modified", last_mod)
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            return
 
         mime = mimetypes.guess_type(str(f))[0] or "application/octet-stream"
         if f.suffix in (".js", ".mjs"):
@@ -4357,6 +4424,9 @@ class Handler(BaseHTTPRequestHandler):
         return host in allowed_hosts and trusted
 
     def _conversation_route_required(self):
+        # Legacy routes reject before parsing input, but a small already-sent
+        # body still needs bounded draining so the 409 is deliverable on Windows.
+        self._drain_small_rejected_post()
         return self._json({
             'ok': False,
             'code': 'USE_CHATGPT_CONVERSATION',
@@ -4799,17 +4869,25 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-    def _save_registry(self):
+    def _save_registry(self, required=None):
         with self._REG_LOCK:
             try:
                 self.REGISTRY.parent.mkdir(parents=True, exist_ok=True)
                 # 先寫暫存再換掉：中途斷電或同時寫，至少不會留下半個檔案
                 tmp = self.REGISTRY.with_suffix(".tmp")
-                tmp.write_text(json.dumps(self.DISPATCHES[-100:], ensure_ascii=False),
+                records = self.DISPATCHES[-100:]
+                protected = [d for d in self.DISPATCHES[:-100] if d.get("cancelOrderPending")]
+                records = [*protected, *records]
+                if required is not None and not any(d is required for d in records):
+                    if not any(d is required for d in self.DISPATCHES):
+                        return False
+                    records = [required, *records]
+                tmp.write_text(json.dumps(records, ensure_ascii=False),
                                encoding="utf-8")
                 tmp.replace(self.REGISTRY)
+                return True
             except Exception:
-                pass
+                return False
 
     # 刪掉的對話搬到這裡，不是真的抹掉。誤刪救得回來。
     TRASH = Path.home() / ".ai-console" / "trash"
@@ -5509,14 +5587,7 @@ class Handler(BaseHTTPRequestHandler):
     BATCH = {"total": 0, "done": 0, "running": False, "current": "", "note": ""}
 
     def do_dispatch_stop(self):
-        """停掉一件還在跑的無頭派工，並老實記成「已停止」。
-
-        原本沒有這顆按鈕（見 do_dispatch_cancel：中途砍掉正在改檔案的 agent 很危險），
-        結果真的要停的時候使用者只能開工作管理員殺行程 —— 登錄裡沒有任何記號，
-        log 也沒有失敗訊號，被殺掉的那件從此顯示「已完成」。2026-09-03 接力事故
-        就是這樣：六個被殺掉的 agy 全部標成 done／ok。
-        危險還是危險，所以前端要先確認；但停了就要記下來。
-        """
+        """Fail closed when a legacy record cannot identify its original process."""
         body = self._body()
         did = str(body.get("id") or "").strip()
         with self._REG_LOCK:
@@ -5526,15 +5597,15 @@ class Handler(BaseHTTPRequestHandler):
             if not rec:
                 return self._json({"ok": False, "error": "找不到這筆派工"}, 404)
             if rec.get("stopped"):
-                return self._json({"ok": True, "id": did, "already": True,
-                                   "note": "這件先前已經停過了"})
-            pid = int(rec.get("pid") or 0)
-            if not pid or pid not in _alive_pids({pid}):
-                return self._json({"ok": False, "error": "這件已經不在跑了，沒有東西可以停"}, 409)
-            _kill_tree(pid)
-            rec["stopped"] = time.strftime("%Y%m%d-%H%M%S")
-            self._save_registry()
-        return self._json({"ok": True, "id": did})
+                return self._json({"ok": False, "id": did, "code": "STOP_IDENTITY_UNKNOWN",
+                                   "error": "舊紀錄曾標記停止，但無法確認原程序是否已結束。"}, 409)
+            # Legacy records contain only a PID and a seconds-resolution request
+            # timestamp, not an OS process identity captured at creation.  A
+            # recycled PID can have the same timestamp, and checking then killing
+            # by PID has a second reuse race.  Never signal without a bound handle
+            # and a previously captured exact process identity.
+            return self._json({"ok": False, "code": "STOP_IDENTITY_UNKNOWN",
+                               "error": "舊派工沒有可核實的程序身分，無法安全停止。"}, 409)
 
     def do_dispatch_cancel(self):
         """取消一件還沒被按下去的終端派工。
@@ -5566,6 +5637,9 @@ class Handler(BaseHTTPRequestHandler):
             alive = bool(rec.get("pid")) and int(rec["pid"]) in _alive_pids({int(rec["pid"])})
             state = self._dispatch_state(dict(rec), alive)
             if state == "cancelled":
+                if rec.get("cancelOrderPending"):
+                    return self._json({"ok": False, "code": "CANCELLATION_RESULT_UNKNOWN",
+                                       "error": "取消或工單更新尚未確認，請檢查原終端及登錄；不要重送。"}, 409)
                 return self._json({"ok": True, "id": did, "already": True,
                                    "note": "這件先前已經取消過了"})
             if state != "waiting":
@@ -5573,7 +5647,16 @@ class Handler(BaseHTTPRequestHandler):
                                    f"只有『等你執行』的派工可以取消，這件現在是「{state}」"},
                                   409)
             rec["cancelled"] = time.strftime("%Y%m%d-%H%M%S")
-            self._save_registry()
+            # Persist the safety barrier before touching the terminal's order.
+            # Its presence after a crash also prevents a false "already" result.
+            rec["cancelOrderPending"] = True
+            try:
+                saved = self._save_registry(required=rec) is True
+            except Exception:
+                saved = False
+            if not saved:
+                return self._json({"ok": False, "code": "CANCELLATION_RESULT_UNKNOWN",
+                                   "error": "取消登錄未確認；工單未改寫，請檢查原終端，勿重送。"}, 503)
 
         # 工單檔換成取消通知。寫不進去不算失敗（登錄已經標記了），
         # 但一定要讓使用者知道那個視窗還是危險的。
@@ -5586,11 +5669,24 @@ class Handler(BaseHTTPRequestHandler):
                     "不要執行任何動作、不要修改任何檔案、不要回報進度。\n"
                     "如果你正在讀這份檔案，請直接結束並回覆一句「已取消」。\n",
                     encoding="utf-8")
+                with self._REG_LOCK:
+                    rec.pop("cancelOrderPending", None)
+                    try:
+                        saved = self._save_registry(required=rec) is True
+                    except Exception:
+                        saved = False
+                    if not saved:
+                        rec["cancelOrderPending"] = True
+                        return self._json({"ok": False, "code": "CANCELLATION_RESULT_UNKNOWN",
+                                           "error": "工單已改寫，但取消登錄的最終狀態未確認；勿重送。"}, 503)
             else:
                 note = "工單檔已經不在了；那個終端視窗如果還開著，請直接關掉"
         except OSError as e:
             note = f"工單檔改不動（{e}）；請直接把那個終端視窗關掉"
-        return self._json({"ok": True, "id": did, "note": note})
+        if note:
+            return self._json({"ok": False, "id": did, "code": "CANCELLATION_RESULT_UNKNOWN",
+                               "error": note}, 409)
+        return self._json({"ok": True, "id": did, "note": ""})
 
     def do_dispatch_retry(self):
         """把某一筆派工原封不動再派一次。
@@ -6276,6 +6372,11 @@ class Handler(BaseHTTPRequestHandler):
             self._load_registry()
         out = []
         recent = [dict(d) for d in reversed(self.DISPATCHES[-30:])]
+        # Older pending cancellations need a read-only reconciliation signal,
+        # without exposing their original order text or local paths.
+        older_pending = [{"id": d.get("id"), "state": "unknown", "cancelOrderPending": True}
+                         for d in reversed(self.DISPATCHES[:-30])
+                         if d.get("cancelOrderPending") is True]
         # 一次把所有 pid 問完。原本是每一筆各叫一次 tasklist，
         # 一次輪詢就開好幾個子行程；這個端點每 8 秒被打一次，
         # 在 Windows 上等於持續閃視窗、持續搶焦點。
@@ -6287,6 +6388,11 @@ class Handler(BaseHTTPRequestHandler):
                           and not _recycled(int(d["pid"]), d.get("started", ""),
                                             force=bool(d.get("stopped"))))
             d["state"] = self._dispatch_state(d, d["alive"])
+            if d.get("cancelOrderPending") is True:
+                d["state"] = "unknown"
+                d.pop("cancelled", None)
+                d.pop("outcome", None)
+                d.pop("issue", None)
             log = Path(d.get("log", ""))
             if log.exists():
                 # 只讀尾端。這個端點每 8 秒被打一次、兩個分頁都在打，
@@ -6321,7 +6427,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 「視窗開好了」—— 那是兩件完全不同的事。
                 # _dispatch_state 本來就判得對（waiting／等你執行），
                 # 是後加的 outcome 把它輾過去了。
-                if d["state"] in ("running", "waiting"):
+                if d["state"] in ("running", "waiting", "unknown"):
                     d["outcome"], d["issue"] = None, ""
                 elif d["state"] == "stopped":
                     d["outcome"], d["issue"] = "stopped", "使用者停止了它，沒有跑完"
@@ -6337,7 +6443,7 @@ class Handler(BaseHTTPRequestHandler):
             out.append(d)
         # GET is strictly observational. It must never flush queued text, retry work, start a
         # subprocess, or auto-hand off to another tool merely because a desktop/mobile view polls.
-        return self._json({"ok": True, "dispatches": out})
+        return self._json({"ok": True, "dispatches": out + older_pending})
 
 
 # ── 手機遙控 ─────────────────────────────────────────────
@@ -6506,6 +6612,10 @@ class RemoteHandler(Handler):
         given = auth[7:].strip() if auth.startswith("Bearer ") else ""
         return bool(token) and bool(given) and hmac.compare_digest(given, token)
 
+    def _remote_reject(self, payload: dict, code: int):
+        self._drain_small_rejected_post()
+        return self._json(payload, code)
+
     def _remote_gate(self, method: str) -> bool:
         path = self.path.split("?", 1)[0]
         if method == "GET" and (path == "/api/health" or _remote_static_relative(path) is not None):
@@ -6513,15 +6623,15 @@ class RemoteHandler(Handler):
         ip = str(self.client_address[0]) if self.client_address else ""
         now = time.time()
         if _auth_blocked(ip, now):
-            self._json({"ok": False, "error": "錯太多次 token，十分鐘後再試"}, 429)
+            self._remote_reject({"ok": False, "error": "錯太多次 token，十分鐘後再試"}, 429)
             return False
         if not self._remote_ok():
             _auth_failed(ip, now)
-            self._json({"ok": False, "error": "需要配對 token：用桌面版的「📱 手機遙控」重新掃 QR"}, 401)
+            self._remote_reject({"ok": False, "error": "需要配對 token：用桌面版的「📱 手機遙控」重新掃 QR"}, 401)
             return False
         allowed = REMOTE_ALLOWED_GET if method == "GET" else REMOTE_ALLOWED_POST
         if path not in allowed:
-            self._json({"ok": False, "error": "遙控模式不開放這個路徑"}, 403)
+            self._remote_reject({"ok": False, "error": "遙控模式不開放這個路徑"}, 403)
             return False
         return True
 
@@ -6574,20 +6684,39 @@ class SingleInstanceServer(ThreadingHTTPServer):
     allow_reuse_address = False
 
 
-def already_running() -> bool:
-    """已經有一個實例在服務就不要再起一個"""
+def _existing_server_status() -> str:
+    """Return same / absent / unknown; an unrelated HTTP 200 is not identity."""
     try:
-        import urllib.request
         with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/health", timeout=2) as r:
-            return r.status == 200
+            if r.status != 200:
+                return "unknown"
+            data = json.loads(r.read(4097))
+            fields = ("service", "version", "appRootHash", "serverCodeSha256")
+            if (isinstance(data, dict) and data.get("ok") is True
+                    and all(_HEALTH_IDENTITY.get(k) and data.get(k) == _HEALTH_IDENTITY[k] for k in fields)):
+                return "same"
+            return "unknown"
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, ConnectionRefusedError) or getattr(reason, "winerror", None) == 10061:
+            return "absent"
+        return "unknown"
     except Exception:
-        return False
+        return "unknown"
+
+
+def already_running() -> bool:
+    return _existing_server_status() == "same"
 
 
 if __name__ == "__main__":
-    if already_running():
+    existing = _existing_server_status()
+    if existing == "same":
         print(f"AI 控制台 API 已經在 http://127.0.0.1:{PORT} 執行，這次不重複啟動", flush=True)
         sys.exit(0)
+    if existing != "absent":
+        print(f"無法確認 {PORT} 埠的服務身分；未連接、未終止其他程序。", flush=True)
+        sys.exit(1)
     try:
         srv = SingleInstanceServer(("127.0.0.1", PORT), Handler)
     except OSError as e:

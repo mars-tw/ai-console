@@ -1,8 +1,12 @@
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { runInNewContext } from 'node:vm'
 import { describe, expect, it, vi } from 'vitest'
 
 const APP_URL = 'http://127.0.0.1:5177/'
+const { trustedSender } = createRequire(import.meta.url)('../../electron/startup.cjs') as {
+  trustedSender: (event: unknown, win: unknown, url: string) => boolean
+}
 type Frame = { url: string }
 type SetupEvent = { sender: object; senderFrame: Frame }
 type SetupHandler = (event: SetupEvent) => Promise<string | null>
@@ -14,7 +18,7 @@ function setupHarness(url = APP_URL) {
   if (!wireSetup) throw new Error('Cannot locate the production setup IPC handler')
   const mainFrame = { url }
   const webContents = { mainFrame }
-  const window = { webContents }
+  const window = { webContents, isDestroyed: () => false }
   const showOpenDialog = vi.fn(async () => ({ canceled: false, filePaths: ['fixture-directory'] }))
   let handler: SetupHandler | undefined
   const register = vi.fn((channel: string, callback: SetupHandler) => {
@@ -22,7 +26,7 @@ function setupHarness(url = APP_URL) {
     handler = callback
   })
   runInNewContext(`${wireSetup}\nwireSetup()`, {
-    URL, APP_URL, win: window, ipcMain: { handle: register }, dialog: { showOpenDialog },
+    URL, APP_URL, win: window, trustedSender, ipcMain: { handle: register }, dialog: { showOpenDialog },
   }, { timeout: 1000 })
   expect(register).toHaveBeenCalledTimes(1)
   if (!handler) throw new Error('Production setup handler was not registered')

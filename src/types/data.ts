@@ -126,7 +126,9 @@ export interface DispatchRecord {
    * 原本只有 alive 一個布林值，畫面只分得出「執行中」跟「不是執行中」，
    * 於是跑完的、失敗的、還沒按下去的全部長一樣。
    */
-  state?: 'running' | 'waiting' | 'done' | 'failed' | 'silent' | 'cancelled' | 'stopped'
+  state?: 'running' | 'waiting' | 'done' | 'failed' | 'silent' | 'cancelled' | 'stopped' | 'unknown'
+  /** 取消記錄或原工單的更新尚未確認。 */
+  cancelOrderPending?: boolean
   result?: string
   reply?: string
   /** 執行中的最後一行輸出。看得到它在變，才知道還活著 */

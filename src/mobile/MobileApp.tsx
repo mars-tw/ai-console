@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- transport helpers have focused node tests */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { t } from '@/i18n'
+import { getLang, t, useLang } from '@/i18n'
 import QuotaStrip from '@/components/QuotaStrip'
 import {
   canDispatch,
@@ -21,7 +21,10 @@ import {
   type DevSpaceModel,
 } from '@/lib/devspace'
 import { isLive, look, stateOf } from '@/lib/dispatchState'
+import { validateDispatchSnapshot } from '@/lib/dispatchSnapshot'
 import type { DispatchRecord } from '@/types/data'
+import { createDispatchPuller } from './dispatchPull'
+import { requestControlReceipt } from '@/lib/controlReceipt'
 import {
   capturePairing,
   clearRemoteToken,
@@ -194,7 +197,12 @@ export interface ControlAttempt {
   stale: boolean
   message: string
   snapshot: ReadinessSnapshot | null
+  uncertain?: boolean
 }
+
+const CONTROL_UNKNOWN_NOTE = () => getLang() === 'en'
+  ? 'The result is unknown. Check the job status before trying again.'
+  : '操作結果未知，請先查看該工作狀態，再決定是否重試。'
 
 /** Only stopping/cancelling an already-existing legacy job may mutate server state. */
 export async function attemptControl(
@@ -214,24 +222,22 @@ export async function attemptControl(
   if (action === 'stop' && deps.confirm && !deps.confirm(t('確定要停止這件舊派工嗎？'))) return base
   if (!alive()) return { ...base, stale: true }
   try {
-    const response = await deps.fetch(`/api/dispatch/${action}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: record.id }),
-    })
-    const data = await response.json().catch(() => null) as Record<string, unknown> | null
-    if (!alive()) return { posted: true, ok: false, stale: true, message: '', snapshot: null }
+    const { response, body } = await requestControlReceipt(deps.fetch, action, record.id)
+    const data = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : null
+    if (!alive()) return { posted: true, ok: false, stale: true, uncertain: true, message: '', snapshot: null }
     const ok = response.ok && data?.ok === true
+    const rejected = [400, 401, 403, 404, 409, 422].includes(response.status) && data?.ok === false && data?.code !== 'CANCELLATION_RESULT_UNKNOWN'
     return {
       posted: true,
       ok,
       stale: false,
       snapshot: null,
-      message: ok ? publicText(data?.note) : publicText(data?.error) || t(action === 'stop' ? '停止失敗' : '取消失敗'),
+      uncertain: !ok && !rejected,
+      message: ok ? publicText(data?.note) : rejected ? publicText(data?.error) || t(action === 'stop' ? '停止失敗' : '取消失敗') : CONTROL_UNKNOWN_NOTE(),
     }
   } catch (error) {
     if (isStalePairingError(error)) return { ...base, stale: true }
-    return { posted: true, ok: false, stale: false, snapshot: null, message: t(action === 'stop' ? '停止失敗' : '取消失敗') }
+    return { posted: true, ok: false, stale: false, uncertain: true, snapshot: null, message: CONTROL_UNKNOWN_NOTE() }
   }
 }
 
@@ -242,6 +248,7 @@ async function openChatGPTWindow(): Promise<void> {
 }
 
 export default function MobileApp({ initialToken, initialPaired, initialDispatches }: MobileAppProps) {
+  const lang = useLang()
   const [paired, setPaired] = useState(initialPaired === true)
   const startupToken = useRef<string | null>(null)
   const pairingAttempt = useRef(0)
@@ -255,28 +262,40 @@ export default function MobileApp({ initialToken, initialPaired, initialDispatch
   const [model, setModel] = useState<DevSpaceModel>(readDevSpaceModel)
   const [notice, setNotice] = useState<{ message: string; ok: boolean } | null>(null)
   const [busy, setBusy] = useState('')
+  const [unknownControls, setUnknownControls] = useState<Record<string, boolean>>({})
+  const controlLock = useRef(false)
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null)
   const [logTextMap, setLogTextMap] = useState<Record<string, string>>({})
   const [replyingId, setReplyingId] = useState<string | null>(null)
   const [replyText, setReplyText] = useState('')
   const mounted = useRef(true)
+  const dispatchPuller = useRef<{ pull: () => Promise<void>; cancel: () => void } | null>(null)
 
   const isCurrent = (epoch: number) => mounted.current && epoch === pairingAttempt.current
   const beginIntent = (): PairingSnapshot => capturePairing(pairingAttempt.current)
   const intentAlive = (intent: PairingSnapshot) => isCurrent(intent.epoch) && isPairingIntact(intent, pairingAttempt.current)
   const intentFetch = (intent: PairingSnapshot): typeof fetch => createSnapshotFetch(intent, { fetch, isCurrent: () => intentAlive(intent) })
 
+  const cancelDispatchPull = useCallback(() => dispatchPuller.current?.cancel(), [])
   const pullDispatches = useCallback(async () => {
-    try {
-      const response = await fetch('/api/dispatches')
-      if (response.status === 401) return
-      if (!response.ok) { setConnected(false); return }
-      const data = await response.json()
-      if (Array.isArray(data?.dispatches)) {
-        setDispatches(data.dispatches)
-        setConnected(true)
-      }
-    } catch { setConnected(false) }
+    if (!dispatchPuller.current) {
+      dispatchPuller.current = createDispatchPuller<ConsoleDispatch>({
+        capture: () => capturePairing(pairingAttempt.current),
+        isCurrent: (pairing) => mounted.current && isPairingIntact(pairing, pairingAttempt.current),
+        request: (pairing, signal) => createSnapshotFetch(pairing, {
+          fetch,
+          isCurrent: () => mounted.current && isPairingIntact(pairing, pairingAttempt.current),
+        })('/api/dispatches', { signal }),
+        onData: (records) => {
+          const valid = validateDispatchSnapshot(records)
+          if (!valid) { setConnected(false); return }
+          setDispatches(valid as ConsoleDispatch[])
+          setConnected(true)
+        },
+        onFailure: () => setConnected(false),
+      })
+    }
+    await dispatchPuller.current.pull()
   }, [])
 
   useEffect(() => {
@@ -307,16 +326,26 @@ export default function MobileApp({ initialToken, initialPaired, initialDispatch
     const handlePairingLink = () => {
       const next = tokenFromHash()?.trim()
       if (!next) return
+      cancelDispatchPull()
       startupToken.current = next
       setPaired(false)
       setConnected(false)
+      setDispatches([])
+      setExpandedLogId(null)
+      setLogTextMap({})
+      setReplyingId(null)
       validateCandidate(next)
     }
     const handleUnauthorized = () => {
       pairingAttempt.current += 1
+      cancelDispatchPull()
       clearRemoteToken()
       setPaired(false)
       setConnected(false)
+      setDispatches([])
+      setExpandedLogId(null)
+      setLogTextMap({})
+      setReplyingId(null)
       setPairError(t('配對已失效，請重新掃 QR 或輸入新的 Token'))
     }
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/m/sw.js').catch(() => {})
@@ -325,21 +354,24 @@ export default function MobileApp({ initialToken, initialPaired, initialDispatch
     return () => {
       cancelled = true
       mounted.current = false
+      cancelDispatchPull()
       window.removeEventListener('ac_remote_unauthorized', handleUnauthorized)
       window.removeEventListener('hashchange', handlePairingLink)
     }
-  }, [initialPaired, initialToken])
+  }, [cancelDispatchPull, initialPaired, initialToken])
 
   useEffect(() => {
     if (!paired) return
     void pullDispatches()
     const timer = setInterval(() => void pullDispatches(), 8000)
-    return () => clearInterval(timer)
-  }, [paired, pullDispatches])
+    return () => { clearInterval(timer); cancelDispatchPull() }
+  }, [paired, pullDispatches, cancelDispatchPull])
 
   const handleConnect = async () => {
     const candidate = tokenInput.trim()
     if (!candidate || connecting) return
+    cancelDispatchPull()
+    setDispatches([])
     const attempt = ++pairingAttempt.current
     setConnecting(true)
     setPairError('')
@@ -358,9 +390,14 @@ export default function MobileApp({ initialToken, initialPaired, initialDispatch
   const handleUnpair = () => {
     if (!window.confirm(t('確定要解除配對並清除 Token 嗎？'))) return
     pairingAttempt.current += 1
+    cancelDispatchPull()
     clearRemoteToken()
     setPaired(false)
     setConnected(false)
+    setDispatches([])
+    setExpandedLogId(null)
+    setLogTextMap({})
+    setReplyingId(null)
     setPairError('')
   }
 
@@ -390,6 +427,7 @@ export default function MobileApp({ initialToken, initialPaired, initialDispatch
   }
 
   const prepareRecord = (record: ConsoleDispatch, followup = '') => {
+    if (record.cancelOrderPending || unknownControls[record.id]) return
     const extra = followup.trim()
     const task = extra
       ? `請根據舊工作與目前補充繼續處理。\n\n【舊工作】\n${record.task}\n\n【本次補充】\n${extra}`
@@ -409,18 +447,25 @@ export default function MobileApp({ initialToken, initialPaired, initialDispatch
   }
 
   const runControl = async (action: 'stop' | 'cancel', record: ConsoleDispatch) => {
+    if (controlLock.current || unknownControls[record.id]) return
     const intent = beginIntent()
     if (!intentAlive(intent)) { setNotice({ ok: false, message: STALE_PAIRING_NOTE() }); return }
+    controlLock.current = true
     setBusy(`${action}:${record.id}`)
-    const result = await attemptControl(action, record, {
-      fetch: intentFetch(intent),
-      isCurrent: () => intentAlive(intent),
-      confirm: message => window.confirm(message),
-    })
-    if (mounted.current && intentAlive(intent)) {
-      setNotice({ ok: result.ok, message: result.message || (result.ok ? t('操作完成') : t('操作未完成')) })
-      if (result.ok) void pullDispatches()
-      setBusy('')
+    try {
+      const result = await attemptControl(action, record, {
+        fetch: intentFetch(intent),
+        isCurrent: () => intentAlive(intent),
+        confirm: message => window.confirm(message),
+      })
+      if (result.uncertain && mounted.current) setUnknownControls((old) => ({ ...old, [record.id]: true }))
+      if (mounted.current && intentAlive(intent)) {
+        setNotice({ ok: result.ok, message: result.message || (result.ok ? t('操作完成') : t('操作未完成')) })
+        if (result.ok) void pullDispatches()
+      }
+    } finally {
+      controlLock.current = false
+      if (mounted.current) setBusy('')
     }
   }
 
@@ -479,17 +524,24 @@ export default function MobileApp({ initialToken, initialPaired, initialDispatch
             const waiting = state === 'waiting'
             const logOpen = expandedLogId === record.id
             return <article key={record.id} className="space-y-2 rounded-xl border border-line bg-panel p-3.5">
-              <div className="flex items-center gap-2 border-b border-line/60 pb-2"><span className="rounded bg-elev px-2 py-0.5 text-xs font-semibold">{record.tool}</span><span className="text-[11px] text-mute3">{startedAgo(record.started)}</span><span className={`ml-auto text-xs ${status.tone}`}>{status.label}</span>{record.outcome && <span className={`text-[11px] ${outcomeTone(record.outcome)}`}>{outcomeLabel(record.outcome)}</span>}</div>
+              <div className="flex items-center gap-2 border-b border-line/60 pb-2"><span className="rounded bg-elev px-2 py-0.5 text-xs font-semibold">{record.tool}</span><span className="text-[11px] text-mute3">{startedAgo(record.started)}</span><span className={`ml-auto text-xs ${status.tone}`}>{state === 'unknown' && lang === 'en' ? 'Unknown' : status.label}</span>{!record.cancelOrderPending && record.outcome && <span className={`text-[11px] ${outcomeTone(record.outcome)}`}>{outcomeLabel(record.outcome)}</span>}</div>
+              {record.cancelOrderPending && <p role="status" className="text-xs text-amber-600">{lang === 'en' ? 'Cancellation is unconfirmed. Check the original terminal and record; do not resend.' : '取消結果待確認，請先核對原終端與登錄；不要重送。'}</p>}
               <p className="text-xs leading-relaxed">{record.task}</p>
               {record.tail && <p className="truncate rounded bg-app px-2 py-1 font-mono text-[11px] text-mute2">{record.tail}</p>}
               <div className="flex flex-wrap gap-2">
-                {running && record.mode !== 'terminal' && <button type="button" className="min-h-[44px] rounded-lg border border-line bg-elev px-3 text-xs" disabled={!!busy} onClick={() => void runControl('stop', record)}>{t('⏹ 停止')}</button>}
-                {waiting && <button type="button" className="min-h-[44px] rounded-lg border border-line bg-elev px-3 text-xs" disabled={!!busy} onClick={() => void runControl('cancel', record)}>{t('✕ 取消')}</button>}
-                <button type="button" className="min-h-[44px] rounded-lg border border-line bg-elev px-3 text-xs" onClick={() => prepareRecord(record)}>{t('在 ChatGPT 對話重做')}</button>
-                {!isLocalAnswerRecord(record) && <button type="button" className="min-h-[44px] rounded-lg border border-line bg-elev px-3 text-xs" onClick={() => { setReplyingId(replyingId === record.id ? null : record.id); setReplyText('') }}>{t('在 ChatGPT 對話續作')}</button>}
+                {running && record.mode !== 'terminal' && <button type="button" className="min-h-[44px] rounded-lg border border-line bg-elev px-3 text-xs" disabled={!!busy || !!unknownControls[record.id]} onClick={() => void runControl('stop', record)}>{t('⏹ 停止')}</button>}
+                {waiting && <button type="button" className="min-h-[44px] rounded-lg border border-line bg-elev px-3 text-xs" disabled={!!busy || !!unknownControls[record.id]} onClick={() => void runControl('cancel', record)}>{t('✕ 取消')}</button>}
+                <button type="button" disabled={!!record.cancelOrderPending || !!unknownControls[record.id]} className="min-h-[44px] rounded-lg border border-line bg-elev px-3 text-xs disabled:opacity-40" title={lang === 'en' ? 'Prepare a new ChatGPT conversation; this does not resume the original CLI session.' : '準備新的 ChatGPT 對話，不會恢復原 CLI 工作階段。'} onClick={() => prepareRecord(record)}>{t('在 ChatGPT 對話重做')}</button>
+                {!isLocalAnswerRecord(record) && <button type="button" disabled={!!record.cancelOrderPending || !!unknownControls[record.id]} className="min-h-[44px] rounded-lg border border-line bg-elev px-3 text-xs disabled:opacity-40" title={lang === 'en' ? 'Prepare a new ChatGPT conversation; this does not resume the original CLI session.' : '準備新的 ChatGPT 對話，不會恢復原 CLI 工作階段。'} onClick={() => { setReplyingId(replyingId === record.id ? null : record.id); setReplyText('') }}>{t('在 ChatGPT 對話續作')}</button>}
                 <button type="button" className="ml-auto min-h-[44px] rounded-lg border border-line bg-elev px-3 text-xs" onClick={() => void toggleLog(record.id)}>{logOpen ? t('收合日誌') : t('查看日誌')}</button>
               </div>
-              {replyingId === record.id && <div className="space-y-2 rounded-lg border border-line2 bg-app p-2.5"><textarea value={replyText} onChange={event => setReplyText(event.target.value)} rows={2} placeholder={t('要帶到新 ChatGPT 對話的補充…')} className="w-full rounded border border-line bg-panel p-2 text-xs" /><button type="button" onClick={() => prepareRecord(record, replyText)} disabled={!replyText.trim() || !!busy} className="min-h-[44px] w-full rounded bg-ink px-3 text-xs text-invink disabled:opacity-40">{t('複製續作指示並開啟 ChatGPT')}</button></div>}
+              {unknownControls[record.id] && <div role="alert" className="rounded border border-amber-400 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
+                <p>{CONTROL_UNKNOWN_NOTE()}</p>
+                <button type="button" className="mt-2 min-h-[44px] rounded border border-current px-3" onClick={() => setUnknownControls((old) => { const next = { ...old }; delete next[record.id]; return next })}>
+                  {lang === 'en' ? 'I checked the job status' : '我已核對工作狀態'}
+                </button>
+              </div>}
+              {replyingId === record.id && <div className="space-y-2 rounded-lg border border-line2 bg-app p-2.5"><textarea value={replyText} onChange={event => setReplyText(event.target.value)} rows={2} placeholder={t('要帶到新 ChatGPT 對話的補充…')} className="w-full rounded border border-line bg-panel p-2 text-xs" /><button type="button" onClick={() => prepareRecord(record, replyText)} disabled={!replyText.trim() || !!busy || !!record.cancelOrderPending || !!unknownControls[record.id]} className="min-h-[44px] w-full rounded bg-ink px-3 text-xs text-invink disabled:opacity-40">{t('複製續作指示並開啟 ChatGPT')}</button></div>}
               {logOpen && <pre className="max-h-60 overflow-y-auto whitespace-pre-wrap break-all rounded-lg border border-line bg-app p-2.5 font-mono text-[11px]">{logTextMap[record.id] ?? t('日誌載入中…')}</pre>}
             </article>
           })}

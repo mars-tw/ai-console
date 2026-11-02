@@ -12,6 +12,7 @@ const path = require('path')
 const fs = require('fs')
 const os = require('os')
 const http = require('http')
+const { expectedIdentity, probeHealth, ensureBackend, trustedSender } = require('./startup.cjs')
 
 // Windows 的通知中心（Action Center）依賴 AppUserModelId 來歸屬與顯示通知。
 // 如果沒有設定，Windows 無法識別發送通知的應用程式身份，導致 Toast 通知被系統靜默丟棄。
@@ -34,50 +35,30 @@ function log(msg) {
 // 與 scripts/dev.mjs 共用同一份，見 scripts/find-python.cjs。
 const { findPython } = require('../scripts/find-python.cjs')
 
-function health() {
-  return new Promise((resolve) => {
-    const req = http.get(`http://127.0.0.1:${PORT}/api/health`, (res) => {
-      res.resume()
-      resolve(res.statusCode === 200)
-    })
-    req.on('error', () => resolve(false))
-    req.setTimeout(2000, () => { req.destroy(); resolve(false) })
-  })
-}
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 async function ensureServer() {
-  if (await health()) {
-    log('伺服器已在執行，沿用它')
-    return true
-  }
-  const py = findPython()
-  log(`啟動伺服器：python=${py}`)
-  log(`             api=${API}  存在=${fs.existsSync(API)}`)
-
-  let child
+  let identity
   try {
-    // stderr 收進日誌：Python 掛掉時才知道為什麼，不然只會看到白視窗
-    child = spawn(py, ['-B', '-X', 'utf8', API], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
-  } catch (e) {
-    log(`spawn 直接拋錯：${e.message}`)
-    return false
+    identity = expectedIdentity(path.join(__dirname, '..'))
+  } catch {
+    log('無法確認本版服務身分')
+    return { ok: false, reason: 'identity' }
   }
-  child.on('error', (e) => log(`spawn 失敗：${e.message}`))
-  child.on('exit', (code, sig) => log(`Python 結束 code=${code} sig=${sig}`))
-  if (child.stderr) child.stderr.on('data', (d) => log(`python stderr: ${String(d).trim().slice(0, 500)}`))
-  child.unref()
-
-  for (let i = 0; i < 60; i++) {
-    await sleep(500)
-    if (await health()) {
-      log(`伺服器就緒（等了 ${((i + 1) * 0.5).toFixed(1)} 秒）`)
-      return true
-    }
-  }
-  log('等了 30 秒伺服器仍未就緒')
-  return false
+  return ensureBackend({
+    probe: (deadline) => probeHealth(http, `http://127.0.0.1:${PORT}/api/health`, identity, deadline),
+    sleep,
+    launch: () => {
+      const py = findPython()
+      log('啟動本版伺服器')
+      const child = spawn(py, ['-B', '-X', 'utf8', API], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+      child.on('error', (e) => log(`spawn 失敗：${e.message}`))
+      child.on('exit', (code, sig) => log(`Python 結束 code=${code} sig=${sig}`))
+      if (child.stderr) child.stderr.on('data', (d) => log(`python stderr: ${String(d).trim().slice(0, 500)}`))
+      child.unref()
+      return child
+    },
+  })
 }
 
 function errorPage(reason) {
@@ -109,6 +90,29 @@ function errorPage(reason) {
 
 let win = null
 let openCode = null
+let quitApproved = false
+let quitCleanupStarted = false
+let quitCleanupDone = false
+
+/** Never terminate an owned live terminal without the user's explicit choice. */
+function confirmOwnedPtyExit() {
+  if (quitApproved) return true
+  let active
+  try { active = ptyMgr.list().filter((session) => !session.exited) } catch { return false }
+  if (!active.length) return true
+  const options = {
+    type: 'warning', buttons: ['取消', '終止並結束'], defaultId: 0, cancelId: 0, noLink: true,
+    title: '仍有互動終端在執行',
+    message: `目前有 ${active.length} 個互動終端仍在執行。`,
+    detail: '結束控制台會終止這些由控制台開啟的終端工作。選擇取消可繼續保留工作。',
+  }
+  try {
+    const choice = win && !win.isDestroyed() ? dialog.showMessageBoxSync(win, options) : dialog.showMessageBoxSync(options)
+    if (choice !== 1) return false
+    quitApproved = true
+    return true
+  } catch { return false }
+}
 
 function openOfficialPage(url) {
   try {
@@ -142,11 +146,7 @@ function wireChatGPT() {
 
 function wireSetup() {
   ipcMain.handle('setup:choose-directory', async (event) => {
-    if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) return null
-    try {
-      const url = new URL(event.senderFrame.url)
-      if (url.origin !== new URL(APP_URL).origin || url.pathname.startsWith('/m')) return null
-    } catch { return null }
+    if (!trustedSender(event, win, APP_URL)) return null
     const choice = await dialog.showOpenDialog(win, {
       title: '選擇資料夾',
       properties: ['openDirectory'],
@@ -225,8 +225,10 @@ function wirePty() {
   const push = (channel) => (id, payload) => {
     if (win && !win.isDestroyed()) win.webContents.send(channel, id, payload)
   }
-  ipcMain.handle('pty:available', () => ptyMgr.available())
-  ipcMain.handle('pty:open', (_e, opts) => {
+  ipcMain.handle('pty:available', (event) => trustedSender(event, win, APP_URL) && ptyMgr.available())
+  ipcMain.handle('pty:open', (event, opts) => {
+    if (!trustedSender(event, win, APP_URL)) return { error: '不允許的來源' }
+    if (quitCleanupStarted || quitCleanupDone) return { error: '控制台正在結束' }
     const o = opts || {}
     return ptyMgr.open(
       { id: String(o.id || ''), tool: String(o.tool || ''), bin: String(o.bin || ''),
@@ -234,11 +236,11 @@ function wirePty() {
       push('pty:data'), push('pty:exit'),
     )
   })
-  ipcMain.handle('pty:write', (_e, id, data) => ptyMgr.write(String(id), String(data)))
-  ipcMain.handle('pty:resize', (_e, id, c, r) => ptyMgr.resize(String(id), +c, +r))
-  ipcMain.handle('pty:close', (_e, id) => ptyMgr.close(String(id)))
-  ipcMain.handle('pty:list', () => ptyMgr.list())
-  ipcMain.handle('pty:backlog', (_e, id) => ptyMgr.backlog(String(id)))
+  ipcMain.handle('pty:write', (event, id, data) => trustedSender(event, win, APP_URL) && ptyMgr.write(String(id), String(data)))
+  ipcMain.handle('pty:resize', (event, id, c, r) => trustedSender(event, win, APP_URL) && ptyMgr.resize(String(id), +c, +r))
+  ipcMain.handle('pty:close', (event, id) => trustedSender(event, win, APP_URL) && ptyMgr.close(String(id)))
+  ipcMain.handle('pty:list', (event) => trustedSender(event, win, APP_URL) ? ptyMgr.list() : [])
+  ipcMain.handle('pty:backlog', (event, id) => trustedSender(event, win, APP_URL) ? ptyMgr.backlog(String(id)) : '')
 
   // 收掉閒置與已結束的。跑一整夜的工作持續有輸出，不會被誤殺。
   setInterval(() => ptyMgr.sweep(), 60_000).unref()
@@ -255,8 +257,9 @@ function wirePty() {
 const activeNotifications = new Set()
 
 function wireNotify() {
-  ipcMain.handle('notify:available', () => Notification.isSupported())
-  ipcMain.handle('notify:send', (_e, opts) => {
+  ipcMain.handle('notify:available', (event) => trustedSender(event, win, APP_URL) && Notification.isSupported())
+  ipcMain.handle('notify:send', (event, opts) => {
+    if (!trustedSender(event, win, APP_URL)) return false
     if (!Notification.isSupported()) return false
     const o = opts || {}
     const title = String(o.title || 'AI 控制台')
@@ -321,6 +324,7 @@ async function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
     },
   })
+  win.on('close', (event) => { if (!confirmOwnedPtyExit()) event.preventDefault() })
 
   // Setup links open in the user's browser, never inside the privileged renderer.
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -335,10 +339,13 @@ async function createWindow() {
     openOfficialPage(url)
   })
 
-  const ok = await ensureServer()
-  if (!ok) {
+  const result = await ensureServer()
+  if (!result.ok) {
     log('改顯示錯誤畫面')
-    win.loadURL(errorPage('嘗試啟動 <code>server/api.py</code> 失敗，或它沒有在 30 秒內就緒。'))
+    const reason = result.reason === 'conflict'
+      ? '本機連接埠已被其他服務或不同版本使用，無法確認服務身分。'
+      : '嘗試啟動本機服務失敗，或它沒有在 30 秒內就緒。'
+    win.loadURL(errorPage(reason))
     return
   }
   // 伺服器剛起來時偶爾第一次連線會被拒，載入失敗就重試幾次
@@ -359,10 +366,9 @@ app.whenReady()
   .then(createWindow)
   .catch((e) => log(`createWindow 例外：${e && e.stack}`))
 
-let quitCleanupStarted = false
-let quitCleanupDone = false
 app.on('before-quit', (event) => {
   if (quitCleanupDone) return
+  if (!confirmOwnedPtyExit()) { event.preventDefault(); return }
   event.preventDefault()
   if (quitCleanupStarted) return
   quitCleanupStarted = true

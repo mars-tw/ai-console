@@ -386,7 +386,10 @@ describe('OpenCode desktop boundaries', () => {
 
   it('waits for OpenCode cleanup once before completing Electron quit', async () => {
     const main = readFileSync(new URL('../../electron/main.cjs', import.meta.url), 'utf8')
-    const cleanup = main.slice(main.indexOf('let quitCleanupStarted = false'), main.indexOf("app.on('window-all-closed'"))
+    const start = main.indexOf("app.on('before-quit'")
+    const end = main.indexOf("app.on('window-all-closed'", start)
+    if (start < 0 || end < 0) throw new Error('Cannot locate the production quit handler')
+    const cleanup = `let quitCleanupStarted = false; let quitCleanupDone = false;\n${main.slice(start, end)}`
     expect(cleanup).not.toBe('')
     let finish: () => void = () => undefined
     const pending = new Promise<void>(resolve => { finish = resolve })
@@ -395,7 +398,7 @@ describe('OpenCode desktop boundaries', () => {
     let beforeQuit: (event: { preventDefault(): void }) => void = () => undefined
     const quit = vi.fn()
     vm.runInNewContext(cleanup, {
-      openCode: { dispose }, ptyMgr: { killAll }, log: vi.fn(),
+      openCode: { dispose }, ptyMgr: { killAll }, log: vi.fn(), confirmOwnedPtyExit: () => true,
       app: { on: (_name: string, handler: typeof beforeQuit) => { beforeQuit = handler }, quit },
     })
     const event = { preventDefault: vi.fn() }

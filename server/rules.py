@@ -373,4 +373,4 @@ def wrap(task: str, tool: str, cfg: dict | None = None) -> tuple[str, list[str]]
     skills = load_skills(dirs, include_defaults=False)
     matched = match_skills(safe, skills)
     pre = preamble(safe, tool, cfg, matched, dirs)
-    return (pre + safe if pre else safe), [s["name"] for s in matched]
+    return ((pre or "【工單】\n") + safe), [s["name"] for s in matched]

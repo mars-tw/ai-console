@@ -583,14 +583,19 @@ class IndexerMetadataTest(unittest.TestCase):
         env["PYTHONPATH"] = str(project) + os.pathsep + env.get("PYTHONPATH", "")
         package = subprocess.run(
             [sys.executable, "-X", "utf8", "-c",
-             "import tools.indexer as m; print(m.__name__)"],
+             "import os,sys; from pathlib import Path; sys.path.insert(0, os.getcwd()); "
+             "import tools.indexer as m; "
+             "assert Path(m.__file__).resolve() == (Path.cwd() / 'tools' / 'indexer.py').resolve(); "
+             "print(m.__name__)"],
             cwd=project, env=env, capture_output=True, text=True,
             timeout=10, check=True)
         self.assertEqual(package.stdout.strip(), "tools.indexer")
 
         direct = subprocess.run(
             [sys.executable, "-X", "utf8", "-c",
-             "import sys; sys.path.insert(0, 'tools'); import indexer as m; print(m.__name__)"],
+             "import sys; from pathlib import Path; sys.path.insert(0, 'tools'); import indexer as m; "
+             "assert Path(m.__file__).resolve() == (Path.cwd() / 'tools' / 'indexer.py').resolve(); "
+             "print(m.__name__)"],
             cwd=project, env=env, capture_output=True, text=True,
             timeout=10, check=True)
         self.assertEqual(direct.stdout.strip(), "indexer")

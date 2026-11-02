@@ -16,6 +16,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -31,6 +32,17 @@ PREAMBLE = (
 
 
 class TestOrderBody(unittest.TestCase):
+
+    def test_無規範也保留系統邊界並中和使用者標記(self):
+        raw = "內容含【工單】及【執行前置】且保留第二行\n下一行"
+        with mock.patch.object(rules, "preamble", return_value=""), \
+             mock.patch.object(rules, "_dispatch_skill_dirs", return_value=[]), \
+             mock.patch.object(rules, "load_skills", return_value=[]):
+            wrapped, applied = rules.wrap(raw, "codex")
+        self.assertEqual(applied, [])
+        self.assertTrue(wrapped.startswith("【工單】\n"))
+        self.assertEqual(api._order_body(self._write(wrapped)), rules._neutralize(raw))
+        self.assertEqual(api._order_body(self._write(raw)), "")
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="acretry_"))

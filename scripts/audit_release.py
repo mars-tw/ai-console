@@ -140,6 +140,8 @@ def audit(path: Path, kind: str, version: str, private_home: str | None = None,
                     'electron/main.cjs', 'scripts/find-python.cjs']
         if tuple(map(int, version.split('.'))) >= (1, 6, 0):
             required += ['electron/opencode.cjs', 'electron/devspace-mcp-bridge.cjs']
+        if tuple(map(int, version.split('.'))) >= (1, 8, 0):
+            required += ['electron/startup.cjs', 'licenses-ai-office-MIT.txt']
         if kind != 'source':
             required += ['dist/index.html', 'dist/m/manifest.webmanifest',
                          'node_modules/node-pty/prebuilds/win32-x64/conpty.node']

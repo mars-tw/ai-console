@@ -231,8 +231,19 @@ class AIConnections:
         self._connections = {}
         self._keys = {}
         self._verified = {}
+        # Only the newest request for the current saved identity can change its
+        # verification badge; older responses must not win a completion race.
+        self._verification_serial = 0
+        self._verification_epochs = {}
         self._load_error = None
         self._load()
+
+    def _next_verification_epoch(self, connection_id):
+        # Caller holds self._lock. Monotonic values also distinguish a deleted
+        # connection from an identical record later recreated with the same ID.
+        self._verification_serial += 1
+        self._verification_epochs[connection_id] = self._verification_serial
+        return self._verification_serial
 
     def _validate(self, payload, require_model=False, create_id=True):
         if not isinstance(payload, dict):
@@ -388,6 +399,7 @@ class AIConnections:
                     self._keys[item["id"]] = key
                 if old != item or key is not None:
                     self._verified.pop(item["id"], None)
+                self._next_verification_epoch(item["id"])
                 self._connections = updated
                 return {"ok": True, "status": "saved", "connection": self._public(item)}
         except ConnectionError as error:
@@ -403,6 +415,7 @@ class AIConnections:
                 self._connections = updated
                 self._keys.pop(item["id"], None)
                 self._verified.pop(item["id"], None)
+                self._verification_epochs.pop(item["id"], None)
                 return {"ok": True, "status": "deleted", "id": item["id"]}
         except ConnectionError as error:
             return error.result()
@@ -484,9 +497,11 @@ class AIConnections:
     def _inference(self, payload, testing):
         item = None
         succeeded = False
+        epoch = None
         try:
             with self._lock:
                 item = self._saved(payload)
+                epoch = self._next_verification_epoch(item["id"])
                 key = self._key(item)
             model = _text(payload.get("model") or item["model"], 256)
             if key and key in model:
@@ -529,8 +544,11 @@ class AIConnections:
                 return {**failure.result(), "content": "", "reasoning": reasoning, "model": model}
             with self._lock:
                 # A late response cannot validate a replaced or deleted connection.
-                if self._connections.get(item["id"]) == item and self._key(item) == key:
-                    self._verified[item["id"]] = model
+                if not (self._verification_epochs.get(item["id"]) == epoch
+                        and self._connections.get(item["id"]) == item and self._key(item) == key):
+                    raise ConnectionError("stale_result", "連線設定或測試狀態已改變，這次回覆不能作為驗證。",
+                                          "請確認目前的連線設定後重新測試。")
+                self._verified[item["id"]] = model
             succeeded = True
             return {"ok": True, "status": "reply_verified", "content": content,
                     "reasoning": reasoning, "model": model}
@@ -540,7 +558,8 @@ class AIConnections:
             # A failed response must not leave an earlier green test badge behind.
             if item is not None:
                 with self._lock:
-                    if self._connections.get(item["id"]) == item and not succeeded:
+                    if (self._verification_epochs.get(item["id"]) == epoch
+                            and self._connections.get(item["id"]) == item and not succeeded):
                         self._verified.pop(item["id"], None)
 
     def test(self, payload):

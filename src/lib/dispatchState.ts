@@ -14,6 +14,7 @@ export type DispatchState = NonNullable<DispatchRecord['state']>
 
 /** 舊資料沒有 state 欄位時的退路，不要讓畫面開天窗 */
 export function stateOf(d: DispatchRecord): DispatchState {
+  if (d.cancelOrderPending) return 'unknown'
   if (d.state) return d.state
   if (d.alive) return 'running'
   return d.result || d.reply ? 'done' : 'waiting'
@@ -32,6 +33,8 @@ interface Look { label: string; dot: string; tone: string }
 /** 狀態 → 文字、圓點顏色、文字顏色 */
 export function look(s: DispatchState): Look {
   switch (s) {
+    case 'unknown':
+      return { label: t('狀態未知'), dot: 'bg-amber-500', tone: 'text-amber-400' }
     case 'running':
       return { label: t('執行中'), dot: 'animate-pulse bg-amber-400', tone: 'text-amber-300' }
     case 'waiting':

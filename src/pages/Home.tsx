@@ -14,6 +14,7 @@ import DevSpaceConsole from '@/components/DevSpaceConsole'
 import OpenCodePanel from '@/components/OpenCodePanel'
 import ConversationSync from '@/components/ConversationSync'
 import Office from '@/components/Office'
+import WorkMindMapView from '@/components/WorkMindMapView'
 import QuickDispatch from '@/components/QuickDispatch'
 import ContinueWorkDialog from '@/components/ContinueWorkDialog'
 import { canOpenContinueWork } from '@/lib/continuationHelp'
@@ -380,7 +381,7 @@ function markHits(text: string, q: string): ReactNode[] {
 }
 
 export default function Home({ onViewChange }: { onViewChange?: (view: WorkbenchView) => void }) {
-  useLang()   // 語言一換就整頁重繪
+  const lang = useLang()   // 語言一換就整頁重繪
   const [index, setIndex] = useState<IndexData | null>(null)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
@@ -1449,6 +1450,7 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
         ['list', t('📋 對話')], ['ask', t('💬 問 AI')], ['console', t('📚 舊派工紀錄')],
         ['devspace', t('💬 ChatGPT 執行')],
         ['opencode', 'OpenCode'],
+        ['mindmap', lang === 'en' ? '🧠 Work mind map' : '🧠 工作心智圖'],
         ['office', t('🎮 辦公室')], ['rpg', t('⚔️ 冒險')],
         ['skills', t('🧩 AI 技能')],
       ] as const).map(([m, label]) => (
@@ -1484,6 +1486,8 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
           <DevSpaceConsole draft={devSpaceDraft} onDraftChange={setDevSpaceDraft} />
         ) : viewMode === 'opencode' ? (
           <OpenCodePanel />
+        ) : viewMode === 'mindmap' ? (
+          <WorkMindMapView tools={liveTools ?? null} projects={null} />
         ) : viewMode === 'office' ? (
           <Office tools={liveTools ?? {}} projects={[]} conversations={[]} onDispatch={openContinueWork} onPrepareConversation={prepareChatGPTConversation} busyId="" />
         ) : viewMode === 'rpg' ? (
@@ -1908,6 +1912,8 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
             <DevSpaceConsole draft={devSpaceDraft} onDraftChange={setDevSpaceDraft} />
           ) : viewMode === 'opencode' ? (
             <OpenCodePanel />
+          ) : viewMode === 'mindmap' ? (
+            <WorkMindMapView tools={liveTools ?? index.tools} projects={index.projects} />
           ) : viewMode === 'office' ? (
             <Office
               tools={liveTools ?? index.tools}

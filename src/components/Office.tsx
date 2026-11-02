@@ -121,7 +121,7 @@ function isAbortError(error: unknown): boolean {
 }
 
 export default function Office({ tools, projects, conversations, onDispatch, onPrepareConversation, busyId }: Props) {
-  useLang()
+  const lang = useLang()
   const tone = useReadable()   // 語言一換就重繪
   const [chatWith, setChatWith] = useState<string | null>(null)
   // 對話存起來。原本只是元件 state —— 關掉對話框或切到別的分頁就全沒了，
@@ -417,7 +417,9 @@ export default function Office({ tools, projects, conversations, onDispatch, onP
           )}
           {dispatches.length > 0 && liveDispatches.length === 0 && (
             <div className="mt-2 text-[11px] text-mute3">
-              {t('目前沒有進行中的派工（最近 {n} 件都結束了）', { n: dispatches.length })}
+              {dispatches.some(d => stateOf(d) === 'unknown')
+                ? (lang === 'en' ? 'No confirmed running dispatches; some statuses are unconfirmed.' : '目前沒有確認執行中的派工；部分狀態尚未確認')
+                : t('目前沒有進行中的派工（最近 {n} 件都結束了）', { n: dispatches.length })}
             </div>
           )}
           {/* 稽核列 */}

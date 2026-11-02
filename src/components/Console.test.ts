@@ -45,7 +45,7 @@ describe('Console unified ChatGPT execution route', () => {
     expect(html).toContain('執行準備與舊派工紀錄')
     expect(html).toContain('修正測試')
     expect(html).toContain('準備 ChatGPT 對話')
-    expect(html).toContain('舊派工紀錄（唯讀）')
+    expect(html).toContain('舊派工紀錄')
     expect(html).not.toContain('全部派出')
     expect(html).not.toContain('分析並排程')
     expect(html).not.toContain('另開終端')
@@ -65,7 +65,7 @@ describe('Console unified ChatGPT execution route', () => {
     expect(src).not.toMatch(/fetch\(['"]\/api\/dispatch['"]/)
     expect(src).toContain("fetch('/api/dispatches'")
     expect(src).toContain("action: 'stop' | 'cancel'")
-    expect(src).toContain('`/api/dispatch/${action}`')
+    expect(src).toContain('requestControlReceipt(fetch, action, record.id)')
   })
 
   it('routes new, retry, follow-up and schedule records into the shared callback', () => {

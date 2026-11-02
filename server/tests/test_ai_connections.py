@@ -431,7 +431,10 @@ class ConnectionsTest(unittest.TestCase):
             return 200, {"choices": [{"message": {"content": "A late response"}}]}
 
         self.connections._transport = transport
-        self.assertTrue(self.connections.test({"id": "fixture"})["ok"])
+        result = self.connections.test({"id": "fixture"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "stale_result")
+        self.assertNotIn("content", result)
         self.assertEqual(self.connections.catalog()["connections"][0]["status"], "saved")
 
     def test_invalid_configuration_inputs_are_structured_errors(self):

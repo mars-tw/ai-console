@@ -1,4 +1,4 @@
-import path from "path"
+import { fileURLToPath } from "node:url"
 import react from "@vitejs/plugin-react"
 // 從 vitest/config 取 defineConfig，不是 vite —— 這樣 test 區塊才有型別，
 // tsc -b 也不會抱怨「UserConfig 上沒有 test 這個屬性」
@@ -20,7 +20,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
   // 目前的測試都是純函式與戰鬥流程，不碰 DOM，用 node 環境最省啟動時間。

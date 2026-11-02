@@ -1,10 +1,10 @@
 # 安裝與執行手冊
 
-適用 AI Console v1.7.0／Windows 64 位元。DevSpace 分頁使用 **ChatGPT「對話」＋ DevSpace MCP**；OpenCode 另有獨立入口。第一次安裝可先看 [快速開始說明](quick-start.md)。
+適用 AI Console v1.8.0／Windows 64 位元。DevSpace 分頁使用 **ChatGPT「對話」＋ DevSpace MCP**；OpenCode 另有獨立入口。第一次安裝可先看 [快速開始說明](quick-start.md)。
 
 ## 1. 下載並開啟控制台
 
-1. 下載 [快速安裝包 v1.7.0](https://github.com/mars-tw/ai-console/releases/download/v1.7.0/ai-console-quick-start-v1.7.0.zip)，完整解壓縮後雙擊 `快速安裝.cmd`；或下載 [Windows 免安裝版 v1.7.0](https://github.com/mars-tw/ai-console/releases/download/v1.7.0/ai-console-win32-x64-v1.7.0.zip)。
+1. 下載 [快速安裝包 v1.8.0](https://github.com/mars-tw/ai-console/releases/download/v1.8.0/ai-console-quick-start-v1.8.0.zip)，完整解壓縮後雙擊 `快速安裝.cmd`；或下載 [Windows 免安裝版 v1.8.0](https://github.com/mars-tw/ai-console/releases/download/v1.8.0/ai-console-win32-x64-v1.8.0.zip)。
 2. 使用快速安裝包時，畫面會顯示下載、SHA256 校驗、解壓縮、檔案複製與驗證、版本指標及捷徑建立進度。控制台驗證完成後，可選 **「現在設定 DevSpace」**，或 **「稍後設定，先開啟控制台」**；未通過檢查前不會顯示完成。
 3. 選擇稍後設定時，本次不檢查或修改既有 DevSpace 設定，既有設定保持不變。只有實際開始設定後取消或發生錯誤，才會顯示「DevSpace 設定未完成」。兩種情況都不會刪除已安裝的控制台；除非使用 `-NoLaunch`，控制台仍會開啟。
 4. 使用免安裝版時，解壓縮整個 ZIP，進入 `AI控制台-win32-x64`，雙擊 `AI控制台.exe`。
@@ -129,7 +129,7 @@ npm.cmd install --global opencode-ai@1.18.31
 | 模型選單沒有 SOL／ASTRA，或回覆失敗 | 檢查使用中的服務、登入帳號、模型權限與用量，保留原錯誤，不自動換模型。 |
 | 複製指示後沒有執行 | 複製只準備文字；還要在已加入 DevSpace 的 ChatGPT 對話貼上並送出。 |
 | 對話說完成，但本機沒有檔案 | 回到同一對話提供具體缺少的路徑，要求讀回確認；不要把文字承諾視為成果。 |
-| OpenCode 顯示找不到 bridge 或 DevSpace | 使用完整的 v1.7.0 包，確認官方 DevSpace 1.0.8、Node.js 與 OpenCode 已安裝，再重新整理狀態。 |
+| OpenCode 顯示找不到 bridge 或 DevSpace | 使用完整的 v1.8.0 包，確認官方 DevSpace 1.0.8、Node.js 與 OpenCode 已安裝，再重新整理狀態。 |
 | OpenCode 首次 MCP 授權逾時 | 授權頁等待最多 150 秒；先停止並重開 OpenCode，再於瀏覽器完成 DevSpace 正常授權。服務停止、bridge 消失或重啟時，工作臺會回到可重試狀態；實際心跳恢復後再重新連接。 |
 | 「停止 MCP」不可用 | 只能停止控制台自行啟動的服務；外部服務請回原啟動工具操作。 |
 
@@ -161,4 +161,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/create-desktop-short
 - [DevSpace 官方專案](https://github.com/Waishnav/devspace)
 - [OpenAI：連接並測試 MCP](https://developers.openai.com/plugins/deploy/connect-chatgpt)
 - [OpenCode 官方網站](https://opencode.ai/zht)
-- [AI Console v1.7.0 下載與版本說明](https://github.com/mars-tw/ai-console/releases/tag/v1.7.0)
+- [AI Console v1.8.0 下載與版本說明](https://github.com/mars-tw/ai-console/releases/tag/v1.8.0)

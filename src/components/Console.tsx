@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { t, useLang } from '@/i18n'
 import { canDispatch, type ReadinessSnapshot } from '@/lib/aiReadiness'
 import { isLive, look, stateOf } from '@/lib/dispatchState'
+import { requestControlReceipt } from '@/lib/controlReceipt'
 import type { DevSpaceConversationPreparation } from '@/lib/devspace'
 import type { DispatchRecord } from '@/types/data'
 
@@ -85,7 +86,7 @@ const button = 'rounded-md border border-line2 px-3 py-2 text-xs hover:bg-elev d
  * batch, retry, follow-up, schedule-run, schedule-save, launch, or terminal-start requests.
  */
 export default function Console({ draft: controlledDraft, onDraftChange, onPrepareConversation }: ConsoleProps) {
-  useLang()
+  const lang = useLang()
   const [ownDraft, setOwnDraft] = useState('')
   const draft = typeof controlledDraft === 'string' ? controlledDraft : ownDraft
   const setDraft = (value: string) => {
@@ -106,6 +107,8 @@ export default function Console({ draft: controlledDraft, onDraftChange, onPrepa
   const [replyTo, setReplyTo] = useState<string | null>(null)
   const [replyText, setReplyText] = useState('')
   const [busy, setBusy] = useState('')
+  const [unknownControls, setUnknownControls] = useState<Record<string, boolean>>({})
+  const controlLock = useRef(false)
   const [openLog, setOpenLog] = useState<string | null>(null)
   const [logs, setLogs] = useState<Record<string, string>>({})
   const [diffFor, setDiffFor] = useState<string | null>(null)
@@ -151,16 +154,20 @@ export default function Console({ draft: controlledDraft, onDraftChange, onPrepa
     })
   }
 
-  const prepareRetry = (record: ConsoleDispatch) => prepare({
+  const prepareRetry = (record: ConsoleDispatch) => {
+    if (record.cancelOrderPending || unknownControls[record.id]) return
+    prepare({
     task: `請重新檢查並完成這項舊工作：\n${record.task}`,
     ...(record.cwd ? { workspace: record.cwd } : {}),
     title: `舊派工 ${record.id}`,
     originalTool: record.tool,
     source: 'legacy-retry',
     context: recordContext(record),
-  })
+    })
+  }
 
   const prepareFollowup = (record: ConsoleDispatch) => {
+    if (record.cancelOrderPending || unknownControls[record.id]) return
     const text = replyText.trim()
     if (!text) return
     prepare({
@@ -181,23 +188,35 @@ export default function Console({ draft: controlledDraft, onDraftChange, onPrepa
   })
 
   const control = async (action: 'stop' | 'cancel', record: ConsoleDispatch) => {
-    if (busy) return
+    if (busy || controlLock.current || unknownControls[record.id]) return
     if (action === 'stop' && !window.confirm(t('確定要停止這件舊派工嗎？'))) return
+    controlLock.current = true
     setBusy(`${action}:${record.id}`)
     setError('')
     try {
-      const response = await fetch(`/api/dispatch/${action}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: record.id }),
-      })
-      const data = await response.json().catch(() => null)
-      if (!response.ok || data?.ok !== true) throw new Error(data?.error || t('操作未完成'))
-      setNotice(data.note || t(action === 'stop' ? '已要求停止舊派工。' : '已取消尚未開始的舊派工。'))
-      pull()
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : t('操作未完成'))
-    } finally { if (mounted.current) setBusy('') }
+      const { response, body } = await requestControlReceipt(fetch, action, record.id)
+      if (!mounted.current) return
+      const data = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : null
+      const accepted = response.ok && data?.ok === true
+      const rejected = [400, 401, 403, 404, 409, 422].includes(response.status) && data?.ok === false && data?.code !== 'CANCELLATION_RESULT_UNKNOWN'
+      if (accepted) {
+        setNotice(typeof data?.note === 'string' ? data.note : t(action === 'stop' ? '已要求停止舊派工。' : '已取消尚未開始的舊派工。'))
+        pull()
+      } else if (rejected) {
+        setError(planReplyMessage(data) || t('操作未完成'))
+      } else {
+        setUnknownControls((old) => ({ ...old, [record.id]: true }))
+        setError(lang === 'en' ? 'The result is unknown. Check the job status before trying again.' : '操作結果未知，請先查看該工作狀態，再決定是否重試。')
+      }
+    } catch {
+      if (mounted.current) {
+        setUnknownControls((old) => ({ ...old, [record.id]: true }))
+        setError(lang === 'en' ? 'The result is unknown. Check the job status before trying again.' : '操作結果未知，請先查看該工作狀態，再決定是否重試。')
+      }
+    } finally {
+      controlLock.current = false
+      if (mounted.current) setBusy('')
+    }
   }
 
   const toggleLog = async (record: ConsoleDispatch) => {
@@ -250,7 +269,7 @@ export default function Console({ draft: controlledDraft, onDraftChange, onPrepa
 
         <div className="rounded-xl border border-line bg-panel p-5 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="font-semibold">{t('舊派工紀錄（唯讀）')}</h2>
+            <h2 className="font-semibold">{t('舊派工紀錄')}</h2>
             <button type="button" className={button} onClick={pull}>{t('重新整理狀態')}</button>
           </div>
           <p className="text-xs leading-5 text-mute2">{t('讀取這份清單不會送出補話、重派或自動接力。只有「停止」與「取消」仍會操作已存在的舊工作。')}</p>
@@ -264,24 +283,31 @@ export default function Console({ draft: controlledDraft, onDraftChange, onPrepa
               <article key={record.id} className="rounded-lg border border-line2 bg-app p-4">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-medium">{record.tool}</span>
-                  <span className={`text-xs ${status.tone}`}>{status.label}</span>
+                  <span className={`text-xs ${status.tone}`}>{state === 'unknown' && lang === 'en' ? 'Unknown' : status.label}</span>
                   <span className="ml-auto font-mono text-[11px] text-mute3">{record.id}</span>
                 </div>
+                {record.cancelOrderPending && <p role="status" className="mt-2 text-xs text-amber-600">{lang === 'en' ? 'Cancellation is unconfirmed. Check the original terminal and record; do not resend.' : '取消結果待確認，請先核對原終端與登錄；不要重送。'}</p>}
                 <p className="mt-2 whitespace-pre-wrap break-words text-sm text-ink2">{record.task}</p>
                 {record.cwd && <p className="mt-2 break-all font-mono text-xs text-mute3">{record.cwd}</p>}
                 {record.tail && <p className="mt-2 truncate rounded bg-panel px-2 py-1 font-mono text-xs text-mute2">{record.tail}</p>}
                 <div className="mt-3 flex flex-wrap gap-2">
-                  {running && record.mode !== 'terminal' && <button type="button" className={button} disabled={!!busy} onClick={() => void control('stop', record)}>{busy === `stop:${record.id}` ? t('正在停止…') : t('⏹ 停止')}</button>}
-                  {waiting && <button type="button" className={button} disabled={!!busy} onClick={() => void control('cancel', record)}>{busy === `cancel:${record.id}` ? t('正在取消…') : t('✕ 取消')}</button>}
-                  <button type="button" className={button} onClick={() => prepareRetry(record)}>{t('在 ChatGPT 對話重做')}</button>
-                  {!isLocalAnswerRecord(record) && <button type="button" className={button} onClick={() => { setReplyTo(replyTo === record.id ? null : record.id); setReplyText('') }}>{t('在 ChatGPT 對話續作')}</button>}
+                  {running && record.mode !== 'terminal' && <button type="button" className={button} disabled={!!busy || !!unknownControls[record.id]} onClick={() => void control('stop', record)}>{busy === `stop:${record.id}` ? t('正在停止…') : t('⏹ 停止')}</button>}
+                  {waiting && <button type="button" className={button} disabled={!!busy || !!unknownControls[record.id]} onClick={() => void control('cancel', record)}>{busy === `cancel:${record.id}` ? t('正在取消…') : t('✕ 取消')}</button>}
+                  <button type="button" disabled={!!record.cancelOrderPending || !!unknownControls[record.id]} className={button} title={lang === 'en' ? 'Prepare a new ChatGPT conversation; this does not resume the original CLI session.' : '準備新的 ChatGPT 對話，不會恢復原 CLI 工作階段。'} onClick={() => prepareRetry(record)}>{t('在 ChatGPT 對話重做')}</button>
+                  {!isLocalAnswerRecord(record) && <button type="button" disabled={!!record.cancelOrderPending || !!unknownControls[record.id]} className={button} title={lang === 'en' ? 'Prepare a new ChatGPT conversation; this does not resume the original CLI session.' : '準備新的 ChatGPT 對話，不會恢復原 CLI 工作階段。'} onClick={() => { setReplyTo(replyTo === record.id ? null : record.id); setReplyText('') }}>{t('在 ChatGPT 對話續作')}</button>}
                   <button type="button" className={button} onClick={() => void toggleLog(record)}>{openLog === record.id ? t('收合日誌') : t('查看日誌')}</button>
                   {record.canDiff && !isLocalAnswerRecord(record) && <button type="button" className={button} onClick={() => void toggleDiff(record)}>{diffFor === record.id ? t('收合差異') : t('查看目前差異')}</button>}
                 </div>
+                {unknownControls[record.id] && <div role="alert" className="mt-3 rounded border border-amber-400 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
+                  <p>{lang === 'en' ? 'The result is unknown. Check the job status before trying again.' : '操作結果未知，請先查看該工作狀態，再決定是否重試。'}</p>
+                  <button type="button" className="mt-2 rounded border border-current px-3 py-2" onClick={() => setUnknownControls((old) => { const next = { ...old }; delete next[record.id]; return next })}>
+                    {lang === 'en' ? 'I checked the job status' : '我已核對工作狀態'}
+                  </button>
+                </div>}
                 {replyTo === record.id && <div className="mt-3 rounded-md border border-line2 bg-panel p-3">
                   <label htmlFor={`followup-${record.id}`} className="text-xs text-mute2">{t('要帶到新 ChatGPT 對話的補充')}</label>
                   <textarea id={`followup-${record.id}`} rows={3} className="mt-1 w-full rounded-md border border-line2 bg-app px-3 py-2 text-sm" value={replyText} onChange={event => setReplyText(event.target.value)} />
-                  <button type="button" className="mt-2 rounded-md bg-ink px-3 py-2 text-xs text-invink disabled:opacity-40" disabled={!replyText.trim()} onClick={() => prepareFollowup(record)}>{t('準備續作對話')}</button>
+                  <button type="button" className="mt-2 rounded-md bg-ink px-3 py-2 text-xs text-invink disabled:opacity-40" disabled={!replyText.trim() || !!record.cancelOrderPending || !!unknownControls[record.id]} onClick={() => prepareFollowup(record)}>{t('準備續作對話')}</button>
                 </div>}
                 {openLog === record.id && <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-panel p-3 text-xs">{logs[record.id] ?? t('日誌載入中…')}</pre>}
                 {diffFor === record.id && <div className="mt-3 rounded-md bg-panel p-3 text-xs">

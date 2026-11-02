@@ -14,6 +14,22 @@ spec.loader.exec_module(release_audit)
 
 
 class ReleaseArtifactTests(unittest.TestCase):
+    def test_v18_runtime_identity_and_office_notice_required_in_source_and_windows(self):
+        required = ('electron/startup.cjs', 'licenses-ai-office-MIT.txt')
+        with tempfile.TemporaryDirectory(prefix='ac_v18_required_') as tmp:
+            artifact = Path(tmp) / 'fixture.zip'
+            for kind, prefix in (('source', 'app/'), ('windows', 'app/resources/app/')):
+                for included in (set(), {required[0]}, {required[1]}, set(required)):
+                    with self.subTest(kind=kind, included=included):
+                        with zipfile.ZipFile(artifact, 'w') as archive:
+                            archive.writestr(prefix + 'package.json', json.dumps({'version': '1.8.0'}))
+                            for name in included:
+                                archive.writestr(prefix + name, 'synthetic fixture')
+                        issues = release_audit.audit(artifact, kind, '1.8.0')['issues']
+                        missing = {issue['file'] for issue in issues if issue['rule'] == 'missing-runtime-file'}
+                        for name in required:
+                            self.assertEqual(name in missing, name not in included)
+
     def test_quick_inventory_includes_linked_conversation_workflow_guide(self):
         self.assertIn('docs/chatgpt-conversation-workflow.md', release_audit.QUICK_FILES)
 

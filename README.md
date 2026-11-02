@@ -5,7 +5,7 @@
 # AI 控制台 · AI Console
 
 給一般使用者與第一次接觸 AI 的人使用的本地控制台：用白話入口找舊對話、同步四個 AI、直接問地端模型、管理技能，或準備一份可貼入 ChatGPT「對話」並由 DevSpace MCP 執行的專案工作指示。
-附一間會動的像素辦公室，和一套可以邊工作邊玩的小型 MMORPG。
+附獨立的工作心智圖、一間會動的像素辦公室，和一套可以邊工作邊玩的小型 MMORPG。
 
 **索引、搜尋、技能預覽與控制介面都在本機執行。** 問答可選內建 LM Studio，或你自行接入的 OpenAI 相容服務；選擇雲端服務時，問題與該頁聊天紀錄會送到指定服務，可能計費。需要讀寫專案時，控制台只整理專案、需求與有限背景，再由你在 ChatGPT「對話」加入 DevSpace、確認模型、貼上並自行送出；不會在背景建立 CLI 工單。介面支援繁體中文與 English。
 
@@ -13,19 +13,20 @@
 > skill management, and a unified coding workflow: prepare a bounded project prompt, then paste it
 > into ChatGPT Chat with the attached DevSpace MCP. The console does not auto-send the message,
 > auto-select the ChatGPT model, resume a CLI session, or create background coding jobs.
-> Existing legacy job history remains available for status, logs, diffs, and stop/cancel controls.
-> OpenCode is an explicit separate entry, not an automatic fallback. The pixel office and the
+> Existing legacy job history remains available for status, logs and diffs. Cancellation can be
+> requested for waiting jobs; an unverified legacy process cannot be safely stopped by PID.
+> OpenCode is an explicit separate entry, not an automatic fallback. The work mind map, pixel office and the
 > single-player MMORPG remain available. The UI is available in Traditional Chinese and English.
 
 ## 下載與開始
 
-**[下載快速安裝包 v1.7.0](https://github.com/mars-tw/ai-console/releases/download/v1.7.0/ai-console-quick-start-v1.7.0.zip)**：解壓縮後雙擊 `快速安裝.cmd`，依提示完成準備；以後雙擊桌面「DevSpace 控制台」或 `快速啟動.cmd`。詳見 [快速開始說明](docs/quick-start.md)。
+**[下載快速安裝包 v1.8.0](https://github.com/mars-tw/ai-console/releases/download/v1.8.0/ai-console-quick-start-v1.8.0.zip)**：解壓縮後雙擊 `快速安裝.cmd`，依提示完成準備；以後雙擊桌面「DevSpace 控制台」或 `快速啟動.cmd`。詳見 [快速開始說明](docs/quick-start.md)。
 
 第一次使用請看 **[完整安裝與執行手冊](docs/install-and-run.md)**：從解壓縮、安裝 DevSpace、設定允許目錄，到在 ChatGPT 對話中使用 MCP，依序操作即可。
 
 ### Windows 一般使用者請下載這個
 
-**[⬇ 下載 Windows 免安裝版 v1.7.0（64 位元）](https://github.com/mars-tw/ai-console/releases/download/v1.7.0/ai-console-win32-x64-v1.7.0.zip)**
+**[⬇ 下載 Windows 免安裝版 v1.8.0（64 位元）](https://github.com/mars-tw/ai-console/releases/download/v1.8.0/ai-console-win32-x64-v1.8.0.zip)**
 
 1. 解壓縮整個 ZIP，再開啟資料夾裡的 `AI控制台.exe`。
 2. 按「接入 AI」，依畫面選擇電腦上的 AI、雲端服務或已有的工具。
@@ -42,11 +43,13 @@ Windows 發行包已包含控制台需要的 Python，不必另裝，也不會�
 <details>
 <summary>開發者：原始碼下載與自行建置</summary>
 
-[下載 v1.7.0 原始碼](https://github.com/mars-tw/ai-console/releases/download/v1.7.0/ai-console-source-v1.7.0.zip)。原始碼 ZIP 不是可直接執行的 Windows 程式；自行建置仍需 Node.js 與 Python，步驟見下方「快速開始」。
+[下載 v1.8.0 原始碼](https://github.com/mars-tw/ai-console/releases/download/v1.8.0/ai-console-source-v1.8.0.zip)。原始碼 ZIP 不是可直接執行的 Windows 程式；自行建置仍需 Node.js 與 Python，步驟見下方「快速開始」。
 
 </details>
 
-**v1.7.0** 將所有編碼啟動與續作入口統一為 ChatGPT「對話」＋ DevSpace MCP：控制台只準備專案、工作內容與有限背景，不會自動貼上、送出、切換 ChatGPT 模型或建立 CLI 工單。舊派工頁面改為唯讀歷史與既有工作的停止／取消控制；OpenCode 保留為獨立入口。詳見 [版本說明](docs/releases/v1.7.0.md)與[統一執行流程](docs/chatgpt-conversation-workflow.md)。
+**v1.7.0** 將所有編碼啟動與續作入口統一為 ChatGPT「對話」＋ DevSpace MCP：控制台只準備專案、工作內容與有限背景，不會自動貼上、送出、切換 ChatGPT 模型或建立 CLI 工單。舊派工頁面保留歷史檢視；OpenCode 保留為獨立入口。詳見 [版本說明](docs/releases/v1.7.0.md)與[統一執行流程](docs/chatgpt-conversation-workflow.md)。
+
+**v1.8.0** 新增獨立工作心智圖，並補強本機服務身分確認、終端關閉提示與發行包隔離。既有的 ChatGPT「對話」與 OpenCode 流程維持原有邊界；版本內容見 [v1.8.0 說明](docs/releases/v1.8.0.md)。
 
 快速安裝與快速啟動會校驗下載包、安裝到使用者目錄、建立捷徑並保留既有 DevSpace 設定。安裝完成與 DevSpace 設定狀態分開呈現，可選擇稍後設定並先開啟控制台。
 
@@ -101,9 +104,9 @@ Windows 發行包已包含控制台需要的 Python，不必另裝，也不會�
 - **時間收納**：一週未用的對話預設收起，保持清單清爽
 - **控制 API**（僅 `127.0.0.1`）：重新掃描、狀態與歷史讀取仍可使用；舊 new-work／resume／retry／followup／batch／schedule 與 DevSpace run／continue 執行端點回覆 `409 USE_CHATGPT_CONVERSATION`。`GET /api/dispatches` 只讀，不會 flush pending 或 auto-handoff
 - **ChatGPT 對話準備**：首頁、舊主控台、對話續作、辦公室與手機共用同一條 DevSpace 草稿流程。控制台不自動拆單、不挑 CLI 執行者、不貼上或送出訊息，也不替使用者切換 ChatGPT 模型
-- **舊派工紀錄（唯讀）**：既有紀錄仍可查看狀態、最後輸出、完整日誌、成本與 Git 差異；仍在執行或等待中的舊工作可停止／取消。畫面上的「重做／續作」只整理成新的 ChatGPT 對話草稿，不呼叫 retry／followup API
+- **舊派工紀錄（唯讀）**：既有紀錄仍可查看狀態、最後輸出、完整日誌、成本與 Git 差異；等待中的舊工作可嘗試取消。舊紀錄缺少可核實的程序身分時，停止會回覆 `STOP_IDENTITY_UNKNOWN`，不會向 PID 送出停止訊號。畫面上的「重做／續作」只整理成新的 ChatGPT 對話草稿，不呼叫 retry／followup API
 - **舊排程紀錄**：內容仍可查看並轉成 ChatGPT 對話草稿；伺服器啟動時不會啟動舊 Scheduler，也不會在背景自動執行
-- **📱 手機遙控**：透過 Tailscale 與配對 token 查看舊紀錄、日誌並停止／取消既有工作；新工作、重做與續作只會複製完整 DevSpace 指示並開啟 ChatGPT，不會從手機 POST 新派工、重派或補話。對話、檔案、技能與設定 API 仍不對遙控端開放
+- **📱 手機遙控**：透過 Tailscale 與配對 token 查看舊紀錄和日誌，並可嘗試取消等待中的工作；未核實程序身分的停止請求會被拒絕。新工作、重做與續作只會複製完整 DevSpace 指示並開啟 ChatGPT，不會從手機 POST 新派工、重派或補話。對話、檔案、技能與設定 API 仍不對遙控端開放
 - **黑色 / 亮色 / 跟隨系統**：三種主題，選擇會記住
 - **垃圾桶**：不是目前在用的工具、太久沒動、或在原本工具裡已封存的對話，
   預設收進垃圾桶。**檔案完全沒有動**，隨時看得回來，也可以單筆「留著」放回主清單
@@ -156,7 +159,7 @@ python server/api.py       # 啟動整合伺服器 → http://127.0.0.1:5177/
 
 開發模式（熱更新）：`npm run dev`（會同時啟動 API + vite）。
 
-原始碼 ZIP 可用於上述建置與執行；若要執行 `npm run pack` 製作 Windows 發行包，請先使用 `git clone https://github.com/mars-tw/ai-console.git` 取得含 Git 紀錄的專案。打包程式依 Git 追蹤清單挑選檔案，以排除私人資料。
+原始碼 ZIP 可用於上述建置與執行；若要執行 `npm run pack` 製作 Windows 發行包，請先使用 `git clone https://github.com/mars-tw/ai-console.git` 取得含 Git 紀錄的專案。打包要求工作樹乾淨，並以已提交版本的隔離快照建置；輸出到獨立候選目錄，不覆蓋現有安裝。
 
 ```bash
 npm run verify             # 型別 + 靜態檢查 + 前後端測試，一次跑完
@@ -165,7 +168,7 @@ npm run test:web           # 只跑前端（vitest）
 npm run test:py            # 只跑後端（unittest，純標準庫）
 npm run typecheck          # 型別檢查（等同 tsc -b）
 npm run lint               # 靜態檢查（零警告）
-npm run pack               # 從白名單暫存重打包 → release/clean/；自動洩漏檢查
+npm run pack               # 從已提交快照建置 → release/candidates/；自動洩漏檢查
 ```
 
 > **不要用 `npx tsc --noEmit`。** 根 `tsconfig.json` 是 `"files": []` 的
@@ -173,7 +176,7 @@ npm run pack               # 從白名單暫存重打包 → release/clean/；�
 > 少一個 import 都抓不到，直到 `npm run build` 才炸。要嘛 `npm run typecheck`，
 > 要嘛 `npx tsc --noEmit -p tsconfig.app.json`（指定專案）。
 
-後端測試刻意用標準庫的 `unittest` 而不是 pytest —— Python 這一側沒有任何 pip 依賴。覆蓋重點包括併發與資料完整性、來源及路徑安全、舊執行端點 fail closed、`GET /api/dispatches` 無副作用、停止／取消既有工作，以及發行包的必要檔案與隱私稽核。
+後端測試刻意用標準庫的 `unittest` 而不是 pytest —— Python 這一側沒有任何 pip 依賴。覆蓋重點包括併發與資料完整性、來源及路徑安全、舊執行端點 fail closed、`GET /api/dispatches` 無副作用、舊工作停止身分檢查與取消，以及發行包的必要檔案與隱私稽核。
 
 地端續聊：安裝 LM Studio、下載完整模型，並在 LM Studio 的 Runtime Manager（`Ctrl+Shift+R`）準備 **CPU llama.cpp (Windows) 2.24.0**。此版的內建安全檢查固定使用該 CPU runtime，不會改用 NVIDIA 推論引擎；不支援或無法確認的硬體狀態會說明原因。若電腦已有 ai-hub 安全檢查或你明確指定檢查程式，會以原設定為準，失敗時不繞過它。只查看設定頁不會載入模型；送出問題後才檢查安全使用條件並準備服務與模型。不要把 LM Studio 的 1234 埠另接成自訂服務。
 
@@ -310,15 +313,16 @@ src/                       # React + TypeScript + Tailwind 前端
 
 發版使用 `scripts/package.mjs`：只複製執行所需檔案到新暫存目錄，排除 `dist/data`、個人設定、對話、快取與日誌；不會覆蓋正在使用的本地安裝。
 `scripts/audit_release.py` 能檢查資料夾或 ZIP 的版本、必要檔案、本機路徑、配對碼、私密檔名和 Windows 路徑／大小寫衝突。壓縮包通過檢查後，才把本機專屬設定放回本地安裝。
+以下 `candidate-xxxx` 請換成打包輸出的實際目錄；此檢查不取代一般機密掃描。
 
 ```bash
-python scripts/audit_release.py release/clean/AI控制台-win32-x64 --kind windows --version 1.7.0
-python scripts/audit_release.py release/ai-console-source-v1.7.0.zip --kind source --version 1.7.0
+python scripts/audit_release.py release/candidates/candidate-xxxx/AI控制台-win32-x64 --kind windows --version 1.8.0
+python scripts/audit_release.py release/ai-console-source-v1.8.0.zip --kind source --version 1.8.0
 ```
 
 發佈者可加 `--check-local-pairing`，只在記憶體中比對本機配對碼是否誤入成品；一般檢查與測試不會讀取配對設定。
 
-- 桌面資料與 API 綁定 `127.0.0.1`；只有你開啟手機遙控後，才在 Tailscale 網卡另開受 token 保護的入口。遙控端可準備 ChatGPT 指示、查看舊紀錄並停止／取消既有工作，不開放對話內容、檔案、技能或設定 API
+- 桌面資料與 API 綁定 `127.0.0.1`；只有你開啟手機遙控後，才在 Tailscale 網卡另開受 token 保護的入口。遙控端可準備 ChatGPT 指示、查看舊紀錄並嘗試取消等待中的工作；無法確認身分的停止請求會被拒絕。不開放對話內容、檔案、技能或設定 API
 - 索引器對原始對話檔**只讀不寫**
 - 清理工具（`tools/cleanup_old.py`）採「封存 → 驗證 → 刪除」流程
 
@@ -327,7 +331,7 @@ python scripts/audit_release.py release/ai-console-source-v1.7.0.zip --kind sour
 - **舊執行入口失效關閉**：new-work、resume、retry、followup、batch、schedule 與 DevSpace run／continue 公開端點只回覆 `409 USE_CHATGPT_CONVERSATION`，不建立工單、不開終端、不啟動子行程
 - **讀取歷史沒有副作用**：`GET /api/dispatches` 不 flush pending、不重派、不 auto-handoff；啟動伺服器也不啟動舊 Scheduler
 - **DevSpace 範圍受限**：專案必須位於 `allowedRoots`；控制台只準備文字與開啟 ChatGPT，不會自動貼上、送出或替使用者切換模型
-- **遙控配對**：手機請求須帶配對 token，錯誤嘗試會限速；停止／取消只作用於已存在的舊工作，不會建立新工作
+- **遙控配對**：手機請求須帶配對 token，錯誤嘗試會限速；取消僅適用符合條件的舊工作，未核實程序身分的停止請求會被拒絕，兩者都不會建立新工作
 - **金鑰只在記憶體裡**傳給 SDK，不印出、不寫進 log
 - **技能包不受信任**：限制檔案數、單檔／總大小、路徑深度與 ZIP 壓縮比；拒絕路徑穿越、symlink/junction、巢狀壓縮檔、敏感憑證檔名、明文金鑰／token／密碼與同名覆寫。預覽與安裝都不執行技能內容；每次只安裝到一個 AI，先寫暫存再原子換入，失敗會清理暫存
 - **宣傳截圖有防洩漏閘門**：`scripts/shot.cjs` 拍之前會把畫面上的絕對路徑

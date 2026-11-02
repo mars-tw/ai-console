@@ -268,14 +268,50 @@ class TestCancel(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertTrue(out.get("already"))
 
+    def test_登錄保存失敗或例外不改工單也不回成功(self):
+        original = self.order.read_text(encoding="utf-8")
+        for failure in (False, OSError("synthetic")):
+            with self.subTest(failure=failure):
+                rec = api.Handler.DISPATCHES[0]
+                rec.pop("cancelled", None)
+                rec.pop("cancelOrderPending", None)
+                with mock.patch.object(api.Handler, "_save_registry", side_effect=(
+                        failure if isinstance(failure, Exception) else None),
+                        return_value=failure if failure is False else None):
+                    code, out = self._cancel()
+                self.assertEqual((code, out["code"]), (503, "CANCELLATION_RESULT_UNKNOWN"))
+                self.assertFalse(out["ok"])
+                self.assertEqual(self.order.read_text(encoding="utf-8"), original)
+                self.assertTrue(rec["cancelOrderPending"])
+                code, out = self._cancel()
+                self.assertEqual((code, out["code"]), (409, "CANCELLATION_RESULT_UNKNOWN"))
+                self.assertFalse(out["ok"])
+
+    def test_最後保存失敗保留未知屏障且不誤報成功(self):
+        with mock.patch.object(api.Handler, "_save_registry", side_effect=[True, False]):
+            code, out = self._cancel()
+        self.assertEqual((code, out["code"]), (503, "CANCELLATION_RESULT_UNKNOWN"))
+        self.assertTrue(api.Handler.DISPATCHES[0]["cancelOrderPending"])
+        self.assertIn("已經取消", self.order.read_text(encoding="utf-8"))
+
+    def test_舊於最近百筆的取消仍保存並保留pending(self):
+        rec = api.Handler.DISPATCHES[0]
+        api.Handler.DISPATCHES.extend({"id": f"later-{i}"} for i in range(101))
+        rec["cancelled"] = "20261102-120000"
+        rec["cancelOrderPending"] = True
+        self.assertTrue(api.Handler._save_registry(api.Handler))
+        saved = json.loads(api.Handler.REGISTRY.read_text(encoding="utf-8"))
+        self.assertTrue(any(item.get("id") == rec["id"] and item.get("cancelOrderPending") for item in saved))
+
     def test_工單檔已經不在時要講出來(self):
         """檔案不在就沒辦法讓它 fail safe，那個視窗仍然是危險的 ——
         這種時候要明講「請直接關掉」，不能只回一個 ok。"""
         self.order.unlink()
         code, out = self._cancel()
-        self.assertEqual(code, 200)
-        self.assertTrue(out["ok"])
-        self.assertIn("關掉", out["note"])
+        self.assertEqual(code, 409)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["code"], "CANCELLATION_RESULT_UNKNOWN")
+        self.assertIn("關掉", out["error"])
 
 
 

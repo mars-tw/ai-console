@@ -158,24 +158,39 @@ class TestStopEndpoint(unittest.TestCase):
              mock.patch.object(api, "_kill_tree", lambda pid: self.killed.append(pid)):
             return api.Handler.do_dispatch_stop(self.h)
 
-    def test_停掉活著的並記在登錄上(self):
+    def test_沒有精確身分的存活pid不可以殺(self):
         obj, code = self._call("a")
-        self.assertEqual((code, obj["ok"]), (200, True))
-        self.assertEqual(self.killed, [4242])
-        self.assertTrue(api.Handler.DISPATCHES[0].get("stopped"))
-        self.assertEqual(self.saved, 1)
+        self.assertEqual((code, obj["ok"], obj["code"]), (409, False, "STOP_IDENTITY_UNKNOWN"))
+        self.assertEqual(self.killed, [])
+        self.assertNotIn("stopped", api.Handler.DISPATCHES[0])
+        self.assertEqual(self.saved, 0)
 
     def test_再停一次只回報已停過(self):
-        self._call("a")
+        api.Handler.DISPATCHES[0]["stopped"] = "20261102-120000"
         obj, code = self._call("a")
-        self.assertEqual((code, obj.get("already")), (200, True))
-        self.assertEqual(self.killed, [4242])
+        self.assertEqual((code, obj["code"]), (409, "STOP_IDENTITY_UNKNOWN"))
+        self.assertFalse(obj["ok"])
+        self.assertEqual(self.killed, [])
 
     def test_已經死的沒東西可停(self):
         obj, code = self._call("dead")
         self.assertEqual(code, 409)
         self.assertEqual(self.killed, [])
         self.assertNotIn("stopped", api.Handler.DISPATCHES[1])
+
+    def test_舊秒級時間不證明程序身分且不呼叫殺程序(self):
+        self.body = {"id": "a"}
+        api.Handler.DISPATCHES[0]["started"] = "20261102-120000"
+        # Both a same-second recycled PID and a failed lookup are inconclusive.
+        for created in (api._stamp_epoch("20261102-120000"), None):
+            with self.subTest(created=created), \
+                 mock.patch.object(api, "_proc_created_at", return_value=created), \
+                 mock.patch.object(api, "_kill_tree", side_effect=AssertionError("must not kill")) as kill:
+                obj, code = api.Handler.do_dispatch_stop(self.h)
+                self.assertEqual((code, obj["code"]), (409, "STOP_IDENTITY_UNKNOWN"))
+                kill.assert_not_called()
+                self.assertNotIn("stopped", api.Handler.DISPATCHES[0])
+                self.assertEqual(self.saved, 0)
 
     def test_找不到(self):
         obj, code = self._call("nope")

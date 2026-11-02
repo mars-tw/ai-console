@@ -1,6 +1,6 @@
 # DevSpace 對話入口與 OpenCode 工作臺
 
-適用 AI Console v1.7.0。所有需要讀寫專案或執行指令的編碼工作，統一使用 **ChatGPT「對話」→ DevSpace MCP → 本機成果交接**。OpenCode 是工作臺裡另一個可由使用者明確開啟的對話工具，不是控制台的背景備援，也不會被自動選用。
+適用 AI Console v1.8.0。所有需要讀寫專案或執行指令的編碼工作，統一使用 **ChatGPT「對話」→ DevSpace MCP → 本機成果交接**。OpenCode 是工作臺裡另一個可由使用者明確開啟的對話工具，不是控制台的背景備援，也不會被自動選用。
 
 DevSpace 分頁會準備指示、複製到剪貼簿，並開啟 ChatGPT 網站。訊息由使用者在 ChatGPT 對話送出，模型在對話中直接呼叫已加入的 DevSpace MCP。此流程不使用 ChatGPT「工作」、DevSpace agent 工作、CLI resume、auto-handoff 或 Codex app-server 對話。
 
@@ -16,7 +16,7 @@ DevSpace 分頁會準備指示、複製到剪貼簿，並開啟 ChatGPT 網站�
 
 「問 AI」與辦公室的「說說看」仍可作為純文字問答；地端回答不會被當成編碼執行或改檔路徑。需要讀寫專案時，必須改用上述 ChatGPT 對話流程。
 
-這些入口不會 POST 新派工、重派、補話、排程執行或 `/api/launch`，也不會自動替使用者貼上或送出。舊派工頁面只保留唯讀紀錄，以及停止／取消已存在工作的必要控制。讀取 `/api/dispatches` 不會 flush pending、重試或 auto-handoff；伺服器也不會啟動舊背景排程器。
+這些入口不會 POST 新派工、重派、補話、排程執行或 `/api/launch`，也不會自動替使用者貼上或送出。舊派工頁面保留紀錄與等待中工作的取消入口；舊程序身分無法核實時，停止請求會被拒絕，不送出停止訊號。讀取 `/api/dispatches` 不會 flush pending、重試或 auto-handoff；伺服器也不會啟動舊背景排程器。
 
 ## 在 ChatGPT 對話中操作專案
 
@@ -100,4 +100,4 @@ npm.cmd run app -- --devspace
 
 DevSpace 畫面位於 `src/components/DevSpaceConsole.tsx`，服務管理位於 `server/devspace_console.py`；Chrome 開啟入口位於 `electron/main.cjs`。OpenCode 畫面與桌面服務分別位於 `src/components/OpenCodePanel.tsx`、`electron/opencode.cjs`，內附的 MCP bridge 位於 `electron/devspace-mcp-bridge.cjs`。
 
-[安裝手冊](install-and-run.md)與[快速安裝說明](quick-start.md)提供 v1.7.0 的下載、初始化與啟動步驟；[統一執行流程](chatgpt-conversation-workflow.md)整理所有入口、舊 API 邊界與驗收方式。從舊版升級後，新的編碼工作與續作統一走上述 ChatGPT 對話流程；舊派工入口只保留紀錄查看與停止／取消。
+[安裝手冊](install-and-run.md)與[快速安裝說明](quick-start.md)提供 v1.8.0 的下載、初始化與啟動步驟；[統一執行流程](chatgpt-conversation-workflow.md)整理所有入口、舊 API 邊界與驗收方式。從舊版升級後，新的編碼工作與續作統一走上述 ChatGPT 對話流程；舊派工入口保留紀錄查看，停止與取消依上面的限制處理。
