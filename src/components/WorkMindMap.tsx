@@ -25,6 +25,10 @@ interface Props {
   dispatchReadState: 'idle' | 'loading' | 'ready' | 'error'
   dispatchLastSuccess: string | null
   onRefresh: () => void
+  runtimeSessions?: DispatchRecord[]
+  snapshotFresh?: boolean
+  sourceAvailable?: boolean
+  registryAvailable?: boolean
 }
 
 interface Branch { id: string; state: string; d: string }
@@ -35,10 +39,10 @@ const PAGE_SIZE = 8
 const MIN_SCENE = 760
 const EMPTY_LAYOUT: Layout = { viewport: 0, height: 0, branches: [] }
 
-export default function WorkMindMap({ tools, projects, dispatches, dispatchReadState, dispatchLastSuccess, onRefresh }: Props) {
+export default function WorkMindMap({ tools, projects, dispatches, runtimeSessions = [], dispatchReadState, dispatchLastSuccess, snapshotFresh = true, sourceAvailable = true, registryAvailable = true, onRefresh }: Props) {
   const lang = useLang()
   const text = (zh: string, en: string) => lang === 'en' ? en : zh
-  const model = useMemo(() => buildWorkMindMap(tools ?? {}, projects ?? [], dispatches), [tools, projects, dispatches])
+  const model = useMemo(() => buildWorkMindMap(tools ?? {}, projects ?? [], dispatches, runtimeSessions), [tools, projects, dispatches, runtimeSessions])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [toolsOpen, setToolsOpen] = useState(true)
   const [projectsOpen, setProjectsOpen] = useState(true)
@@ -165,15 +169,15 @@ export default function WorkMindMap({ tools, projects, dispatches, dispatchReadS
   const waitingCount = model.tools.reduce((sum, item) => sum + item.waitingCount, 0)
   const unknownCount = model.tools.reduce((sum, item) => sum + item.unknownCount, 0)
   const pendingCancellation = dispatches.some((record) => record.cancelOrderPending === true)
-  const stale = dispatchReadState !== 'ready' && dispatchLastSuccess !== null
-  const noDispatchData = pendingCancellation || (dispatchReadState !== 'ready' && dispatchLastSuccess === null)
+  const stale = (!snapshotFresh || dispatchReadState === 'error') && dispatchLastSuccess !== null
+  const noDispatchData = !sourceAvailable || (dispatchReadState !== 'ready' && dispatchLastSuccess === null)
   const lastRead = dispatchLastSuccess ? new Date(dispatchLastSuccess).toLocaleString(lang === 'en' ? 'en-US' : 'zh-TW') : ''
   const snapshotSuffix = stale ? text('（上次資料）', ' (last snapshot)') : ''
   const toolsSummary = tools === null ? text('工具資料未取得', 'tool data unavailable') : text(`工具 ${model.tools.length} 個`, `${model.tools.length} tools`)
   const projectsSummary = projects === null ? text('專案資料未取得', 'project data unavailable') : text(`專案 ${model.projects.length} 個`, `${model.projects.length} projects`)
-  /** Unconfirmed records hold every animation in the map, not just their own branch. */
+  /** Unknown branches stay still; unrelated verified activity remains independent. */
   const paused = motionPaused || hidden || reduced || !inView
-    || dispatchReadState !== 'ready' || pendingCancellation || unknownCount > 0
+    || !snapshotFresh || dispatchReadState === 'error' || noDispatchData
   const selectNode = (id: string | null) => { setSelectedId(id); setTaskLimit(PAGE_SIZE) }
   const labelStatus = (status: string) => {
     const names: Record<string, [string, string]> = {
@@ -181,27 +185,30 @@ export default function WorkMindMap({ tools, projects, dispatches, dispatchReadS
       active: ['活躍', 'Active'], idle: ['閒置', 'Idle'],
       rate_limited: ['限流中', 'Rate limited'], blocked: ['阻塞', 'Blocked'],
       done: ['完成', 'Done'], unknown: ['未知', 'Unknown'],
+      failed: ['失敗', 'Failed'], stopped: ['有停止紀錄', 'Stop recorded'], cancelled: ['已取消', 'Cancelled'], silent: ['無已驗證結果', 'No verified result'],
     }
     const pair = names[status]
     return pair ? text(pair[0], pair[1]) : status
   }
-  const taskStateLabel = (state: 'running' | 'waiting' | 'unknown') => state === 'unknown'
+  const taskStateLabel = (state: string) => state === 'unknown'
     ? text('未確認', 'Unconfirmed') : labelStatus(state)
   /** Branch and dragon state come from the snapshot counts, never from tool availability. */
   const branchState = (item: WorkMindMapTool) => noDispatchData ? 'unknown'
-    : item.runningCount > 0 ? 'running'
+    : item.runningCount > 0 || item.runtimeActiveCount > 0 ? 'running'
       : item.waitingCount > 0 ? 'waiting'
         : item.unknownCount > 0 ? 'unknown' : 'idle'
   const taskStatus = (item: WorkMindMapTool) => {
     if (noDispatchData) return text('任務：未確認（資料尚未確認）', 'Tasks: unconfirmed (data not yet confirmed)')
     const states: string[] = []
+    if (!registryAvailable) states.push(text('登錄資料未取得', 'Registry unavailable'))
     if (item.runningCount) states.push(`${text('執行中', 'Running')} ${item.runningCount}`)
     if (item.waitingCount) states.push(`${text('等待中', 'Waiting')} ${item.waitingCount}`)
     if (item.unknownCount) states.push(`${text('未確認', 'Unconfirmed')} ${item.unknownCount}`)
+    if (item.runtimeActiveCount) states.push(`${text('近期工作階段活動', 'Recent session activity')} ${item.runtimeActiveCount}`)
     return `${text('任務', 'Tasks')}：${states.length ? states.join(' · ') : text('無執行中或等待中任務', 'No running or waiting tasks')}${snapshotSuffix}`
   }
-  const toolActivity = (item: WorkMindMapTool) => `${text('工具活動（來源）', 'Tool activity (source)')}：${labelStatus(item.toolStatus)}`
-  const connectionStatus = text('連線：未確認', 'Connection: unverified')
+  const toolActivity = (item: WorkMindMapTool) => `${text('工具活動（來源）', 'Tool activity (source)')}：${labelStatus(item.toolStatus)} · ${text('可用性未檢查', 'Availability not checked')}`
+  const connectionStatus = text('模型連線：未檢查；只讀本機工作證據', 'Model connection: not checked; local work evidence only')
 
   const nodeElement = (id: string) => {
     const scene = sceneRef.current
@@ -244,12 +251,12 @@ export default function WorkMindMap({ tools, projects, dispatches, dispatchReadS
   }
 
   return (
-    <section className="wm" data-paused={paused} aria-label={text('工作心智圖', 'Work mind map')}>
+    <section className="wm" data-paused={paused} data-source-checked-at={dispatchLastSuccess ?? ''} data-source-state={dispatchReadState} data-source-freshness={snapshotFresh ? 'fresh' : 'stale'} aria-label={text('工作心智圖', 'Work mind map')}>
       <header className="wm-header">
         <div>
           <p className="wm-eyebrow">AI WORKSPACE / WORK MAP</p>
           <h2>{text('工作心智圖', 'Work mind map')}</h2>
-          <p className="wm-subtitle">{text('選取節點查看詳情。工具與專案為控制台最近讀取資料，可能過期。', 'Select a node for details. Tools and projects are the latest data read by the console and may be stale.')}</p>
+          <p className="wm-subtitle">{text('只讀工作證據。工作階段的近期自述活動與登錄任務結果分開顯示；專案狀態以來源更新時間為準。', 'Read-only work evidence. Recent reported session activity is separate from registered task outcomes; project status follows its source timestamp.')}</p>
         </div>
         <div className="wm-controls" aria-label={text('心智圖控制', 'Map controls')}>
           <button type="button" onClick={onRefresh} disabled={dispatchReadState === 'loading'}>
@@ -292,7 +299,7 @@ export default function WorkMindMap({ tools, projects, dispatches, dispatchReadS
             : dispatchReadState === 'loading'
               ? text('正在更新派工；以下顯示上次資料。', 'Updating dispatches; showing the last snapshot.')
               : text('無法更新派工；以下顯示上次資料。', 'Unable to update dispatches; showing the last snapshot.')}</span>
-        {dispatchLastSuccess && <time dateTime={dispatchLastSuccess}> {text('更新時間', 'Updated')}: {lastRead}</time>}
+        {dispatchLastSuccess && <time dateTime={dispatchLastSuccess}> {text('讀取時間', 'Read at')}: {lastRead}</time>}
       </p>
 
       <div ref={stageRef} className="wm-stage">
@@ -383,19 +390,20 @@ export default function WorkMindMap({ tools, projects, dispatches, dispatchReadS
             <div className="wm-detail-title"><span className="wm-index">TOOL</span><h3>{toolLabel(selectedTool)}</h3></div>
             <p className="wm-detail-meta">{connectionStatus} · {toolActivity(selectedTool)}</p>
             <p className="wm-detail-meta">{taskStatus(selectedTool)}</p>
-            {selectedTool.tasks.length > 0 ? <ul className="wm-tasks">{selectedTool.tasks.slice(0, taskLimit).map((task, index) => <li key={`${task.id}:${index}`}><span className={`wm-task-state is-${task.state}`}>{taskStateLabel(task.state)}{snapshotSuffix}</span><span>{task.task || text('未提供任務內容', 'No task description')}</span></li>)}</ul> : <p className="wm-empty">{noDispatchData ? text('派工資料尚未確認。', 'Dispatch data is unconfirmed.') : stale ? text('上次資料沒有進行中或等待中的任務。', 'The last snapshot had no running or waiting tasks.') : text('目前沒有進行中或等待中的任務資料。', 'No running or waiting task data.')}</p>}
+            {selectedTool.tasks.length > 0 ? <ul className="wm-tasks">{selectedTool.tasks.slice(0, taskLimit).map((task, index) => <li key={`${task.id}:${index}`}><span className={`wm-task-state is-${task.state}`}>{taskStateLabel(task.state)}{snapshotSuffix}</span><span>{task.task || text('未提供任務內容', 'No task description')}{task.detail && <small className="block text-mute3">{task.detail}</small>}</span></li>)}</ul> : <p className="wm-empty">{noDispatchData ? text('派工資料尚未確認。', 'Dispatch data is unconfirmed.') : stale ? text('上次資料沒有進行中或等待中的任務。', 'The last snapshot had no running or waiting tasks.') : text('目前沒有進行中或等待中的任務資料。', 'No running or waiting task data.')}</p>}
             {taskLimit < selectedTool.tasks.length && <button type="button" className="wm-more wm-more-tasks" onClick={() => setTaskLimit((n) => n + PAGE_SIZE)}>{text('顯示更多任務', 'Show more tasks')}（{selectedTool.tasks.length - taskLimit}）</button>}
           </>
         ) : selectedProject ? (
           <>
             <div className="wm-detail-title"><span className="wm-index">PROJECT / {labelStatus(selectedProject.status)}</span><h3>{selectedProject.title}</h3></div>
             <p className="wm-detail-meta">{text('專案 ID', 'Project ID')}：{selectedProject.projectId}{selectedProject.needs_handoff ? ` · ${text('需要接力', 'Handoff needed')}` : ''}</p>
+            <p className="wm-detail-meta">{text('來源更新時間', 'Producer updated at')}：{selectedProject.updated_at || text('來源未提供', 'Not reported')}</p>
             <p className="wm-detail-body">{selectedProject.next_step || text('尚未提供下一步。', 'No next step provided.')}</p>
           </>
         ) : (
           <>
             <div className="wm-detail-title"><span className="wm-index">OVERVIEW</span><h3>{text('從一個節點開始', 'Start with a node')}</h3></div>
-            <p className="wm-detail-body">{noDispatchData
+            <p className="wm-detail-body">{noDispatchData || !registryAvailable
               ? text(`${toolsSummary}、${projectsSummary}；派工數量尚未確認。選取只會顯示詳情。`, `${toolsSummary}, ${projectsSummary}; dispatch counts are unconfirmed. Selecting only shows details.`)
               : text(`${toolsSummary}、${projectsSummary}；${stale ? '上次派工資料' : '派工資料'}：${runningCount} 件執行中、${waitingCount} 件等待中、${unknownCount} 件未確認。選取只會顯示詳情。`, `${toolsSummary}, ${projectsSummary}; ${stale ? 'last dispatch snapshot' : 'dispatch data'}: ${runningCount} running, ${waitingCount} waiting and ${unknownCount} unconfirmed. Selecting only shows details.`)}</p>
           </>

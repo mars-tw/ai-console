@@ -55,7 +55,7 @@ describe('心智圖畫面', () => {
     expect(html).toMatch(/其中 1 件狀態未確認/)
   })
 
-  it('取消待確認時整張圖停下動效，而且不顯示執行中分支', () => {
+  it('取消待確認的那筆不顯示執行中分支，SSR 動效仍暫停', () => {
     const html = render({ dispatches: [record({ state: 'running', cancelOrderPending: true })] })
     expect(html).toContain('data-paused="true"')
     expect(html).toContain('data-wm-state="unknown"')
@@ -63,7 +63,7 @@ describe('心智圖畫面', () => {
     expect(html).toMatch(/部分取消結果待確認/)
   })
 
-  it('有未確認派工就整張圖暫停，讀取成功且全部確認才會動', () => {
+  it('SSR 與讀取失敗時暫停；未知紀錄不升成執行中', () => {
     expect(render({ dispatches: [record({ state: 'unknown' })] })).toContain('data-paused="true"')
     expect(render({ dispatchReadState: 'error', dispatches: [record({ state: 'running' })] })).toContain('data-paused="true"')
     // 只有在畫面可見時才播放，伺服器端輸出一律是暫停的。

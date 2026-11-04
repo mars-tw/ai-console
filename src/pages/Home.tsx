@@ -15,7 +15,6 @@ import OpenCodePanel from '@/components/OpenCodePanel'
 import ConversationSync from '@/components/ConversationSync'
 import Office from '@/components/Office'
 import WorkMindMapView from '@/components/WorkMindMapView'
-import { preferredProjects, statusProjects } from '@/lib/workMindMap'
 import QuickDispatch from '@/components/QuickDispatch'
 import ContinueWorkDialog from '@/components/ContinueWorkDialog'
 import { canOpenContinueWork } from '@/lib/continuationHelp'
@@ -436,7 +435,6 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
    * null 的意思只是「這次回應沒帶專案」，要退回 index.projects，不是「沒有專案」。
    * 不另外開新的請求或輪詢，新舊都以 project.updated_at 為準。
    */
-  const [liveProjects, setLiveProjects] = useState<IndexData['projects'] | null>(null)
   const [continueTarget, setContinueTarget] = useState<ConversationSummary | null>(null)
   const [toast, setToast] = useState('')
   /**
@@ -650,23 +648,26 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
    * 20 秒一次。/api/health 只回一個時間戳，成本可以忽略；
    * 而按鈕亮著卻按不動的每一秒，都是在騙使用者。
    */
-  const checkApi = useCallback(() => {
-    fetch('/api/health').then((r) => {
+  const checkApi = useCallback((signal?: AbortSignal) => {
+    fetch('/api/health', { signal }).then((r) => {
+      if (signal?.aborted) return
       if (!r.ok) { setApiOk(false); return }
       setApiOk(true)
-      fetch('/api/status').then((r2) => r2.ok ? r2.json() : null)
+      fetch('/api/status', { signal }).then((r2) => r2.ok ? r2.json() : null)
         .then((d) => {
+          if (signal?.aborted) return
           if (d?.tools) setLiveTools(d.tools)
-          setLiveProjects(statusProjects(d))
         }).catch(() => {})
-    }).catch(() => setApiOk(false))
+    }).catch(() => { if (!signal?.aborted) setApiOk(false) })
   }, [])
 
   useEffect(() => {
-    checkApi()
-    const timer = setInterval(checkApi, 20000)
-    return () => clearInterval(timer)
-  }, [checkApi])
+    if (viewMode === 'mindmap') return
+    const controller = new AbortController()
+    checkApi(controller.signal)
+    const timer = setInterval(() => checkApi(controller.signal), 20000)
+    return () => { controller.abort(); clearInterval(timer) }
+  }, [checkApi, viewMode])
 
   /** 地端可用性。讀不到就是不知道能不能送，一律當成還沒準備好。 */
   const refreshLocalSetup = useCallback(async (signal?: AbortSignal) => {
@@ -684,10 +685,11 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
   }, [])
 
   useEffect(() => {
+    if (viewMode === 'mindmap') return
     const controller = new AbortController()
     void refreshLocalSetup(controller.signal)
     return () => controller.abort()
-  }, [refreshLocalSetup])
+  }, [refreshLocalSetup, viewMode])
 
   /** 真正載得動的模型；庫存清單（/api/models）不算數。 */
   const readyModels = useMemo(() => localModels(localSetup), [localSetup])
@@ -797,6 +799,7 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
    * 把舊查詢的結果蓋在新查詢上面。
    */
   useEffect(() => {
+    if (viewMode === 'mindmap') return
     const q = search.trim()
     setContentHits([])
     setContentTruncated(false)
@@ -836,38 +839,40 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
         .finally(() => { if (!ac.signal.aborted) setContentBusy(false) })
     }, 250)
     return () => { clearTimeout(timer); ac.abort() }
-  }, [search, apiOk])
+  }, [search, apiOk, viewMode])
 
   // useCallback + 空相依：底下每 60 秒的輪詢把這個函式收進 setInterval 的閉包，
   // 每次 render 重新產生一份的話，計時器會一直握著第一次那份。
   // 它現在只用到 setIndex（本來就穩定）跟模組層級的 normalize，所以空相依是對的。
-  const reloadIndex = useCallback(() => {
-    fetch('/data/index.json', { cache: 'no-cache' })
+  const reloadIndex = useCallback((signal?: AbortSignal) => {
+    fetch('/data/index.json', { cache: 'no-cache', signal })
       .then((r) => {
         if (r.status === 304) return null
         if (!r.ok) return null
         return r.json()
       })
       .then((d) => {
-        if (d) setIndex(normalize(d))
+        if (d && !signal?.aborted) setIndex(normalize(d))
       })
       .catch(() => {})
   }, [])
 
   // 每 60 秒輪詢索引與即時狀態（自動化每 15 分鐘會刷新磁碟上的資料）
   useEffect(() => {
+    if (viewMode === 'mindmap') return
+    const controller = new AbortController()
     const timer = setInterval(() => {
-      reloadIndex()
+      reloadIndex(controller.signal)
       if (apiOk) {
-        fetch('/api/status').then((r) => r.ok ? r.json() : null)
+        fetch('/api/status', { signal: controller.signal }).then((r) => r.ok ? r.json() : null)
           .then((d) => {
+            if (controller.signal.aborted) return
             if (d?.tools) setLiveTools(d.tools)
-            setLiveProjects(statusProjects(d))
           }).catch(() => {})
       }
     }, 60000)
-    return () => clearInterval(timer)
-  }, [apiOk, reloadIndex])
+    return () => { controller.abort(); clearInterval(timer) }
+  }, [apiOk, reloadIndex, viewMode])
 
   const selected = useMemo(
     () => (selectedId ? index?.conversations.find((c) => c.id === selectedId) ?? null : null),
@@ -1157,17 +1162,20 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
 
 
   useEffect(() => {
-    fetch('/data/index.json', { cache: 'no-cache' })
+    if (viewMode === 'mindmap') return
+    const controller = new AbortController()
+    fetch('/data/index.json', { cache: 'no-cache', signal: controller.signal })
       .then((r) => {
         if (r.status === 304) return null
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         return r.json()
       })
       .then((d) => {
-        if (d) setIndex(normalize(d))
+        if (d && !controller.signal.aborted) setIndex(normalize(d))
       })
-      .catch((e) => setError(String(e)))
-  }, [])
+      .catch((e) => { if (!controller.signal.aborted) setError(String(e)) })
+    return () => controller.abort()
+  }, [viewMode])
 
   /**
    * 相依只看 id 與「有沒有訊息」，不看整個 selected 物件。
@@ -1182,6 +1190,7 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
    */
   const selectedHasMessages = selected?.hasMessages ?? false
   useEffect(() => {
+    if (viewMode === 'mindmap') return
     if (!selected) return
     // 這裡不再重寫 ac_selected：唯一的寫入點是 selectConversation。
     // 兩個地方都寫，回首頁清掉之後索引一重載又被這個 effect 寫回去。
@@ -1242,7 +1251,7 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
     return () => controller.abort()
     // selected 只在 id 或 hasMessages 變的時候才需要重載；見上面的說明。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, selectedHasMessages])
+  }, [selectedId, selectedHasMessages, viewMode])
 
   /**
    * 「一週未使用」的基準時刻。
@@ -1500,7 +1509,7 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
         ) : viewMode === 'opencode' ? (
           <OpenCodePanel />
         ) : viewMode === 'mindmap' ? (
-          <WorkMindMapView tools={liveTools ?? null} projects={preferredProjects(liveProjects, null)} />
+          <WorkMindMapView />
         ) : viewMode === 'office' ? (
           <Office tools={liveTools ?? {}} projects={[]} conversations={[]} onDispatch={openContinueWork} onPrepareConversation={prepareChatGPTConversation} busyId="" />
         ) : viewMode === 'rpg' ? (
@@ -1926,7 +1935,7 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
           ) : viewMode === 'opencode' ? (
             <OpenCodePanel />
           ) : viewMode === 'mindmap' ? (
-            <WorkMindMapView tools={liveTools ?? index.tools} projects={preferredProjects(liveProjects, index.projects)} />
+            <WorkMindMapView />
           ) : viewMode === 'office' ? (
             <Office
               tools={liveTools ?? index.tools}
@@ -2310,7 +2319,7 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
           detailTailError={selectedId === continueTarget.id ? detailTailError : ''}
         />
       )}
-      <footer className="flex flex-none items-center gap-4 overflow-x-auto border-t border-line px-4 py-1.5 text-xs">
+      {viewMode !== 'mindmap' && <footer className="flex flex-none items-center gap-4 overflow-x-auto border-t border-line px-4 py-1.5 text-xs">
         {Object.entries(liveTools ?? index.tools).map(([key, tool]) => (
           <span key={key} className="flex flex-none items-center gap-1.5" title={tool.evidence || tool.role}>
             <span className={`inline-block h-2 w-2 rounded-full ${STATUS_DOT[tool.status] || STATUS_DOT.unknown}`} />
@@ -2326,7 +2335,7 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
               title={t('ai-hub 每 15 分鐘自動掃描')}>
           {liveTools ? t('即時狀態 · ') : ''}{t('ai-hub 每 15 分鐘自動掃描')}
         </span>
-      </footer>
+      </footer>}
     </div>
   )
 }

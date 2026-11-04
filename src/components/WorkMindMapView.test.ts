@@ -9,7 +9,7 @@ describe('independent work map', () => {
   it('renders unavailable sources and an explicit refresh without starting a request', () => {
     const fetcher = vi.fn()
     vi.stubGlobal('fetch', fetcher)
-    const html = renderToStaticMarkup(createElement(WorkMindMapView, { tools: null, projects: null }))
+    const html = renderToStaticMarkup(createElement(WorkMindMapView))
     expect(html).toMatch(/更新任務資料|Refresh task data/)
     expect(html).toMatch(/尚未讀取任務資料|Task data has not been read/)
     expect(html).toMatch(/工具資料未取得|tool data unavailable/i)

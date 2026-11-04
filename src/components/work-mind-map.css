@@ -69,6 +69,8 @@
   position: relative; transform-origin: top left; min-width: 760px; isolation: isolate;
 }
 .wm-branches { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 0; overflow: visible; }
+.wm-observation { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; padding: .7rem 1rem; font-size: .75rem; color: var(--wm-muted, #94a3b8); border-bottom: 1px solid var(--wm-line, #334155); }
+.wm-observation button { padding: .4rem .7rem; border: 1px solid currentColor; border-radius: .5rem; }
 .wm-branch {
   fill: none; stroke: var(--wm-line); stroke-width: 1.6; stroke-linecap: round;
   vector-effect: non-scaling-stroke;

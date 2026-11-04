@@ -6,7 +6,8 @@ export interface WorkMindMapTask {
   tool: string | null
   task: string
   /** `unknown` covers unconfirmed records (including pending cancellations) and is never counted as work. */
-  state: 'running' | 'waiting' | 'unknown'
+  state: 'running' | 'waiting' | 'unknown' | 'done' | 'failed' | 'silent' | 'cancelled' | 'stopped' | 'idle'
+  detail?: string
 }
 
 export interface WorkMindMapTool {
@@ -18,6 +19,7 @@ export interface WorkMindMapTool {
   runningCount: number
   waitingCount: number
   unknownCount: number
+  runtimeActiveCount: number
   tasks: WorkMindMapTask[]
 }
 
@@ -28,6 +30,7 @@ export interface WorkMindMapProject {
   status: string
   next_step: string
   needs_handoff: boolean
+  updated_at?: string
 }
 
 export interface WorkMindMap {
@@ -49,6 +52,7 @@ export function buildWorkMindMap(
   tools: Record<string, ToolStatus>,
   projects: HubProject[],
   dispatches: DispatchRecord[],
+  runtimeSessions: DispatchRecord[] = [],
 ): WorkMindMap {
   const byTool = new Map<string | null, WorkMindMapTool>()
 
@@ -68,6 +72,7 @@ export function buildWorkMindMap(
         runningCount: 0,
         waitingCount: 0,
         unknownCount: 0,
+        runtimeActiveCount: 0,
         tasks: [],
       }
       byTool.set(key, node)
@@ -81,18 +86,31 @@ export function buildWorkMindMap(
   for (const dispatch of dispatches ?? []) {
     if (!dispatch || typeof dispatch !== 'object') continue
     const state = stateOf(dispatch)
-    if (state !== 'running' && state !== 'waiting' && state !== 'unknown') continue
+    if (state !== 'running' && state !== 'waiting' && state !== 'unknown' && !dispatch.runtimePhase) continue
     const key = toolKey(dispatch.tool)
     const node = ensureTool(key)
-    node.tasks.push({ id: text(dispatch.id), tool: key, task: text(dispatch.task), state })
+    const detail = dispatch.runtimePhase ? dispatch.state === 'stopped' ? dispatch.runtimePhase === 'ended' ? '停止紀錄已確認；原程序未觀察到。' : '停止紀錄已確認；目前無法查證原程序是否退出。'
+      : dispatch.state === 'failed' ? `有失敗終止回執：${dispatch.evidence?.terminal ?? ''}`
+        : dispatch.runtimePhase === 'ended' ? '已收到執行器回覆；工作成果仍未確認。'
+          : dispatch.runtimePhase === 'running' ? '原程序與工作單身分已核對。'
+            : '未觀察到已綁定原程序；缺少可信結束回執，結果待查。' : undefined
+    node.tasks.push({ id: text(dispatch.id), tool: key, task: text(dispatch.task), state, ...(detail ? { detail } : {}) })
     if (state === 'running') node.runningCount += 1
     else if (state === 'waiting') node.waitingCount += 1
     // An unconfirmed record is not work in progress and is not finished work either.
-    else node.unknownCount += 1
+    else if (state === 'unknown') node.unknownCount += 1
+  }
+  for (const session of runtimeSessions) {
+    const node = ensureTool(toolKey(session.tool))
+    const active = session.state === 'running' && session.evidence?.process === 'verified' && session.evidence.activityFresh === true
+    if (active) node.runtimeActiveCount += 1
+    node.tasks.push({ id: session.id, tool: toolKey(session.tool), task: session.task,
+      state: active ? 'running' : session.runtimePhase === 'idle' ? 'idle' : 'unknown',
+      detail: `工作階段回報 ${session.runtimeStatus ?? 'unknown'} · ${session.evidence?.producerUpdatedAt ?? '無回報時間'}${session.evidence?.producerAgeSeconds != null ? `（${session.evidence.producerAgeSeconds} 秒前）` : ''} · ${session.evidence?.process === 'verified' ? '程序身分吻合' : '程序身分未確認'}${active ? ' · 近期自述活動' : ' · 即時活動未確認'}` })
   }
 
   for (const node of byTool.values()) {
-    if (node.runningCount) node.status = 'running'
+    if (node.runningCount || node.runtimeActiveCount) node.status = 'running'
     else if (node.waitingCount) node.status = 'waiting'
   }
 
@@ -107,6 +125,7 @@ export function buildWorkMindMap(
         status: text(project.status, 'unknown'),
         next_step: text(project.next_step),
         needs_handoff: project.needs_handoff === true,
+        ...(project.updated_at ? { updated_at: project.updated_at } : {}),
       }
     }),
   }

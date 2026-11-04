@@ -103,6 +103,7 @@ import schedule  # noqa: E402
 import runtime_readiness  # noqa: E402
 from conversation_tail import ConversationTailError, load_indexed_tail  # noqa: E402
 from setup_catalog import setup_catalog  # noqa: E402
+from work_state import work_state_snapshot  # noqa: E402
 
 PORT = 5177
 
@@ -4230,6 +4231,10 @@ class Handler(BaseHTTPRequestHandler):
                 {**j, "desc": schedule.describe(j)} for j in schedule.load()]})
         if self.path == "/api/dispatches":
             return self.do_dispatches()
+        if self.path == "/api/work-state":
+            if not self._trusted_devspace_request():
+                return self._json({"ok": False, "error": "forbidden origin"}, 403)
+            return self._json(work_state_snapshot(self.REGISTRY))
         if self.path == "/api/dispatch/usage":
             return self.do_dispatch_usage()
         if self.path == "/api/remote":

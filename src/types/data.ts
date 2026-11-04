@@ -138,6 +138,13 @@ export interface DispatchRecord {
   followupOf?: string
   /** 排隊中、等這一輪結束才送出的補充 */
   pending?: string[]
+  /** Passive work-state evidence; a provider return is separate from delivery acceptance. */
+  runtimePhase?: 'running' | 'idle' | 'ended' | 'not_observed' | 'unverified'
+  runtimeStatus?: string
+  origin?: 'registry' | 'runtime_session'
+  taskOutcome?: 'unknown' | 'failed' | 'stopped' | 'blocked'
+  providerOutcome?: string
+  evidence?: { process: string; reason: string; terminal: string | null; terminalReason: string; producerUpdatedAt?: string | number | null; producerAgeSeconds?: number | null; activityFresh?: boolean }
 }
 
 export interface Message {
