@@ -15,6 +15,7 @@ import OpenCodePanel from '@/components/OpenCodePanel'
 import ConversationSync from '@/components/ConversationSync'
 import Office from '@/components/Office'
 import WorkMindMapView from '@/components/WorkMindMapView'
+import { preferredProjects, statusProjects } from '@/lib/workMindMap'
 import QuickDispatch from '@/components/QuickDispatch'
 import ContinueWorkDialog from '@/components/ContinueWorkDialog'
 import { canOpenContinueWork } from '@/lib/continuationHelp'
@@ -430,6 +431,12 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
   const [copied, setCopied] = useState('')
   const [apiOk, setApiOk] = useState(false)
   const [liveTools, setLiveTools] = useState<IndexData['tools'] | null>(null)
+  /**
+   * 同一個 /api/status 回應裡的專案清單。沒有這一份時，心智圖吃的是磁碟索引那份舊的；
+   * null 的意思只是「這次回應沒帶專案」，要退回 index.projects，不是「沒有專案」。
+   * 不另外開新的請求或輪詢，新舊都以 project.updated_at 為準。
+   */
+  const [liveProjects, setLiveProjects] = useState<IndexData['projects'] | null>(null)
   const [continueTarget, setContinueTarget] = useState<ConversationSummary | null>(null)
   const [toast, setToast] = useState('')
   /**
@@ -648,7 +655,10 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
       if (!r.ok) { setApiOk(false); return }
       setApiOk(true)
       fetch('/api/status').then((r2) => r2.ok ? r2.json() : null)
-        .then((d) => d?.tools && setLiveTools(d.tools)).catch(() => {})
+        .then((d) => {
+          if (d?.tools) setLiveTools(d.tools)
+          setLiveProjects(statusProjects(d))
+        }).catch(() => {})
     }).catch(() => setApiOk(false))
   }, [])
 
@@ -850,7 +860,10 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
       reloadIndex()
       if (apiOk) {
         fetch('/api/status').then((r) => r.ok ? r.json() : null)
-          .then((d) => d?.tools && setLiveTools(d.tools)).catch(() => {})
+          .then((d) => {
+            if (d?.tools) setLiveTools(d.tools)
+            setLiveProjects(statusProjects(d))
+          }).catch(() => {})
       }
     }, 60000)
     return () => clearInterval(timer)
@@ -1487,7 +1500,7 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
         ) : viewMode === 'opencode' ? (
           <OpenCodePanel />
         ) : viewMode === 'mindmap' ? (
-          <WorkMindMapView tools={liveTools ?? null} projects={null} />
+          <WorkMindMapView tools={liveTools ?? null} projects={preferredProjects(liveProjects, null)} />
         ) : viewMode === 'office' ? (
           <Office tools={liveTools ?? {}} projects={[]} conversations={[]} onDispatch={openContinueWork} onPrepareConversation={prepareChatGPTConversation} busyId="" />
         ) : viewMode === 'rpg' ? (
@@ -1913,7 +1926,7 @@ export default function Home({ onViewChange }: { onViewChange?: (view: Workbench
           ) : viewMode === 'opencode' ? (
             <OpenCodePanel />
           ) : viewMode === 'mindmap' ? (
-            <WorkMindMapView tools={liveTools ?? index.tools} projects={index.projects} />
+            <WorkMindMapView tools={liveTools ?? index.tools} projects={preferredProjects(liveProjects, index.projects)} />
           ) : viewMode === 'office' ? (
             <Office
               tools={liveTools ?? index.tools}

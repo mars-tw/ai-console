@@ -84,7 +84,7 @@ try {
   const tracked = execFileSync('git', ['ls-tree', '-r', '--name-only', '-z', commit], { cwd: root, encoding: 'utf8' }).split('\0').filter(Boolean)
   const included = tracked.filter((file) => (
     /^(electron\/[^/]+\.cjs|server\/[^/]+\.py|tools\/[^/]+\.(py|json)|build\/icon\.(ico|png)|docs\/[^/]+\.png)$/.test(file)
-    || ['README.md', 'LICENSE', 'licenses-ai-office-MIT.txt', 'docs/devspace-desktop.md', 'docs/chatgpt-conversation-workflow.md', 'docs/install-and-run.md', 'docs/quick-start.md', 'docs/releases/v1.7.0.md', 'docs/releases/v1.8.0.md', 'scripts/find-python.cjs'].includes(file)
+    || ['README.md', 'LICENSE', 'licenses-ai-office-MIT.txt', 'docs/devspace-desktop.md', 'docs/chatgpt-conversation-workflow.md', 'docs/install-and-run.md', 'docs/quick-start.md', 'docs/releases/v1.7.0.md', 'docs/releases/v1.8.0.md', 'docs/releases/v1.9.0.md', 'scripts/find-python.cjs'].includes(file)
   ))
   for (const file of included) copy(file)
   copy('dist', (relative) => relative !== 'data' && !relative.startsWith('data/'))

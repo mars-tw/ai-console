@@ -8,21 +8,25 @@ const SHEETS = new Map([
 
 interface Props {
   tool: string | null
+  /** 來自快照統計的節點狀態，不是工具可用性。 */
   status: string
+  /** 共用的動效暫停（隱藏／離開畫面／減少動態／使用者暫停／快照未確認）。 */
+  paused?: boolean
 }
 
 /** 4×3、每格 48px 的既有素材只作裝飾；任務狀態仍以文字及來源資料為準。 */
-export default function DragonAvatar({ tool, status }: Props) {
+export default function DragonAvatar({ tool, status, paused = false }: Props) {
   const [failedSource, setFailedSource] = useState<string | null>(null)
   const sheet = tool ? SHEETS.get(tool) : undefined
   const source = sheet ? `/office/sprites/${sheet}.png` : null
   const pose = status === 'running' ? 'running'
     : status === 'waiting' ? 'waiting'
-      : status === 'rate_limited' ? 'resting' : 'neutral'
+      : status === 'unknown' ? 'unknown'
+        : status === 'rate_limited' ? 'resting' : 'neutral'
   const frame = pose === 'running' ? 6 : pose === 'resting' ? 7 : 0
 
   return (
-    <span className={`wm-dragon wm-dragon--${pose}`} aria-hidden="true">
+    <span className={`wm-dragon wm-dragon--${pose}`} data-paused={paused} aria-hidden="true">
       <span className="wm-dragon-clip">
         {source && failedSource !== source
           ? <img className="wm-dragon-sheet" src={source} alt="" draggable={false} decoding="async" loading="lazy" style={{ left: `${-(frame % 4) * 48}px`, top: `${-Math.floor(frame / 4) * 48}px` }} onError={() => setFailedSource(source)} />
