@@ -178,18 +178,35 @@ class HealthIdentityTests(unittest.TestCase):
             context.__enter__.return_value.read.return_value = json.dumps(data).encode()
             return context
         with mock.patch.object(api, '_HEALTH_IDENTITY', identity), \
-             mock.patch.object(api.urllib.request, 'urlopen', return_value=response({'ok': True, **identity})):
+             mock.patch.object(api.urllib.request, 'build_opener') as build:
+            build.return_value.open.return_value = response({'ok': True, **identity})
             self.assertEqual(api._existing_server_status(), 'same')
         for data in ({'ok': True}, {'ok': True, **identity, 'appRootHash': 'different'}):
             with self.subTest(data=data), mock.patch.object(api, '_HEALTH_IDENTITY', identity), \
-                 mock.patch.object(api.urllib.request, 'urlopen', return_value=response(data)):
+                 mock.patch.object(api.urllib.request, 'build_opener') as build:
+                build.return_value.open.return_value = response(data)
                 self.assertEqual(api._existing_server_status(), 'unknown')
 
     def test_refusal_is_absent_but_timeout_is_unknown(self):
-        with mock.patch.object(api.urllib.request, 'urlopen', side_effect=api.urllib.error.URLError(ConnectionRefusedError())):
+        with mock.patch.object(api.urllib.request, 'build_opener') as build:
+            build.return_value.open.side_effect = api.urllib.error.URLError(ConnectionRefusedError())
             self.assertEqual(api._existing_server_status(), 'absent')
-        with mock.patch.object(api.urllib.request, 'urlopen', side_effect=TimeoutError()):
+        with mock.patch.object(api.urllib.request, 'build_opener') as build:
+            build.return_value.open.side_effect = TimeoutError()
             self.assertEqual(api._existing_server_status(), 'unknown')
+
+    def test_loopback_probe_bypasses_proxies_and_allows_delayed_windows_refusal(self):
+        def windows_refusal(_url, *, timeout):
+            # WSAECONNREFUSED has been observed after ~2.05 seconds on Windows.
+            if timeout <= 2.1:
+                raise api.urllib.error.URLError(TimeoutError())
+            raise api.urllib.error.URLError(ConnectionRefusedError())
+
+        with mock.patch.object(api.urllib.request, 'build_opener') as build:
+            build.return_value.open.side_effect = windows_refusal
+            self.assertEqual(api._existing_server_status(), 'absent')
+        self.assertEqual(build.call_args.args[0].proxies, {})
+        self.assertLessEqual(build.return_value.open.call_args.kwargs['timeout'], 5)
 
 
 class RemoteRejectTests(unittest.TestCase):

@@ -6577,8 +6577,10 @@ def _remote_start(token: str = "") -> dict:
         th = threading.Thread(target=srv.serve_forever, daemon=True, name="remote-http")
         th.start()
         _REMOTE.update(server=srv, thread=th, bind=bind, token=tok)
-        _save_remote({"token": tok, "bind": bind, "enabled": True,
-                      "created": d.get("created") or time.strftime("%Y%m%d-%H%M%S")})
+        updated = {"token": tok, "bind": bind, "enabled": True,
+                   "created": d.get("created") or time.strftime("%Y%m%d-%H%M%S")}
+        if updated != d:
+            _save_remote(updated)
         return {"ok": True, **_remote_status()}
 
 
@@ -6692,7 +6694,11 @@ class SingleInstanceServer(ThreadingHTTPServer):
 def _existing_server_status() -> str:
     """Return same / absent / unknown; an unrelated HTTP 200 is not identity."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/health", timeout=2) as r:
+        # Windows can take just over two seconds to report WSAECONNREFUSED on
+        # loopback. A two-second deadline turns an unused port into "unknown"
+        # and prevents the normal entrypoint from ever starting its server.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{PORT}/api/health", timeout=5) as r:
             if r.status != 200:
                 return "unknown"
             data = json.loads(r.read(4097))
@@ -6720,11 +6726,13 @@ if __name__ == "__main__":
         print(f"AI 控制台 API 已經在 http://127.0.0.1:{PORT} 執行，這次不重複啟動", flush=True)
         sys.exit(0)
     if existing != "absent":
+        print("AI_CONSOLE_STARTUP:HEALTH_UNVERIFIED", file=sys.stderr, flush=True)
         print(f"無法確認 {PORT} 埠的服務身分；未連接、未終止其他程序。", flush=True)
         sys.exit(1)
     try:
         srv = SingleInstanceServer(("127.0.0.1", PORT), Handler)
     except OSError as e:
+        print("AI_CONSOLE_STARTUP:PORT_BIND_FAILED", file=sys.stderr, flush=True)
         print(f"無法綁定 127.0.0.1:{PORT}：{e}\n"
               f"（可能有另一個實例正在啟動中，或該埠被其他程式佔用）", flush=True)
         sys.exit(1)

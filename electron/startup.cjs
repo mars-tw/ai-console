@@ -25,7 +25,8 @@ function identityMatches(data, expected) {
 /** Whole-response deadline, including peers that never send headers or trickle the body. */
 function probeHealth(http, url, expected, deadline, now = () => performance.now()) {
   return new Promise((resolve) => {
-    const remaining = Math.min(2000, Math.max(0, deadline - now()))
+    // Windows loopback refusal can arrive just after two seconds.
+    const remaining = Math.min(5000, Math.max(0, deadline - now()))
     if (!remaining) return resolve('conflict')
     let request
     let settled = false
@@ -65,6 +66,8 @@ async function ensureBackend({ probe, launch, now = () => performance.now(), sle
   if (first !== 'absent' || now() >= deadline) return { ok: false, reason: 'conflict' }
   let child
   try { child = launch() } catch { return { ok: false, reason: 'launch' } }
+  const childExited = () => child && (child.exitCode != null || child.signalCode != null || child.startupSpawnFailed)
+  const exitResult = () => ({ ok: false, reason: 'exit', code: child.startupFailureCode || 'BACKEND_EXITED' })
   const stopOwned = () => {
     try { if (child && child.exitCode == null && child.signalCode == null) child.kill() } catch { /* exited */ }
   }
@@ -73,11 +76,35 @@ async function ensureBackend({ probe, launch, now = () => performance.now(), sle
     if (now() >= deadline) break
     const state = await probe(deadline)
     if (state === 'match') return { ok: true, reused: false }
+    // A matching peer may have won the bind race. Otherwise a failed
+    // interpreter cannot become healthy by waiting out the deadline.
+    if (childExited()) return exitResult()
     if (state !== 'absent') { stopOwned(); return { ok: false, reason: 'conflict' } }
   }
   // This is only the child launched above, never a pre-existing listener.
   stopOwned()
   return { ok: false, reason: 'timeout' }
+}
+
+/** Read fixed startup codes only; never write arbitrary Python output to logs. */
+function captureStartupDiagnostics(child, log) {
+  const allowed = new Set(['HEALTH_UNVERIFIED', 'PORT_BIND_FAILED'])
+  let pending = ''
+  let reported = false
+  child.stderr?.on('data', (data) => {
+    pending = (pending + String(data)).slice(-4096)
+    const lines = pending.split(/\r?\n/)
+    pending = lines.pop() || ''
+    for (const line of lines) {
+      const code = line.startsWith('AI_CONSOLE_STARTUP:') ? line.slice('AI_CONSOLE_STARTUP:'.length) : ''
+      if (allowed.has(code)) {
+        child.startupFailureCode = code
+        log(`Python 啟動代碼：${code}`)
+        reported = true
+      }
+    }
+    if (!reported) { log('Python 啟動診斷：BACKEND_ERROR'); reported = true }
+  })
 }
 
 /** Only the current desktop main frame at the expected local origin may invoke IPC. */
@@ -89,4 +116,4 @@ function trustedSender(event, win, appURL) {
   } catch { return false }
 }
 
-module.exports = { expectedIdentity, identityMatches, probeHealth, ensureBackend, trustedSender }
+module.exports = { expectedIdentity, identityMatches, probeHealth, ensureBackend, captureStartupDiagnostics, trustedSender }

@@ -37,6 +37,32 @@ describe('Electron service identity and boundary', () => {
     expect(request.destroy).toHaveBeenCalledOnce()
   })
 
+  it('waits for the delayed Windows connection refusal instead of reporting a conflict', async () => {
+    vi.useFakeTimers()
+    try {
+      const request = Object.assign(new EventEmitter(), { destroy: vi.fn() })
+      const http = { get: () => {
+        setTimeout(() => request.emit('error', { code: 'ECONNREFUSED' }), 2100)
+        return request
+      } }
+      const result = startup.probeHealth(http, appURL, expected, 10000, () => 0)
+      await vi.advanceTimersByTimeAsync(2100)
+      await expect(result).resolves.toBe('absent')
+      expect(request.destroy).not.toHaveBeenCalled()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('still rejects a stalled peer at the five-second probe cap', async () => {
+    vi.useFakeTimers()
+    try {
+      const request = Object.assign(new EventEmitter(), { destroy: vi.fn() })
+      const result = startup.probeHealth({ get: () => request }, appURL, expected, 10000, () => 0)
+      await vi.advanceTimersByTimeAsync(5000)
+      await expect(result).resolves.toBe('conflict')
+      expect(request.destroy).toHaveBeenCalledOnce()
+    } finally { vi.useRealTimers() }
+  })
+
   it('closes an unexpected HTTP status instead of draining an unbounded body', async () => {
     const response = Object.assign(new EventEmitter(), { statusCode: 503, destroy: vi.fn() })
     const request = Object.assign(new EventEmitter(), { destroy: vi.fn() })
@@ -64,6 +90,71 @@ describe('Electron service identity and boundary', () => {
     expect(result).toEqual({ ok: false, reason: 'timeout' })
     expect(clock).toBeLessThanOrEqual(30000)
     expect(child.kill).toHaveBeenCalledOnce()
+  })
+
+  it('reports an exited owned child promptly after one final identity probe', async () => {
+    let clock = 0
+    const child = { exitCode: null as number | null, signalCode: null, startupFailureCode: 'HEALTH_UNVERIFIED', kill: vi.fn() }
+    const probe = vi.fn(async () => 'absent')
+    const result = await startup.ensureBackend({
+      now: () => clock,
+      sleep: async (ms: number) => { clock += ms; child.exitCode = 1 },
+      probe, launch: () => child,
+    })
+    expect(result).toEqual({ ok: false, reason: 'exit', code: 'HEALTH_UNVERIFIED' })
+    expect(clock).toBe(500)
+    expect(probe).toHaveBeenCalledTimes(2)
+    expect(child.kill).not.toHaveBeenCalled()
+  })
+
+  it('accepts an exact matching peer after the launched child exits in a bind race', async () => {
+    const child = { exitCode: 0, signalCode: null, kill: vi.fn() }
+    const probe = vi.fn().mockResolvedValueOnce('absent').mockResolvedValueOnce('match')
+    await expect(startup.ensureBackend({ probe, launch: () => child, sleep: async () => {} }))
+      .resolves.toEqual({ ok: true, reused: false })
+    expect(child.kill).not.toHaveBeenCalled()
+  })
+
+  it('does not wait out the full timeout after an interpreter spawn error', async () => {
+    const child = { exitCode: null, signalCode: null, startupSpawnFailed: true, startupFailureCode: 'SPAWN_FAILED', kill: vi.fn() }
+    await expect(startup.ensureBackend({ probe: async () => 'absent', launch: () => child, sleep: async () => {} }))
+      .resolves.toEqual({ ok: false, reason: 'exit', code: 'SPAWN_FAILED' })
+    expect(child.kill).not.toHaveBeenCalled()
+  })
+
+  it('logs only approved startup codes across split chunks and never raw diagnostic text', () => {
+    const stderr = new EventEmitter()
+    const child = { stderr, startupFailureCode: undefined as string | undefined }
+    const log = vi.fn()
+    startup.captureStartupDiagnostics(child, log)
+    stderr.emit('data', 'private-fixture-text\nAI_CONSOLE_START')
+    stderr.emit('data', 'UP:HEALTH_UNVERIFIED\r\nAI_CONSOLE_STARTUP:unapproved-fixture\n')
+    expect(child.startupFailureCode).toBe('HEALTH_UNVERIFIED')
+    expect(log.mock.calls.flat().join('\n')).not.toMatch(/private-fixture|unapproved-fixture/)
+    expect(log).toHaveBeenCalledWith('Python 啟動代碼：HEALTH_UNVERIFIED')
+  })
+
+  it('limits retained diagnostics without logging oversized Python output', () => {
+    const stderr = new EventEmitter()
+    const child = { stderr, startupFailureCode: undefined as string | undefined }
+    const log = vi.fn()
+    startup.captureStartupDiagnostics(child, log)
+    stderr.emit('data', 'private-fixture'.repeat(10000))
+    stderr.emit('data', '\nAI_CONSOLE_STARTUP:PORT_BIND_FAILED\n')
+    expect(child.startupFailureCode).toBe('PORT_BIND_FAILED')
+    expect(log.mock.calls.flat().join('\n')).not.toContain('private-fixture')
+  })
+
+  it('shows recovery for the observed failure instead of always requesting another download', () => {
+    const source = readFileSync(new URL('../../electron/main.cjs', import.meta.url), 'utf8')
+    const fn = source.match(/function errorPage\(reason, failure = ''\) \{[\s\S]*?\r?\n\}/)?.[0]
+    if (!fn) throw new Error('Cannot locate startup recovery page')
+    const render = runInNewContext(`${fn}\nerrorPage`, { app: { isPackaged: true }, LOG: 'fixture.log' }) as (reason: string, code: string) => string
+    for (const code of ['conflict', 'HEALTH_UNVERIFIED', 'PORT_BIND_FAILED', 'exit']) {
+      const html = decodeURIComponent(render('fixture', code))
+      expect(html).toContain('fixture.log')
+      expect(html).not.toContain('重新下載')
+    }
   })
 
   it('rejects other senders, subframes, foreign ports and mobile paths', () => {

@@ -1,10 +1,10 @@
 # 快速安裝與快速啟動
 
-適用 Windows 64 位元／AI Console v1.9.1。DevSpace 使用 Chrome ChatGPT「對話」中的 MCP 連線；OpenCode 從工作臺的獨立分頁開啟。
+適用 Windows 64 位元／AI Console v1.9.2。DevSpace 使用 Chrome ChatGPT「對話」中的 MCP 連線；OpenCode 從工作臺的獨立分頁開啟。
 
 ## 第一次使用
 
-1. 下載 [快速安裝包 v1.9.1](https://github.com/mars-tw/ai-console/releases/download/v1.9.1/ai-console-quick-start-v1.9.1.zip)，完整解壓縮。
+1. 下載 [快速安裝包 v1.9.2](https://github.com/mars-tw/ai-console/releases/download/v1.9.2/ai-console-quick-start-v1.9.2.zip)，完整解壓縮。
 2. 雙擊 **`快速安裝.cmd`**。畫面會依序顯示下載、SHA256 校驗、解壓縮、複製檔案、再次驗證、設定目前版本及建立捷徑的進度；未通過驗證前不會顯示完成。
 3. 控制台安裝並驗證完成後，選擇 **「現在設定 DevSpace」**，或 **「稍後設定，先開啟控制台」**。直接按 Enter 會選擇稍後設定。
 4. 選擇現在設定時，若缺少 Node.js、Git Bash 或 DevSpace，依視窗提示處理。全新設定會進入官方 `devspace init`，使用方式選 **ChatGPT**，再指定已存在的專案資料夾並完成自己的公開 HTTPS 入口及認證設定。
@@ -41,21 +41,21 @@ npm.cmd install --global opencode-ai@1.18.31
 
 完成 DevSpace 初始化並啟動本機 MCP 服務，在工作臺「OpenCode」分頁選擇專案與 SOL／ASTRA 預設模型，再按「開啟 OpenCode 對話」。第一次 MCP 連線會在瀏覽器開啟 DevSpace 授權頁，由你輸入初始化時的 owner 密碼並確認；回到 OpenCode 後，另依正常 Connect 流程登入 OpenAI。連線狀態以實際 bridge／MCP 心跳為準，服務停止、bridge 消失或重啟時可重新連接。模型是否可用，以實際回覆為準；服務健康檢查不會代你呼叫模型。
 
-v1.9.1 內含連接官方 DevSpace 的 bridge；OpenCode、Node.js、DevSpace 與模型帳號仍需另外準備。完整操作見 [DevSpace 與 OpenCode 說明](devspace-desktop.md)。
+v1.9.2 內含連接官方 DevSpace 的 bridge；OpenCode、Node.js、DevSpace 與模型帳號仍需另外準備。完整操作見 [DevSpace 與 OpenCode 說明](devspace-desktop.md)。
 
 ## 以後怎麼開
 
 雙擊桌面 **「DevSpace 控制台」**，或安裝包裡的 **`快速啟動.cmd`**，即可進入 DevSpace 分頁。日常啟動不會重新下載或安裝。
 
-若下載 [完整 Windows 免安裝包](https://github.com/mars-tw/ai-console/releases/download/v1.9.1/ai-console-win32-x64-v1.9.1.zip)，完整解壓縮後可直接雙擊 `快速啟動.cmd`；想建立正式安裝位置與捷徑，再按 `快速安裝.cmd`。完整包使用同資料夾內的程式，不必再次下載桌面包。
+若下載 [完整 Windows 免安裝包](https://github.com/mars-tw/ai-console/releases/download/v1.9.2/ai-console-win32-x64-v1.9.2.zip)，完整解壓縮後可直接雙擊 `快速啟動.cmd`；想建立正式安裝位置與捷徑，再按 `快速安裝.cmd`。完整包使用同資料夾內的程式，不必再次下載桌面包。
 
 ## 安裝位置與版本
 
-- 程式：`%LOCALAPPDATA%\Programs\AIConsole\versions\1.9.1\`
+- 程式：`%LOCALAPPDATA%\Programs\AIConsole\versions\1.9.2\`
 - 目前版本指標：`%LOCALAPPDATA%\Programs\AIConsole\current.json`
 - 安裝日誌：`%LOCALAPPDATA%\AIConsole\installer-logs\`
 
-控制台安裝到使用者目錄，不需要管理員權限；Node.js 或 Git 的系統安裝程式可能另外要求權限。新版使用獨立版本目錄，舊版保留；重跑同一版本會檢查檔案是否一致。從舊版升級時，請使用 v1.9.1 安裝包重新安裝，再開啟桌面捷徑。
+控制台安裝到使用者目錄，不需要管理員權限；Node.js 或 Git 的系統安裝程式可能另外要求權限。新版使用獨立版本目錄，舊版保留；重跑同一版本會檢查檔案是否一致。從舊版升級時，請使用 v1.9.2 安裝包重新安裝，再開啟桌面捷徑。
 
 快速安裝包首次需要網路下載完整程式。完整免安裝包已含 Electron 與 Python；DevSpace、OpenCode 或其他尚未安裝的工具仍可能需要網路。
 

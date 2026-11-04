@@ -12,7 +12,7 @@ const path = require('path')
 const fs = require('fs')
 const os = require('os')
 const http = require('http')
-const { expectedIdentity, probeHealth, ensureBackend, trustedSender } = require('./startup.cjs')
+const { expectedIdentity, probeHealth, ensureBackend, captureStartupDiagnostics, trustedSender } = require('./startup.cjs')
 
 // Windows 的通知中心（Action Center）依賴 AppUserModelId 來歸屬與顯示通知。
 // 如果沒有設定，Windows 無法識別發送通知的應用程式身份，導致 Toast 通知被系統靜默丟棄。
@@ -52,17 +52,25 @@ async function ensureServer() {
       const py = findPython()
       log('啟動本版伺服器')
       const child = spawn(py, ['-B', '-X', 'utf8', API], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
-      child.on('error', (e) => log(`spawn 失敗：${e.message}`))
+      child.on('error', () => {
+        child.startupSpawnFailed = true
+        child.startupFailureCode = 'SPAWN_FAILED'
+        log('Python 啟動代碼：SPAWN_FAILED')
+      })
       child.on('exit', (code, sig) => log(`Python 結束 code=${code} sig=${sig}`))
-      if (child.stderr) child.stderr.on('data', (d) => log(`python stderr: ${String(d).trim().slice(0, 500)}`))
+      captureStartupDiagnostics(child, log)
       child.unref()
       return child
     },
   })
 }
 
-function errorPage(reason) {
-  const recovery = app.isPackaged
+function errorPage(reason, failure = '') {
+  const recovery = failure === 'conflict' || failure === 'HEALTH_UNVERIFIED' || failure === 'PORT_BIND_FAILED'
+    ? '<p>請先關閉其他控制台版本，確認本機 5177 連接埠未被占用後重新開啟。</p>'
+    : failure === 'exit'
+      ? '<p>本機服務已停止。請查看下方啟動日誌的診斷代碼後重新開啟控制台。</p>'
+      : app.isPackaged
     ? '<p>Windows 版已內附 Python。請重新下載並完整解壓縮 Windows ZIP，再從解壓縮後的資料夾開啟控制台。</p><p><a href="https://github.com/mars-tw/ai-console/releases/latest" target="_blank" style="color:#7dd3fc">開啟 AI 控制台官方下載頁</a></p>'
     : '<p>原始碼開發版需要 Python 3.10 以上版本。請使用可用的 Python，或以 <code>AI_CONSOLE_PYTHON</code> 指定直譯器。</p><p><a href="https://www.python.org/downloads/" target="_blank" style="color:#7dd3fc">開啟 Python 官方下載頁</a></p>'
   const html = `<!doctype html><meta charset="utf-8">
@@ -342,10 +350,13 @@ async function createWindow() {
   const result = await ensureServer()
   if (!result.ok) {
     log('改顯示錯誤畫面')
-    const reason = result.reason === 'conflict'
-      ? '本機連接埠已被其他服務或不同版本使用，無法確認服務身分。'
-      : '嘗試啟動本機服務失敗，或它沒有在 30 秒內就緒。'
-    win.loadURL(errorPage(reason))
+    const failure = result.code || result.reason
+    const reason = result.reason === 'conflict' || result.code === 'HEALTH_UNVERIFIED' || result.code === 'PORT_BIND_FAILED'
+      ? '無法確認本機服務身分或連接埠狀態。'
+      : result.reason === 'exit'
+        ? '本機服務在啟動完成前已停止。'
+        : '嘗試啟動本機服務失敗，或它沒有在 30 秒內就緒。'
+    win.loadURL(errorPage(reason, failure === 'BACKEND_EXITED' ? 'exit' : failure))
     return
   }
   // 伺服器剛起來時偶爾第一次連線會被拒，載入失敗就重試幾次

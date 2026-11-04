@@ -20,13 +20,13 @@
 
 ## 下載與開始
 
-**[下載快速安裝包 v1.9.1](https://github.com/mars-tw/ai-console/releases/download/v1.9.1/ai-console-quick-start-v1.9.1.zip)**：解壓縮後雙擊 `快速安裝.cmd`，依提示完成準備；以後雙擊桌面「DevSpace 控制台」或 `快速啟動.cmd`。詳見 [快速開始說明](docs/quick-start.md)。
+**[下載快速安裝包 v1.9.2](https://github.com/mars-tw/ai-console/releases/download/v1.9.2/ai-console-quick-start-v1.9.2.zip)**：解壓縮後雙擊 `快速安裝.cmd`，依提示完成準備；以後雙擊桌面「DevSpace 控制台」或 `快速啟動.cmd`。詳見 [快速開始說明](docs/quick-start.md)。
 
 第一次使用請看 **[完整安裝與執行手冊](docs/install-and-run.md)**：從解壓縮、安裝 DevSpace、設定允許目錄，到在 ChatGPT 對話中使用 MCP，依序操作即可。
 
 ### Windows 一般使用者請下載這個
 
-**[⬇ 下載 Windows 免安裝版 v1.9.1（64 位元）](https://github.com/mars-tw/ai-console/releases/download/v1.9.1/ai-console-win32-x64-v1.9.1.zip)**
+**[⬇ 下載 Windows 免安裝版 v1.9.2（64 位元）](https://github.com/mars-tw/ai-console/releases/download/v1.9.2/ai-console-win32-x64-v1.9.2.zip)**
 
 1. 解壓縮整個 ZIP，再開啟資料夾裡的 `AI控制台.exe`。
 2. 按「接入 AI」，依畫面選擇電腦上的 AI、雲端服務或已有的工具。
@@ -43,7 +43,7 @@ Windows 發行包已包含控制台需要的 Python，不必另裝，也不會�
 <details>
 <summary>開發者：原始碼下載與自行建置</summary>
 
-[下載 v1.9.1 原始碼](https://github.com/mars-tw/ai-console/releases/download/v1.9.1/ai-console-source-v1.9.1.zip)。原始碼 ZIP 不是可直接執行的 Windows 程式；自行建置仍需 Node.js 與 Python，步驟見下方「快速開始」。
+[下載 v1.9.2 原始碼](https://github.com/mars-tw/ai-console/releases/download/v1.9.2/ai-console-source-v1.9.2.zip)。原始碼 ZIP 不是可直接執行的 Windows 程式；自行建置仍需 Node.js 與 Python，步驟見下方「快速開始」。
 
 </details>
 
@@ -52,6 +52,8 @@ Windows 發行包已包含控制台需要的 Python，不必另裝，也不會�
 **v1.9.0** 將獨立龍心智圖改為逐節點分支，加入搜尋、適合視窗與縮放操作；任務、龍角色與流動連線使用相同狀態快照。按「更新任務資料」才讀取一次。詳見 [v1.9.0 說明](docs/releases/v1.9.0.md)。v1.8.0 的服務身分檢查與派工安全邊界維持不變。
 
 **v1.9.1** 修正心智圖的真實狀態來源：以專用唯讀快照核對既有任務的結束證據與程序身分，分開呈現歷史派工和目前工具工作階段，並提供可停止的短期觀察。缺少回執會保留原因，不再把程序消失或一般輸出當成完成。詳見 [v1.9.1 說明](docs/releases/v1.9.1.md)。
+
+**v1.9.2** 修正 Windows 正式啟動時，兩秒自檢過早逾時造成服務退出的問題，並補強提前退出辨識及安全診斷。詳見 [v1.9.2 說明](docs/releases/v1.9.2.md)。
 
 快速安裝與快速啟動會校驗下載包、安裝到使用者目錄、建立捷徑並保留既有 DevSpace 設定。安裝完成與 DevSpace 設定狀態分開呈現，可選擇稍後設定並先開啟控制台。
 
@@ -318,8 +320,8 @@ src/                       # React + TypeScript + Tailwind 前端
 以下 `candidate-xxxx` 請換成打包輸出的實際目錄；此檢查不取代一般機密掃描。
 
 ```bash
-python scripts/audit_release.py release/candidates/candidate-xxxx/AI控制台-win32-x64 --kind windows --version 1.9.1
-python scripts/audit_release.py release/ai-console-source-v1.9.1.zip --kind source --version 1.9.1
+python scripts/audit_release.py release/candidates/candidate-xxxx/AI控制台-win32-x64 --kind windows --version 1.9.2
+python scripts/audit_release.py release/ai-console-source-v1.9.2.zip --kind source --version 1.9.2
 ```
 
 發佈者可加 `--check-local-pairing`，只在記憶體中比對本機配對碼是否誤入成品；一般檢查與測試不會讀取配對設定。

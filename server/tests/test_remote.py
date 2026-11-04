@@ -29,6 +29,39 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+class TestRemoteStartPersistence(unittest.TestCase):
+    """Restarting an unchanged remote service must preserve its stored bytes."""
+
+    def _start(self, stored, token=""):
+        state = {"server": None, "thread": None, "bind": "", "token": ""}
+        server = mock.Mock(server_address=("127.0.0.1", 5178))
+        with mock.patch.object(api, "_REMOTE", state), \
+             mock.patch.object(api, "_tailscale_ip", return_value="127.0.0.1"), \
+             mock.patch.object(api, "_load_remote", return_value=stored), \
+             mock.patch.object(api, "_save_remote") as save, \
+             mock.patch.object(api, "_remote_status", return_value={}), \
+             mock.patch.object(api, "ThreadingHTTPServer", return_value=server), \
+             mock.patch.object(api.threading, "Thread") as thread, \
+             mock.patch.object(api.RemoteHandler, "ALLOWED_ORIGINS", set()):
+            result = api._remote_start(token)
+            thread.return_value.start.assert_called_once_with()
+        self.assertTrue(result["ok"])
+        return save
+
+    def test_unchanged_settings_are_not_rewritten_on_start(self):
+        stored = {"token": "fixture-token", "bind": "127.0.0.1", "enabled": True,
+                  "created": "20261104-120000"}
+        self._start(stored).assert_not_called()
+
+    def test_changed_settings_are_still_saved(self):
+        stored = {"token": "fixture-token", "bind": "127.0.0.1", "enabled": False,
+                  "created": "20261104-120000"}
+        self._start(stored, "replacement-fixture").assert_called_once_with({
+            "token": "replacement-fixture", "bind": "127.0.0.1", "enabled": True,
+            "created": "20261104-120000",
+        })
+
+
 class TestRemoteServer(unittest.TestCase):
 
     def setUp(self):
